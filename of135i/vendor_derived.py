@@ -24,3 +24,21 @@ from __future__ import annotations
 #
 #   # SA-001 (docs/static-analysis.md) -- hypothesis
 #   NAME = value
+
+# SA-001 (docs/static-analysis.md) -- hypothesis
+COLD_ROUND_REG32_EXPECTED = 0x1D
+
+# SA-002 (docs/static-analysis.md) -- hypothesis
+REG101_LATCHED_BIT = 0x20
+
+# SA-002 (docs/static-analysis.md) -- hypothesis
+REG101_PRESENT_BIT = 0x08
+
+# SA-002 (docs/static-analysis.md) -- hypothesis
+REG101_MOTOR_BIT = 0x01
+
+# SA-002 (docs/static-analysis.md) -- hypothesis
+REG31_INSERT_MARK_MASK = 0x48
+
+# SA-002 (docs/static-analysis.md) -- hypothesis
+WATCH_REGS = (0x31, 0x32, 0x35, 0x37, 0x100, 0x101)
