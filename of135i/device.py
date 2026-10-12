@@ -49,7 +49,7 @@ from .safety import (
     OperationNotAllowedError, UnejectableStateError, SessionState, StartState, UnsafeStartStateError,
 )
 from .tables import Op, Phase
-from .usbio import EP_BULK_IN, EP_BULK_OUT, Of135iError, UsbIo
+from .usbio import EP_BULK_IN, EP_BULK_OUT, InterruptOverflowError, Of135iError, UsbIo
 
 log = logging.getLogger("of135i")
 
@@ -1395,6 +1395,38 @@ class Scanner:
             self.io.wait_reg(0x01, 0x20, timeout=timeout, mask=0x20)
         except Of135iError as e:
             log.warning("engine-idle wait: %s -- continuing", e)
+
+    def poll_buttons(self, strict_interrupts: bool = False) -> list[str]:
+        """Read-only: return the front-panel buttons seen right now.
+
+        Drains EP 0x83 (short timeout) and reads reg 0x31 once; never
+        writes, so it works in a read-only session and in the cold state
+        (reg 0x01 = 0x00, where no interrupts flow but reg 0x31 still
+        shows a press). Interrupt events come first, then a press
+        currently held according to reg 0x31 if not already reported;
+        the result is deduplicated. Names are from of135i.buttons
+        (Test 97). A press lasts at least 0.3 s, so a caller polling at
+        about 10 Hz catches it via reg 0x31 even without interrupts; the
+        same held press shows up in consecutive polls, so callers that
+        act on presses must edge-detect. If EP 0x83 is in the overflow
+        state the interrupt part is skipped (reg 0x31 still works), or
+        InterruptOverflowError is raised when ``strict_interrupts``.
+        """
+        from . import buttons
+
+        found: list[str] = []
+        events = self.io.drain_events(timeout_ms=50)
+        if events == "overflow" and strict_interrupts:
+            raise InterruptOverflowError()
+        if isinstance(events, list):
+            for ev in events:
+                name = buttons.decode_interrupt(ev)
+                if name not in found:
+                    found.append(name)
+        held = buttons.decode_reg31(self.io.read_reg(0x31))
+        if held is not None and held not in found:
+            found.append(held)
+        return found
 
     def is_magazine_present(self) -> bool:
         """Check the loader sensor (vendor INI: LoaderSensorReg=0x101,0x08).

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -1170,17 +1171,21 @@ def _cmd_eject(args: argparse.Namespace) -> int:
 
 
 def _cmd_watch(args: argparse.Namespace) -> int:
-    """Poll the button endpoint (reads only) and eject on the eject
-    button. The start state is checked read-only up front so an
-    unsafe scanner is refused immediately instead of at the first
-    button press; a failed eject ends the watch (the session is
-    failed; a further press must not send anything)."""
+    """Poll the buttons (reads only) and eject on the eject button.
+    Presses are seen via the EP 0x83 interrupt and via reg 0x31 (Test
+    97). The start state is checked read-only up front so an unsafe
+    scanner is refused immediately instead of at the first button press;
+    a failed eject ends the watch (the session is failed; a further
+    press must not send anything). Only "eject" ever acts, and only
+    with a magazine present; other buttons are printed."""
     def body(scanner: Scanner) -> int:
         scanner.check_start_state()
         print("watching for button events (Ctrl+C to stop)", flush=True)
+        previous: set[str] = set()
         while True:
             try:
-                button = scanner.io.read_button(timeout_ms=500)
+                pressed = scanner.poll_buttons(strict_interrupts=True)
+                time.sleep(0.05)
             except KeyboardInterrupt:
                 # Idle wait interrupted: nothing was in progress.
                 print("\nstopped")
@@ -1188,24 +1193,47 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             except InterruptOverflowError as e:
                 print(f"cannot watch: {e}", file=sys.stderr)
                 return 1
-            if button is None:
-                continue
-            if button == 0x48:
-                print("eject button pressed", flush=True)
-                if scanner.is_magazine_present():
-                    scanner.eject()
-                    print("ejected", flush=True)
+            for name in pressed:
+                if name in previous:
+                    continue  # same held press, already handled
+                if name.startswith("unknown-"):
+                    print(f"other event 0x{name[len('unknown-0x'):]}", flush=True)
+                elif name == "eject":
+                    print("eject button pressed", flush=True)
+                    if scanner.is_magazine_present():
+                        scanner.eject()
+                        print("ejected", flush=True)
+                    else:
+                        print("magazine not detected, ignoring", flush=True)
                 else:
-                    print("magazine not detected, ignoring", flush=True)
-            elif button == 0x04:
-                if scanner.is_magazine_present():
-                    print("magazine inserted", flush=True)
-                else:
-                    print("magazine removed", flush=True)
-            else:
-                print(f"unknown event: 0x{button:02x}", flush=True)
+                    print(f"{name} button pressed (no action)", flush=True)
+            previous = set(pressed)
 
     return _run_writing_session(body)
+
+
+def _cmd_buttons(args: argparse.Namespace) -> int:
+    """Read-only: print each front-panel button press with a timestamp
+    until Ctrl-C or --duration seconds. Works on a cold scanner too."""
+    try:
+        with Scanner(UsbIo.open(readonly=True)) as scanner:
+            print("reading buttons (Ctrl+C to stop)", flush=True)
+            end = None if args.duration is None else time.monotonic() + args.duration
+            previous: set[str] = set()
+            try:
+                while end is None or time.monotonic() < end:
+                    pressed = scanner.poll_buttons()
+                    for name in pressed:
+                        if name not in previous:
+                            print(f"{time.strftime('%H:%M:%S')} {name}", flush=True)
+                    previous = set(pressed)
+                    time.sleep(0.05)
+            except KeyboardInterrupt:
+                print("\nstopped")
+    except Of135iError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _not_wired_yet(args: argparse.Namespace) -> int:
@@ -1321,8 +1349,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="read and print status registers")
     p_status.set_defaults(func=_cmd_status)
 
-    p_watch = sub.add_parser("watch", help="poll buttons and eject on button press")
+    p_watch = sub.add_parser("watch", help="poll buttons; eject on the eject button")
     p_watch.set_defaults(func=_cmd_watch)
+
+    p_buttons = sub.add_parser(
+        "buttons", help="read-only: print front-panel button presses")
+    p_buttons.add_argument("--duration", type=float, metavar="S",
+        help="stop after S seconds (default: until Ctrl-C)")
+    p_buttons.set_defaults(func=_cmd_buttons)
 
     p_doctor = sub.add_parser(
         "doctor", help="read-only hardware health report (no motor/register writes)")

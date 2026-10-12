@@ -461,7 +461,8 @@ Test 32–33).
 ```bash
 .venv/bin/python -m of135i status                  # registers, loader sensor, button (read-only)
 .venv/bin/python -m of135i doctor --json report.json   # full read-only health report
-.venv/bin/python -m of135i watch                   # ejects on a hardware button press
+.venv/bin/python -m of135i watch                   # ejects on the Eject button only; prints other buttons
+.venv/bin/python -m of135i buttons [--duration S]  # read-only: print button presses
 ```
 
 `doctor` is strictly read-only on the wire (USB control reads and
