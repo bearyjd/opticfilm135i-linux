@@ -987,6 +987,8 @@ def _cold_homing_round(entries: list[OpEntry]) -> None:
     _read_status_word(entries)
 
     _cold_motor_move(entries, 0x1A22, full_speed_regs=True)
+    # SA-001: set bit 0x02 of reg 0x32 again before the eject move.
+    _rmw(entries, 0x32, 0xFF, 0x02)
     _cold_motor_move(entries, 0x0C12, full_speed_regs=False)
 
     _write_regs(entries, [(0x09, 0x00)])

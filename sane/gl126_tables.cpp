@@ -23908,8 +23908,8 @@ static const std::uint8_t MAGAZINE_COLD_INIT_OPS_DATA[10554] = {
     0x20, 0x03, 0x0f, 0x01, 0x09, 0x00,
 };
 
-/* magazine / cold_init: op program, 201 ops. */
-static const Op MAGAZINE_COLD_INIT_OPS[201] = {
+/* magazine / cold_init: op program, 204 ops. */
+static const Op MAGAZINE_COLD_INIT_OPS[204] = {
     {OpKind::Read, 0x0c, 0x008a, 0x26fe, nullptr, 1, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x0c, 0x008b, 0x26fe, nullptr, 0, 0, 0x00, 0x00, 0},
     {OpKind::Read, 0x04, 0x018e, 0x0122, nullptr, 2, 0, 0x00, 0x00, 0},
@@ -23970,6 +23970,7 @@ static const Op MAGAZINE_COLD_INIT_OPS[201] = {
     {OpKind::BulkOut, 0x00, 0x0000, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 1946, 512, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x04, 0x0083, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 2458, 2, 0, 0x00, 0x00, 0},
     {OpKind::PollMasked, 0x04, 0x018e, 0x0122, nullptr, 2, 0, 0xff, 0xf8, 30000},  // fail-closed motor completion: a timeout ends the sequence, nothing further sent
+    {OpKind::ReadModifyWrite, 0x04, 0x008e, 0x3222, nullptr, 2, 0, 0xff, 0x02, 0},
     {OpKind::Write, 0x04, 0x0083, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 2460, 2, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x04, 0x0083, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 2462, 12, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x04, 0x0082, 0x0001, MAGAZINE_COLD_INIT_OPS_DATA + 2474, 8, 0, 0x00, 0x00, 0},
@@ -24035,6 +24036,7 @@ static const Op MAGAZINE_COLD_INIT_OPS[201] = {
     {OpKind::BulkOut, 0x00, 0x0000, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 5464, 512, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x04, 0x0083, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 5976, 2, 0, 0x00, 0x00, 0},
     {OpKind::PollMasked, 0x04, 0x018e, 0x0122, nullptr, 2, 0, 0xff, 0xf8, 30000},  // fail-closed motor completion: a timeout ends the sequence, nothing further sent
+    {OpKind::ReadModifyWrite, 0x04, 0x008e, 0x3222, nullptr, 2, 0, 0xff, 0x02, 0},
     {OpKind::Write, 0x04, 0x0083, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 5978, 2, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x04, 0x0083, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 5980, 12, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x04, 0x0082, 0x0001, MAGAZINE_COLD_INIT_OPS_DATA + 5992, 8, 0, 0x00, 0x00, 0},
@@ -24100,6 +24102,7 @@ static const Op MAGAZINE_COLD_INIT_OPS[201] = {
     {OpKind::BulkOut, 0x00, 0x0000, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 8982, 512, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x04, 0x0083, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 9494, 2, 0, 0x00, 0x00, 0},
     {OpKind::PollMasked, 0x04, 0x018e, 0x0122, nullptr, 2, 0, 0xff, 0xf8, 30000},  // fail-closed motor completion: a timeout ends the sequence, nothing further sent
+    {OpKind::ReadModifyWrite, 0x04, 0x008e, 0x3222, nullptr, 2, 0, 0xff, 0x02, 0},
     {OpKind::Write, 0x04, 0x0083, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 9496, 2, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x04, 0x0083, 0x0000, MAGAZINE_COLD_INIT_OPS_DATA + 9498, 12, 0, 0x00, 0x00, 0},
     {OpKind::Write, 0x04, 0x0082, 0x0001, MAGAZINE_COLD_INIT_OPS_DATA + 9510, 8, 0, 0x00, 0x00, 0},
@@ -24967,7 +24970,7 @@ static const Op MAGAZINE_EJECT_OPS[11] = {
 };
 
 const OpProgram MAGAZINE_PROGRAMS[5] = {
-    {"cold_init", MAGAZINE_COLD_INIT_OPS, 201, nullptr, 0, nullptr, 0},
+    {"cold_init", MAGAZINE_COLD_INIT_OPS, 204, nullptr, 0, nullptr, 0},
     {"open", MAGAZINE_OPEN_OPS, 51, nullptr, 0, nullptr, 0},
     {"jog", MAGAZINE_JOG_OPS, 86, nullptr, 0, nullptr, 0},
     {"load", MAGAZINE_LOAD_OPS, 71, nullptr, 0, nullptr, 0},

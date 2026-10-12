@@ -212,17 +212,16 @@ COLD_READY_TIMEOUT = 1.5
 # nine observations across three cold starts (docs/test-log.md Tests 77,
 # 78).
 #
-# The likely reason is visible in this very function: 0x1f has bit 0x02
-# set, and the last thing the round writes to reg 0x32 before the settle
-# is `val32 & ~0x02`, which CLEARS it. Unless the hardware sets that bit
-# back by itself, the condition is unreachable by construction, and the
-# 0x1f almost certainly comes from reading the capture at a point where
-# the bit was still set. The condition is left ALONE -- which of 0x1f and
-# 0x1d is correct is not established, and guessing would be worse than
-# waiting. Only the waiting is shortened, and the mismatch keeps being
-# logged. The motor completion that precedes this settle has already
-# confirmed the move finished, so this is a secondary check, not the one
-# that proves the transport is done.
+# Cause (docs/static-analysis.md SA-001, Test 79): 0x1f has bit 0x02 set,
+# and until 2026-10-12 this round dropped the vendor's write that sets
+# that bit again between move 2 and move 3 (our own captures show it in
+# every round), so the last reg 0x32 write before the settle CLEARED it
+# and 0x1f was unreachable. The write is now in place, so reg 0x32 is
+# expected to read 0x1f on the first settle read; hardware confirmation
+# is pending. The constants below are deliberately unchanged (one
+# variable at a time). The motor completion that precedes this settle has
+# already confirmed the move finished, so this is a secondary check, not
+# the one that proves the transport is done.
 COLD_SETTLE_TIMEOUT = 0.25
 COLD_SETTLE_INTERVAL = 0.05
 
@@ -1348,6 +1347,16 @@ class Scanner:
         # ---- move 2 (full speed-profile rewrite) ------------------------
         self._cold_motor_move(FEEDL_1_2, full_speed_regs=True,
                               label=f"{self.session.phase} move 2/3 (feed)")
+
+        # ---- between move 2 and move 3: set bit 0x02 of reg 0x32 again ----
+        # The vendor does this in every round of both starts we have
+        # captured (01-init, 2026-09-07; also in the capture-replayed JOG
+        # table, tables_load.py). It was missing from this hand-written
+        # round (docs/static-analysis.md SA-001): without it the last
+        # reg 0x32 write is the `& ~0x02` above and the settle check below
+        # can never see 0x1f (Test 79).
+        val32 = self.io.read_reg(0x32)
+        self.io.write_regs([(0x32, (val32 | 0x02) & 0xFF)])
 
         # ---- move 3 ------------------------------------------------------
         self._cold_motor_move(FEEDL_3, full_speed_regs=False,

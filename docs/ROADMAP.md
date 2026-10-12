@@ -554,7 +554,7 @@ promised scope require them. VueScan stays out of public docs.
 - **Offline half DONE 2026-09-13.** Five op programs (`cold_init`, `open`,
   `jog`, `load`, `eject`), each proven to put exactly the Python driver's
   transfers on the wire in the driver's order
-  (`tests/test_sane_ops.py`: 218 / 199 / 12 transfers); the hooks, the
+  (`tests/test_sane_ops.py`: 224 (218 before the 2026-10-12 SA-001 write) / 199 / 12 transfers); the hooks, the
   state machine and the on-disk "a release is pending" mark that lets
   `scanimage` load in two invocations (`tests/test_sane_magazine.py`,
   `tests/test_sane_lock.py`). Nothing has driven the motor from C++.
