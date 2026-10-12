@@ -5653,6 +5653,14 @@ the insert event on this same endpoint triggers the vendor's LOAD
 directly. It is precisely why our two-step protocol exists — SANE has no
 background thread, so we run LOAD at the next call instead.
 
+**Correction, 2026-10-12 (Test 97).** The statement that every interrupt
+is 0x48 "whatever caused it, a press or an insert" is not reproduced. The
+interrupt byte is a button code (Eject 0x48, Positive 0x20, Negative 0x40,
+Custom 0x28), and a warm magazine insert gave no interrupt. In these
+captures the "insert" events were accompanied by reg 0x31 = 0xb6, the
+Eject code, so they were most likely Eject presses inside the
+press, pull, push cycles. See Test 97.
+
 ### Test 82: one strip through both 3600 dpi profiles, against a vendor reference taken before the project began
 
 Two questions in one session, both about where a colour cast originates.
@@ -6802,3 +6810,121 @@ debian-11-mini, debian-12-full, fedora-39-clang, ubuntu-23.10,
 alpine-3.18-musl), so the local replay's `escl_test` stop did not occur
 there. v6 has still not been run on hardware, review has not started and
 nothing is merged.
+
+### Test 97: front-panel buttons and magazine insert, read-only register watch (2026-10-12)
+
+**Purpose.** Settle SA-002 (docs/static-analysis.md): what does the bare
+0x48 interrupt on EP 0x83 mean, and does a magazine insert produce an
+interrupt at all? Hypotheses under test: reg 0x101 bit 0x20 = "latched"
+tells a press from an insert; reg 0x31 bits 0x48 are an insert marker.
+
+**Method.** `tools/watch_events.py` on the reference host: a read-only
+session (the safety layer refuses every OUT transfer), polling regs
+0x31/0x32/0x35/0x37/0x100/0x101 every 0.1 s plus EP 0x83 with a 50 ms
+timeout, printing only changes and interrupts. No register was written
+and no motor command was sent; nothing moved. Three runs, one per scanner
+state. The unit has five buttons (Eject, Positive, Negative, Custom,
+Power); Power was deliberately not pressed because it would cut USB.
+
+**Part A -- cold scanner (reg 0x01 = 0x00).** Magazine inserted, pulled,
+inserted: no interrupt. Presence tracked in three registers at once:
+
+| register | magazine out | magazine in |
+|---|---|---|
+| 0x101 | 0x40 | 0x48 (bit 0x08) |
+| 0x100 | 0x70 | 0xf0 (bit 0x80) |
+| 0x32 | 0xc2 | 0xc6 (bit 0x04) |
+
+Reg 0x31 unchanged by the magazine. The four buttons pressed one by one
+gave no interrupts in the cold state, but reg 0x31 (idle 0xfe) dropped
+bits for about 0.3 to 0.9 s per press:
+
+| button | reg 0x31 | bits cleared |
+|---|---|---|
+| Eject | 0xb6 | 0x48 |
+| Positive | 0xde | 0x20 |
+| Negative | 0xbe | 0x40 |
+| Custom | 0xd6 | 0x28 |
+
+**Part B -- after `of135i status && of135i load` from cold** (load OK,
+button light blue; reg 0x01 = 0x22, reg 0x101 = 0xdc). Every press now
+also produced exactly one interrupt byte on EP 0x83, equal to the bits
+cleared in reg 0x31:
+
+| button | interrupt byte | reg 0x31 |
+|---|---|---|
+| Eject | 0x48 | 0xb6 |
+| Positive | 0x20 | 0xde |
+| Negative | 0x40 | 0xbe |
+| Custom | 0x28 | 0xd6 |
+
+Nothing moved (no application commanded an eject). Reg 0x101 was
+unchanged by the presses.
+
+**Part C -- after `of135i eject`.** Reg 0x101 = 0xfc: bit 0x20 is SET
+here, whereas it was clear after load (0xdc). The magazine was pulled out
+and pushed back to the stop in this warm state: no interrupt, reg 0x31
+unchanged. Reg 0x32 went 0x1f -> 0x5b on removal (bit 0x40 set, bit 0x04
+cleared) and back to 0x1f on insert; reg 0x100 0xf0 -> 0x70 -> 0xf0; reg
+0x101 0xfc -> 0xf4 -> 0xfc.
+
+**Conclusions.**
+
+1. The interrupt byte is a **button code**: the bits a press clears in
+   reg 0x31. 0x48 is the Eject button, not a generic "look" notification.
+   Interrupts only flow once the scanner is initialised.
+2. A magazine insert or removal produced **no interrupt** here. It is
+   visible by polling: reg 0x32 bit 0x40 (set = removed, falls on insert)
+   plus the presence bits above. This matches the vendor DLL's 0x1436-only
+   poll of reg 0x32 bit 0x40 (SA-002).
+3. The buttons can be read by polling reg 0x31 even without interrupts.
+   This is our own measurement, so a SANE sensor option (scanbd) may use it.
+4. SA-002's hypothesis "reg 0x101 bit 0x20 = latched" is **refuted**: the
+   bit is set after eject and clear after load, if anything the opposite.
+   Its meaning is unknown.
+5. Test 81's statement that inserts produced 0x48 is not reproduced (see
+   the correction note there).
+
+**Open.** The Power button; whether an insert ever produces an interrupt
+under the vendor's own initialisation (n = 1 here).
+
+**Provenance.** Raw logs in the private analysis area, `watch-20261012/`
+(`del-a-kall.log`, `del-b-laddad.log`, `del-c-utmatad.log`). Read-only;
+no writes to the device.
+
+### Test 98: the cold-start fix on hardware — Python and SANE, settle reads 0x1f (2026-10-12)
+
+**Purpose.** Confirm SA-001 (docs/static-analysis.md): with the dropped
+reg 0x32 write restored (commit 11f28f3: `reg 0x32 |= 0x02` between move 2
+and move 3 of each cold homing round), the cold-start settle check should
+read 0x1f on its first poll. Every earlier cold start (Tests 77-79) logged
+three "settle poll did not reach" warnings reading 0x1d.
+
+**Part 1 -- Python driver.** Power-cycled (reg 0x01 = 0x00), then
+`of135i -v status && of135i -v load`. Three homing rounds, **zero** settle
+warnings. Load normal (feed f455, traverse dc55); reg 0x32 before/after the
+reinsert 0x1f / 0x1f. Then `of135i eject`, normal.
+
+**Part 2 -- SANE backend.** Rebuilt backend installed
+(`sudo tools/sane_install.sh install`; status "identical to the current
+build"), power-cycled, then
+`SANE_DEBUG_GENESYS=4 scanimage -d genesys:libusb:001:008 -n --load-film`.
+cold_init settle polls (ops 70/71, 136/137, 202/203): 0x35 = 0xbb and
+0x32 = 0x1f on the **first** poll, 4 ms each (Test 79: op 70 read
+0x1d/0x1d after 256 ms). Motor completions unchanged (0xd9 -> 0xf8,
+1.0-1.9 s). Jog normal, "unknown -> released", sensor edge after ~6.9 s,
+load feed f4 on the first poll, traverse dd -> dc in 25 ms,
+"released -> loaded". Then `scanimage -n --eject-film`, normal.
+
+**Sound.** Normal in all motor steps (Christian).
+
+**Result: PASS (n = 1 per implementation).** The settle read now succeeds
+immediately in both implementations; the cold start is also shorter by
+about 0.25 s per round (about 0.75 s in total), a secondary effect.
+
+**Operator note.** Plain `scanimage -n --load-film` without `-d` picked a
+v4l webcam as the default device on this host ("unrecognized option
+'--load-film'"); always pass `-d genesys:libusb:<bus>:<dev>`.
+
+**Provenance.** Logs in the private analysis area, `watch-20261012/`
+(`t98-python-load.log`, `t98-sane-load.log`).

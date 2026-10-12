@@ -554,7 +554,7 @@ promised scope require them. VueScan stays out of public docs.
 - **Offline half DONE 2026-09-13.** Five op programs (`cold_init`, `open`,
   `jog`, `load`, `eject`), each proven to put exactly the Python driver's
   transfers on the wire in the driver's order
-  (`tests/test_sane_ops.py`: 218 / 199 / 12 transfers); the hooks, the
+  (`tests/test_sane_ops.py`: 224 (218 before the 2026-10-12 SA-001 write) / 199 / 12 transfers); the hooks, the
   state machine and the on-disk "a release is pending" mark that lets
   `scanimage` load in two invocations (`tests/test_sane_magazine.py`,
   `tests/test_sane_lock.py`). Nothing has driven the motor from C++.
@@ -956,8 +956,9 @@ acted on by the application, not by the firmware. Consequences:
   (observed 2026-09-13): the operator pulls the magazine out and pushes
   it back to the stop, and the load runs with no button pressed. This is
   the operator-side confirmation of the mechanism `docs/sane-wp4-
-  magazine.md` describes from the captures — the 0x48 insert event on the
-  same endpoint triggers the vendor's LOAD directly, which is precisely
+  magazine.md` describes from the captures — the vendor's LOAD is
+  triggered directly by the insert (Test 97, 2026-10-12: the insert itself
+  gave no interrupt here; it is seen by polling reg 0x32 bit 0x40), which is precisely
   why our two-step protocol exists: SANE has no background thread, so we
   run LOAD at the next call instead. Same endpoint, same reason.
 - **That measurement has now been made** (Test 81, 2026-09-13). A press
@@ -965,10 +966,9 @@ acted on by the application, not by the firmware. Consequences:
   reacts 0.6 s later with control writes that appear nowhere else in the
   capture; the magazine then drives out and the button's light goes from
   blue to orange. The interrupt precedes every command, so the press
-  itself is what is reported. **Seven events across three captures, all
-  0x48**, whether caused by a press or by an insert: the notification
-  carries no event type, and the vendor's application discriminates by
-  reading registers afterwards. A watcher must do the same. It must also
+  itself is what is reported. *Corrected 2026-10-12 (Test 97): the byte is
+  a button code, 0x48 = Eject, Positive 0x20, Negative 0x40, Custom 0x28;
+  inserts gave no interrupt and are seen by polling reg 0x32.* A watcher must also
   re-arm quickly — the application re-submits its interrupt read 0.7–1.8 s
   after each completion; whether the device stores a notification that
   arrives inside that window is not established, so a watcher that

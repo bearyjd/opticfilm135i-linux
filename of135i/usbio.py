@@ -355,7 +355,8 @@ class UsbIo:
     def read_button(self, timeout_ms: int = 100) -> int | None:
         """Read one event byte from the interrupt endpoint (EP 0x83).
 
-        Known codes: 0x48 = eject button, 0x04 = loader sensor event.
+        The byte is a button code (Test 97, of135i.buttons): 0x48 eject,
+        0x20 positive, 0x40 negative, 0x28 custom.
         Returns None on timeout (no event pending) rather than raising,
         since the interrupt endpoint is expected to be idle most of
         the time. Raises InterruptOverflowError when the scanner

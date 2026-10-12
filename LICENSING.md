@@ -19,3 +19,11 @@ The documentation (CC BY 4.0) and the protocol facts are usable directly, and
 the standalone driver code may be used under MIT — in both cases with credit to
 Christian Gillinger. The `sane/` backend is GPL; treat it as a reference
 implementation, not as something to include in a closed-source product.
+
+## Interoperability analysis
+
+Parts of the standalone driver may use facts (register values, conditions,
+orderings) learned by analysing the vendor's Windows software for
+interoperability. No vendor code or code structure is copied. Such facts are
+isolated in `of135i/vendor_derived.py` and documented in
+`docs/static-analysis.md`; the SANE backend uses none of them.

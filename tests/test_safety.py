@@ -301,6 +301,8 @@ class FakeUsbDevice:
         if endpoint == 0x83:
             if self.button_events:
                 ev = self.button_events.popleft()
+                if ev is None:      # idle gap: ends one drain_events() pass
+                    raise _usb_timeout()
                 if isinstance(ev, BaseException):
                     raise ev
                 return bytes([ev])
@@ -2038,19 +2040,21 @@ def test_cli_eject_and_watch_paths():
 
     # watch: button -> eject -> Ctrl-C while idle -> clean exit 0.
     fake = FakeUsbDevice(reg01=0x22)
-    fake.button_events.extend([0x48, KeyboardInterrupt()])
+    fake.regs[0x31] = 0xFE      # buttons idle (watch also polls reg 0x31)
+    fake.button_events.extend([0x48, None, KeyboardInterrupt()])
     with cli_over(fake):
         code, so, se = _cli(["watch"])
     assert code == 0 and fake.pulses == 1 and "ejected" in so, (code, so, se)
 
     # watch: eject fails on the button press -> the watch ends, no second attempt.
     fake = FakeUsbDevice(reg01=0x22)
-    fake.button_events.extend([0x48, 0x48, 0x48])
+    fake.regs[0x31] = 0xFE
+    fake.button_events.extend([0x48, None, 0x48, None, 0x48])
     fake.fault = lambda ev: _usb_timeout() if ev.get("pulse") else None
     with cli_over(fake) as opened:
         code, so, se = _cli(["watch"])
     assert code == 1 and opened[0].session.state is SessionState.FAILED
-    assert len(fake.button_events) == 2, "watch kept polling after a failed eject"
+    assert len(fake.button_events) == 3, "watch kept polling after a failed eject"
     _assert_power_cycle_message(se)
     print("test_cli_eject_and_watch_paths OK")
 

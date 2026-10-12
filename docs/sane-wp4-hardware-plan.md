@@ -13,7 +13,7 @@ does not piggy-back on another session's run.
 
 Nothing here is a new motor sequence. Every transfer is the Python
 driver's own, proven byte-for-byte identical offline
-(`tests/test_sane_ops.py`: `cold_init` 218 transfers, `open`/`jog`/`load`
+(`tests/test_sane_ops.py`: `cold_init` 224 transfers (218 before the SA-001 write was added, 2026-10-12), `open`/`jog`/`load`
 199, `eject` 12). What has never happened is a C++ process issuing them.
 
 ---

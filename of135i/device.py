@@ -49,7 +49,7 @@ from .safety import (
     OperationNotAllowedError, UnejectableStateError, SessionState, StartState, UnsafeStartStateError,
 )
 from .tables import Op, Phase
-from .usbio import EP_BULK_IN, EP_BULK_OUT, Of135iError, UsbIo
+from .usbio import EP_BULK_IN, EP_BULK_OUT, InterruptOverflowError, Of135iError, UsbIo
 
 log = logging.getLogger("of135i")
 
@@ -212,17 +212,17 @@ COLD_READY_TIMEOUT = 1.5
 # nine observations across three cold starts (docs/test-log.md Tests 77,
 # 78).
 #
-# The likely reason is visible in this very function: 0x1f has bit 0x02
-# set, and the last thing the round writes to reg 0x32 before the settle
-# is `val32 & ~0x02`, which CLEARS it. Unless the hardware sets that bit
-# back by itself, the condition is unreachable by construction, and the
-# 0x1f almost certainly comes from reading the capture at a point where
-# the bit was still set. The condition is left ALONE -- which of 0x1f and
-# 0x1d is correct is not established, and guessing would be worse than
-# waiting. Only the waiting is shortened, and the mismatch keeps being
-# logged. The motor completion that precedes this settle has already
-# confirmed the move finished, so this is a secondary check, not the one
-# that proves the transport is done.
+# Cause (docs/static-analysis.md SA-001, Test 79): 0x1f has bit 0x02 set,
+# and until 2026-10-12 this round dropped the vendor's write that sets
+# that bit again between move 2 and move 3 (our own captures show it in
+# every round), so the last reg 0x32 write before the settle CLEARED it
+# and 0x1f was unreachable. The write is now in place, so reg 0x32 is
+# expected to read 0x1f on the first settle read; confirmed on hardware
+# (Test 98: first settle read 0x1f, no settle warning in three rounds).
+# The constants below are deliberately unchanged (one
+# variable at a time). The motor completion that precedes this settle has
+# already confirmed the move finished, so this is a secondary check, not
+# the one that proves the transport is done.
 COLD_SETTLE_TIMEOUT = 0.25
 COLD_SETTLE_INTERVAL = 0.05
 
@@ -1349,6 +1349,16 @@ class Scanner:
         self._cold_motor_move(FEEDL_1_2, full_speed_regs=True,
                               label=f"{self.session.phase} move 2/3 (feed)")
 
+        # ---- between move 2 and move 3: set bit 0x02 of reg 0x32 again ----
+        # The vendor does this in every round of both starts we have
+        # captured (01-init, 2026-09-07; also in the capture-replayed JOG
+        # table, tables_load.py). It was missing from this hand-written
+        # round (docs/static-analysis.md SA-001): without it the last
+        # reg 0x32 write is the `& ~0x02` above and the settle check below
+        # can never see 0x1f (Test 79).
+        val32 = self.io.read_reg(0x32)
+        self.io.write_regs([(0x32, (val32 | 0x02) & 0xFF)])
+
         # ---- move 3 ------------------------------------------------------
         self._cold_motor_move(FEEDL_3, full_speed_regs=False,
                               label=f"{self.session.phase} move 3/3 (eject)")
@@ -1385,6 +1395,38 @@ class Scanner:
             self.io.wait_reg(0x01, 0x20, timeout=timeout, mask=0x20)
         except Of135iError as e:
             log.warning("engine-idle wait: %s -- continuing", e)
+
+    def poll_buttons(self, strict_interrupts: bool = False) -> list[str]:
+        """Read-only: return the front-panel buttons seen right now.
+
+        Drains EP 0x83 (short timeout) and reads reg 0x31 once; never
+        writes, so it works in a read-only session and in the cold state
+        (reg 0x01 = 0x00, where no interrupts flow but reg 0x31 still
+        shows a press). Interrupt events come first, then a press
+        currently held according to reg 0x31 if not already reported;
+        the result is deduplicated. Names are from of135i.buttons
+        (Test 97). A press lasts at least 0.3 s, so a caller polling at
+        about 10 Hz catches it via reg 0x31 even without interrupts; the
+        same held press shows up in consecutive polls, so callers that
+        act on presses must edge-detect. If EP 0x83 is in the overflow
+        state the interrupt part is skipped (reg 0x31 still works), or
+        InterruptOverflowError is raised when ``strict_interrupts``.
+        """
+        from . import buttons
+
+        found: list[str] = []
+        events = self.io.drain_events(timeout_ms=50)
+        if events == "overflow" and strict_interrupts:
+            raise InterruptOverflowError()
+        if isinstance(events, list):
+            for ev in events:
+                name = buttons.decode_interrupt(ev)
+                if name not in found:
+                    found.append(name)
+        held = buttons.decode_reg31(self.io.read_reg(0x31))
+        if held is not None and held not in found:
+            found.append(held)
+        return found
 
     def is_magazine_present(self) -> bool:
         """Check the loader sensor (vendor INI: LoaderSensorReg=0x101,0x08).
