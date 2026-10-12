@@ -6,6 +6,21 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- Cold-start fix (SA-001, 2026-10-12): the hand-written cold homing round
+  dropped the vendor's reg 0x32 read-modify-write (set bit 0x02) between
+  move 2 and move 3; it is restored in the driver and in the generated
+  SANE program (cold_init 218 -> 224 transfers). Confirmed on hardware in
+  both implementations (Test 98): the settle read gives 0x1f at once and
+  the three per-round settle warnings are gone.
+- Front-panel buttons measured (Test 97, read-only): the EP 0x83 interrupt
+  byte is a button code (Eject 0x48, Positive 0x20, Negative 0x40, Custom
+  0x28 = the bits a press clears in reg 0x31); a magazine insert produces
+  no interrupt (reg 0x32 bit 0x40 falls). `tools/watch_events.py` added.
+- Static-analysis isolation barrier added (docs/static-analysis.md,
+  `tests/test_vendor_isolation.py`): findings from vendor-binary analysis
+  are recorded separately and kept out of `vendor_derived.py` unless
+  captures or our own measurement confirm them.
+
 - SANE submission package revision v6 (2026-10-02, offline): v5 rebased
   onto upstream `7103e09b0`, after upstream merged a GL128 series
   (Plustek OpticFilm 8200i SE) that touched the same lines. Four commits;

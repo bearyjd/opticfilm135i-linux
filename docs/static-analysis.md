@@ -36,7 +36,7 @@ kept apart from the SANE backend.
 
 | ID | Question | Finding | Source (binary + function/address) | Status | Test |
 |---|---|---|---|---|---|
-| SA-001 | What does the vendor wait for after the cold-start homing round (our settle check wants reg 0x32 = 0x1f, always reads 0x1d; Test 79)? | Nothing: reg 0x32 bit 0x02 is a host-driven control output. The static finding pointed back to our own captures, which show the vendor SETTING the bit (0x1d -> 0x1f) between move 2 and move 3 of every round; our hand-written cold round omits that write. | Scanapi_x64.dll 1.4.12 (vendor driver DLL), 0x180086250; confirmed in our captures `01-init` (2026-08-29) and the 2026-09-07 latched-magazine start | confirmed in captures; fix implemented 2026-10-12, hardware confirmation pending | |
+| SA-001 | What does the vendor wait for after the cold-start homing round (our settle check wants reg 0x32 = 0x1f, always reads 0x1d; Test 79)? | Nothing: reg 0x32 bit 0x02 is a host-driven control output. The static finding pointed back to our own captures, which show the vendor SETTING the bit (0x1d -> 0x1f) between move 2 and move 3 of every round; our hand-written cold round omits that write. | Scanapi_x64.dll 1.4.12 (vendor driver DLL), 0x180086250; confirmed in our captures `01-init` (2026-08-29) and the 2026-09-07 latched-magazine start | confirmed in captures; fix implemented 2026-10-12; confirmed on hardware (Test 98), driver and SANE | 98 |
 | SA-002 | What distinguishes a button press from a magazine insert after the bare 0x48 interrupt on EP 0x83 (Test 81)? | Static part: the DLL polls reg 0x32 bit 0x40 (PID 0x1436) and reg 0x31/0x100/0x101 for the loader. Measured (Test 97): the interrupt byte is a button code (the bits a press clears in reg 0x31); a magazine insert gives no interrupt and is seen by polling reg 0x32 bit 0x40 and the presence bits; reg 0x101 bit 0x20 = latched is refuted. | Scanapi_x64.dll 1.4.12 (vendor driver DLL), 0x180137760 (event thread) + our Test 81 captures | confirmed by our own measurement (Test 97) for button codes and insert detection; 0x101 bit 0x20 refuted | 97 |
 
 ## SA-001 -- state after the cold-start homing round
@@ -63,13 +63,14 @@ a write that was dropped, not a wrong condition. The reg 0x35/0x32/0x32
 reads ~200 ms apart after the round are the vendor's idle event polling,
 which continues indefinitely; the vendor does not wait there.
 
-Update 2026-10-12: the read-modify-write is now in `_cold_homing_round()` and in the generated SANE program (three rounds, +3 ops, +6 transfers: cold_init 218 -> 224 transfers, 201 -> 204 ops). Hardware confirmation pending: the settle read is expected to give 0x1f at once.
+Update 2026-10-12: the read-modify-write is now in `_cold_homing_round()` and in the generated SANE program (three rounds, +3 ops, +6 transfers: cold_init 218 -> 224 transfers, 201 -> 204 ops). Confirmed on hardware the same day (Test 98): in both the Python driver and the SANE backend the first settle read gives 0x1f and no settle warning is logged.
 
 Status: the fact is capture-evidenced, so it does not live in
 `vendor_derived.py` and may go to both implementations. The driver fix (add
 the read-modify-write before move 3; the SANE program follows through the
 generator) changes a motor sequence and needs a cold-start hardware run
-before it counts as done.
+before it counts as done. Status: confirmed on hardware (Test 98), driver
+and SANE.
 
 ## SA-002 -- button press versus magazine insert
 

@@ -217,8 +217,9 @@ COLD_READY_TIMEOUT = 1.5
 # that bit again between move 2 and move 3 (our own captures show it in
 # every round), so the last reg 0x32 write before the settle CLEARED it
 # and 0x1f was unreachable. The write is now in place, so reg 0x32 is
-# expected to read 0x1f on the first settle read; hardware confirmation
-# is pending. The constants below are deliberately unchanged (one
+# expected to read 0x1f on the first settle read; confirmed on hardware
+# (Test 98: first settle read 0x1f, no settle warning in three rounds).
+# The constants below are deliberately unchanged (one
 # variable at a time). The motor completion that precedes this settle has
 # already confirmed the move finished, so this is a secondary check, not
 # the one that proves the transport is done.

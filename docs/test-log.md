@@ -6891,3 +6891,40 @@ under the vendor's own initialisation (n = 1 here).
 **Provenance.** Raw logs in the private analysis area, `watch-20261012/`
 (`del-a-kall.log`, `del-b-laddad.log`, `del-c-utmatad.log`). Read-only;
 no writes to the device.
+
+### Test 98: the cold-start fix on hardware — Python and SANE, settle reads 0x1f (2026-10-12)
+
+**Purpose.** Confirm SA-001 (docs/static-analysis.md): with the dropped
+reg 0x32 write restored (commit 11f28f3: `reg 0x32 |= 0x02` between move 2
+and move 3 of each cold homing round), the cold-start settle check should
+read 0x1f on its first poll. Every earlier cold start (Tests 77-79) logged
+three "settle poll did not reach" warnings reading 0x1d.
+
+**Part 1 -- Python driver.** Power-cycled (reg 0x01 = 0x00), then
+`of135i -v status && of135i -v load`. Three homing rounds, **zero** settle
+warnings. Load normal (feed f455, traverse dc55); reg 0x32 before/after the
+reinsert 0x1f / 0x1f. Then `of135i eject`, normal.
+
+**Part 2 -- SANE backend.** Rebuilt backend installed
+(`sudo tools/sane_install.sh install`; status "identical to the current
+build"), power-cycled, then
+`SANE_DEBUG_GENESYS=4 scanimage -d genesys:libusb:001:008 -n --load-film`.
+cold_init settle polls (ops 70/71, 136/137, 202/203): 0x35 = 0xbb and
+0x32 = 0x1f on the **first** poll, 4 ms each (Test 79: op 70 read
+0x1d/0x1d after 256 ms). Motor completions unchanged (0xd9 -> 0xf8,
+1.0-1.9 s). Jog normal, "unknown -> released", sensor edge after ~6.9 s,
+load feed f4 on the first poll, traverse dd -> dc in 25 ms,
+"released -> loaded". Then `scanimage -n --eject-film`, normal.
+
+**Sound.** Normal in all motor steps (Christian).
+
+**Result: PASS (n = 1 per implementation).** The settle read now succeeds
+immediately in both implementations; the cold start is also shorter by
+about 0.25 s per round (about 0.75 s in total), a secondary effect.
+
+**Operator note.** Plain `scanimage -n --load-film` without `-d` picked a
+v4l webcam as the default device on this host ("unrecognized option
+'--load-film'"); always pass `-d genesys:libusb:<bus>:<dev>`.
+
+**Provenance.** Logs in the private analysis area, `watch-20261012/`
+(`t98-python-load.log`, `t98-sane-load.log`).
