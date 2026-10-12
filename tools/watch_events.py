@@ -2,11 +2,12 @@
 """Read-only observer for button / magazine events (SA-002).
 
 Purpose: check the hypothesis in docs/static-analysis.md (SA-002) that the
-bare 0x48 interrupt on EP 0x83 is told apart by register state. Every
+bare 0x48 interrupt on EP 0x83 is told apart by register state (answered by Test 97: it is a button
+code). Every
 --interval seconds it reads WATCH_REGS (control-IN register reads only)
 and the interrupt endpoint EP 0x83 (short timeout), and prints a line only
 when an interrupt arrives or a watched value changes. Reg 0x101 is decoded
-as latched / present / motor bits.
+as present / motor plus raw bit 0x20 (b20), reg 0x31 clears as button names.
 
 STRICTLY READ-ONLY: the session is opened readonly (the safety layer
 refuses every OUT transfer), takes the normal process lock and refuses if
@@ -34,13 +35,24 @@ from of135i import vendor_derived as vd
 from of135i.usbio import InterruptOverflowError, UsbIo
 
 
+# Measured in Test 97 (our own captures, not vendor-derived): a button press
+# clears these bits in reg 0x31 (idle 0xfe) and, once the scanner is
+# initialised, the same byte arrives as the interrupt on EP 0x83.
+BUTTON_CODES = {0x48: "Eject", 0x20: "Positive", 0x40: "Negative",
+                0x28: "Custom"}
+
+
 def decode101(v: int) -> str:
     parts = [
-        "latched" if v & vd.REG101_LATCHED_BIT else "loose",
         "present" if v & vd.REG101_PRESENT_BIT else "absent",
         "motor" if v & vd.REG101_MOTOR_BIT else "idle",
+        f"b20={1 if v & 0x20 else 0}",
     ]
     return "/".join(parts)
+
+
+def button_name(code: int) -> str:
+    return BUTTON_CODES.get(code, "unknown")
 
 
 def _name(reg: int) -> str:
@@ -70,7 +82,7 @@ def run(io, interval: float, duration: float, emit, clock=time.monotonic,
             emit(f"{stamp()} interrupt EP 0x83: overflow (unreadable)")
         cur = {r: read_watch(io, r) for r in vd.WATCH_REGS}
         if ev is not None:
-            emit(f"{stamp()} INTERRUPT 0x{ev:02x}  state: " + " ".join(
+            emit(f"{stamp()} INTERRUPT 0x{ev:02x} ({button_name(ev)})  state: " + " ".join(
                 f"{_name(r)}=0x{v:02x}" for r, v in cur.items())
                 + f"  reg0x101: {decode101(cur[0x101])}")
         for r, v in cur.items():
@@ -79,9 +91,10 @@ def run(io, interval: float, duration: float, emit, clock=time.monotonic,
                 if r == 0x101:
                     extra = f"  ({decode101(last[r])} -> {decode101(v)})"
                 elif r == 0x31:
-                    gone = last[r] & ~v & vd.REG31_INSERT_MARK_MASK
+                    gone = last[r] & ~v & 0xFF
                     if gone:
-                        extra = f"  (insert-mark bits cleared: 0x{gone:02x})"
+                        extra = (f"  (bits cleared: 0x{gone:02x}, "
+                                 f"{button_name(gone)})")
                 emit(f"{stamp()} change {_name(r)}: "
                      f"0x{last[r]:02x} -> 0x{v:02x}{extra}")
         last = cur
@@ -112,6 +125,7 @@ def main(argv=None, opener=None) -> int:
             io.close()
     except KeyboardInterrupt:
         emit("interrupted, exiting")
+        return 0
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

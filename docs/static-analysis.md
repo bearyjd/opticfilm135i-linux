@@ -37,7 +37,7 @@ kept apart from the SANE backend.
 | ID | Question | Finding | Source (binary + function/address) | Status | Test |
 |---|---|---|---|---|---|
 | SA-001 | What does the vendor wait for after the cold-start homing round (our settle check wants reg 0x32 = 0x1f, always reads 0x1d; Test 79)? | Nothing: reg 0x32 bit 0x02 is a host-driven control output. The static finding pointed back to our own captures, which show the vendor SETTING the bit (0x1d -> 0x1f) between move 2 and move 3 of every round; our hand-written cold round omits that write. | Scanapi_x64.dll 1.4.12 (vendor driver DLL), 0x180086250; confirmed in our captures `01-init` (2026-08-29) and the 2026-09-07 latched-magazine start | confirmed in captures; driver fix pending hardware | |
-| SA-002 | What distinguishes a button press from a magazine insert after the bare 0x48 interrupt on EP 0x83 (Test 81)? | The interrupt only says "look"; the register state tells the events apart (reg 0x101 latched vs loose; reg 0x31 bits 0x48 as a candidate insert marker). | Scanapi_x64.dll 1.4.12 (vendor driver DLL), 0x180137760 (event thread) + our Test 81 captures | hypothesis | |
+| SA-002 | What distinguishes a button press from a magazine insert after the bare 0x48 interrupt on EP 0x83 (Test 81)? | Static part: the DLL polls reg 0x32 bit 0x40 (PID 0x1436) and reg 0x31/0x100/0x101 for the loader. Measured (Test 97): the interrupt byte is a button code (the bits a press clears in reg 0x31); a magazine insert gives no interrupt and is seen by polling reg 0x32 bit 0x40 and the presence bits; reg 0x101 bit 0x20 = latched is refuted. | Scanapi_x64.dll 1.4.12 (vendor driver DLL), 0x180137760 (event thread) + our Test 81 captures | confirmed by our own measurement (Test 97) for button codes and insert detection; 0x101 bit 0x20 refuted | 97 |
 
 ## SA-001 -- state after the cold-start homing round
 
@@ -96,12 +96,30 @@ Cross-check against our own Test 81 captures (capture evidence):
 - One of five events (37.9 s in the three-cycle capture) is unexplained
   (loose magazine, 0x31 stayed 0xfe).
 
-Hypothesis: the interrupt only says "look"; the state tells the events
-apart. Latched (0x101 & 0x20) means a press = eject request; loose and
-present (0x101 = 0xd8) means an insert = load. Reg 0x31 bits 0x48 are a
-candidate direct insert marker.
+Original hypothesis (superseded): the interrupt only says "look"; latched
+(0x101 & 0x20) means a press, loose and present means an insert, and reg
+0x31 bits 0x48 are an insert marker.
 
-Test: a read-only watcher run (`tools/watch_events.py`), to be logged as a
-test-log entry later. Nothing has been run yet. Constants:
-`REG101_LATCHED_BIT`, `REG101_PRESENT_BIT`, `REG101_MOTOR_BIT`,
-`REG31_INSERT_MARK_MASK`, `WATCH_REGS` in `of135i/vendor_derived.py`.
+Measured result (Test 97, 2026-10-12, read-only `tools/watch_events.py`,
+status: confirmed by our own measurement for the points below):
+
+- The interrupt byte is a button code: the bits a press clears in reg 0x31
+  (idle 0xfe). Eject 0x48 (0xb6), Positive 0x20 (0xde), Negative 0x40
+  (0xbe), Custom 0x28 (0xd6). Interrupts only flow once the scanner is
+  initialised; cold, reg 0x31 still shows the press but no interrupt comes.
+- A magazine insert or removal gave no interrupt (cold or warm). It is
+  visible by polling: reg 0x32 bit 0x40 (set = removed, falls on insert)
+  and the presence bits (reg 0x101 bit 0x08, reg 0x100 bit 0x80, reg 0x32
+  bit 0x04 when cold). This matches the static finding of the DLL's reg
+  0x32 bit 0x40 poll.
+- REFUTED: reg 0x101 bit 0x20 as "latched". It is clear after load (0xdc)
+  and set after eject (0xfc); its meaning is unknown.
+- Test 81's "insert gives 0x48" is explained as Eject presses
+  accompanying the press, pull, push cycles (reg 0x31 = 0xb6 at those
+  events).
+- Open: the Power button; inserts under the vendor's own initialisation
+  (n = 1).
+
+The button codes are our own measurements and live in
+`tools/watch_events.py` (`BUTTON_CODES`), not in `vendor_derived.py`.
+`REG101_LATCHED_BIT` and `REG31_INSERT_MARK_MASK` were removed.

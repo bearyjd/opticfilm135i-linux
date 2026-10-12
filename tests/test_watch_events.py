@@ -86,7 +86,9 @@ def test_changes_and_interrupt_printed_no_writes():
     assert "snapshot" in lines[0]
     assert "INTERRUPT 0x48" in text, text
     assert "change 0x31: 0xfe -> 0xb6" in text, text
-    assert "change 0x101: 0xd8 -> 0xf8" in text and "latched" in text, text
+    assert "change 0x101: 0xd8 -> 0xf8" in text and "b20=1" in text, text
+    assert "INTERRUPT 0x48 (Eject)" in text, text
+    assert "bits cleared: 0x48, Eject" in text, text
     assert io.write_calls == [], io.write_calls
     print("test_changes_and_interrupt_printed_no_writes OK")
 
@@ -102,9 +104,19 @@ def test_lock_released_after_exception():
     print("test_lock_released_after_exception OK")
 
 
+def test_sigint_exits_zero():
+    class Kb(FakeIo):
+        def read_button(self, timeout_ms=100):
+            raise KeyboardInterrupt
+    io = Kb(_script(), [])
+    assert we.main(["--duration", "5", "--interval", "0"], opener=lambda: io) == 0
+    assert io.closed
+    print("test_sigint_exits_zero OK")
+
+
 def main() -> int:
     tests = [test_changes_and_interrupt_printed_no_writes,
-             test_lock_released_after_exception]
+             test_lock_released_after_exception, test_sigint_exits_zero]
     for t in tests:
         t()
     print(f"\n{len(tests)} tests passed.")

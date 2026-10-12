@@ -34,8 +34,8 @@ The loader sensor cannot tell *seated* from *loose*, but it can tell
 sets again when it is pushed back (Test 90/91 logs: 0xf0 clear, 0xf8
 present; the probe seeds the same values). "Take it out, push it in" is
 therefore an observable **edge**: present → clear → present. The vendor's
-application uses the same event (the 0x48 insert notification on EP 0x83,
-Test 81, docs/sane-wp4-magazine.md §7) to run LOAD by itself; genesys has
+application uses the same event (an insert detected by the vendor's polling; Test 97
+found no interrupt for inserts, docs/sane-wp4-magazine.md §7) to run LOAD by itself; genesys has
 no interrupt transfers, but polling reg 0x101 carries the same
 information.
 
