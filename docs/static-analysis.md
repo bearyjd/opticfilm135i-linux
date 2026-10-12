@@ -36,7 +36,7 @@ kept apart from the SANE backend.
 
 | ID | Question | Finding | Source (binary + function/address) | Status | Test |
 |---|---|---|---|---|---|
-| SA-001 | What does the vendor wait for after the cold-start homing round (our settle check wants reg 0x32 = 0x1f, always reads 0x1d; Test 79)? | Reg 0x32 bit 0x02 is a host-driven control output (loader "home" line), not a status; no wait on 0x1f (reg 0x32) or 0xbb (reg 0x35) exists. 0x1d is the expected value. | Scanapi_x64.dll 1.4.12 (vendor driver DLL), 0x180086250 | hypothesis | |
+| SA-001 | What does the vendor wait for after the cold-start homing round (our settle check wants reg 0x32 = 0x1f, always reads 0x1d; Test 79)? | Nothing: reg 0x32 bit 0x02 is a host-driven control output. The static finding pointed back to our own captures, which show the vendor SETTING the bit (0x1d -> 0x1f) between move 2 and move 3 of every round; our hand-written cold round omits that write. | Scanapi_x64.dll 1.4.12 (vendor driver DLL), 0x180086250; confirmed in our captures `01-init` (2026-08-29) and the 2026-09-07 latched-magazine start | confirmed in captures; driver fix pending hardware | |
 | SA-002 | What distinguishes a button press from a magazine insert after the bare 0x48 interrupt on EP 0x83 (Test 81)? | The interrupt only says "look"; the register state tells the events apart (reg 0x101 latched vs loose; reg 0x31 bits 0x48 as a candidate insert marker). | Scanapi_x64.dll 1.4.12 (vendor driver DLL), 0x180137760 (event thread) + our Test 81 captures | hypothesis | |
 
 ## SA-001 -- state after the cold-start homing round
@@ -44,22 +44,30 @@ kept apart from the SANE backend.
 Question: what does the vendor wait for after the cold-start homing round?
 Our settle check wants reg 0x32 = 0x1f but always reads 0x1d (Test 79).
 
-Finding: the driver's per-model configuration names reg 0x32 bit 0x02 as
-the loader "home" line with polarity 0. The DLL's routine for it
+Static finding: the driver's per-model configuration names reg 0x32 bit
+0x02 as the loader "home" line with polarity 0. The DLL's routine for it
 (0x180086250) reads reg 0x32, sets or clears bit 0x02 according to a
-parameter and the polarity, and writes the value back. The bit is therefore
-a host-driven control output, not a status the hardware sets. No comparison
+parameter and the polarity, and writes the value back. The bit is a
+host-driven control output, not a status the hardware sets. No comparison
 against 0x1f (reg 0x32) or 0xbb (reg 0x35) as a wait condition exists
 anywhere in the DLL.
 
-Consequence (hypothesis): 0x1d is the expected post-round value; the 0x1f
-condition is a transcription slip, as Test 79 suspected.
+What the static finding led to in our own captures (the evidence): in both
+vendor starts we have on record -- `01-init` (2026-08-29) and the
+2026-09-07 start with a latched magazine -- every homing round does, between
+move 2 and move 3, a read of reg 0x32 (0x1d) followed by a write of 0x1f:
+the vendor sets bit 0x02 again before the eject move. The capture-replayed
+JOG table (`of135i/tables_load.py`) contains this write; the hand-written
+`_cold_homing_round()` does not. Test 79's "transcription slip" is therefore
+a write that was dropped, not a wrong condition. The reg 0x35/0x32/0x32
+reads ~200 ms apart after the round are the vendor's idle event polling,
+which continues indefinitely; the vendor does not wait there.
 
-Not done: the driver is unchanged (accept 0x1d / drop the settle poll).
-That needs a cold-start hardware run. COLD_SETTLE_* is shared with the SANE
-generator, so any change must keep `tools/gen_sane_tables.py --check` green;
-SANE keeps the capture-derived behaviour until our own capture confirms.
-Constant: `COLD_ROUND_REG32_EXPECTED` in `of135i/vendor_derived.py`.
+Status: the fact is capture-evidenced, so it does not live in
+`vendor_derived.py` and may go to both implementations. The driver fix (add
+the read-modify-write before move 3; the SANE program follows through the
+generator) changes a motor sequence and needs a cold-start hardware run
+before it counts as done.
 
 ## SA-002 -- button press versus magazine insert
 

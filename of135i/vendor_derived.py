@@ -25,9 +25,6 @@ from __future__ import annotations
 #   # SA-001 (docs/static-analysis.md) -- hypothesis
 #   NAME = value
 
-# SA-001 (docs/static-analysis.md) -- hypothesis
-COLD_ROUND_REG32_EXPECTED = 0x1D
-
 # SA-002 (docs/static-analysis.md) -- hypothesis
 REG101_LATCHED_BIT = 0x20
 
