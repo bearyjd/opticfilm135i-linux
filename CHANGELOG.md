@@ -6,6 +6,9 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+## v0.2.2 — 2026-10-13
+The cold-start fix (first finding admitted through the static-analysis barrier), the readable front-panel buttons, and submission revision v7 on the merge request. See [docs/release-notes-v0.2.2.md](docs/release-notes-v0.2.2.md).
+
 - Cold-start fix (SA-001, 2026-10-12): the hand-written cold homing round
   dropped the vendor's reg 0x32 read-modify-write (set bit 0x02) between
   move 2 and move 3; it is restored in the driver and in the generated
@@ -27,7 +30,7 @@ one exists; "offline" means implemented and tested without the scanner.
   are recorded separately and kept out of `vendor_derived.py` unless
   captures or our own measurement confirm them.
 
-- SANE submission package revision v7 (2026-10-13, offline): v6 rebased onto upstream a8676a6f7 after the exposure-time revert removed a field gl126.cpp assigned (always 0, assignment dropped; likewise one DISABLE line in genesys.cpp), plus a fifth commit carrying the cold-start fix (Test 98). Built with 0 warnings, 111 symbols, suites 7/6/42 (two test-side changes: the probes get an rpath shim for upstream's `libsane.so.1` SONAME, and the magazine suite checks `scan-exposure-time` only where the option exists), CI replay make-dist 0 and clang BUILD_EXIT=0 with the known local escl_test stop; prepared, not pushed.
+- SANE submission package revision v7 (2026-10-13, offline): v6 rebased onto upstream a8676a6f7 after the exposure-time revert removed a field gl126.cpp assigned (always 0, assignment dropped; likewise one DISABLE line in genesys.cpp), plus a fifth commit carrying the cold-start fix (Test 98). Built with 0 warnings, 111 symbols, suites 7/6/42 (two test-side changes: the probes get an rpath shim for upstream's `libsane.so.1` SONAME, and the magazine suite checks `scan-exposure-time` only where the option exists), CI replay make-dist 0 and clang BUILD_EXIT=0 with the known local escl_test stop. Pushed by the author to merge request !1032 on 2026-10-13 (fork branch still named `wp3-gl126-submission-v5`); the conflict is gone. The merge request's GitLab pipeline on v7 passed all eight jobs (2943836952) and the merge request is mergeable; still under review, not merged.
 - SANE submission package revision v6 (2026-10-02, offline): v5 rebased
   onto upstream `7103e09b0`, after upstream merged a GL128 series
   (Plustek OpticFilm 8200i SE) that touched the same lines. Four commits;

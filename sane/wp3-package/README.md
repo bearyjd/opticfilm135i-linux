@@ -1,11 +1,10 @@
 # WP-3 package — the exact SANE submission series, exported
 
-**Status: revision v7 PREPARED 2026-10-13, NOT pushed.** Merge request
-!1032 (<https://gitlab.com/sane-project/backends/-/merge_requests/1032>)
-currently shows a conflict against upstream; what the merge request
-holds is **v6** (four commits on base `7103e09b0`, pushed by the author
-on 2026-10-02 to the fork branch `wp3-gl126-submission-v5`, which carries
-the v6 commits). v7 is v6 rebased onto current upstream plus one new
+**Status: revision v7 PUSHED by the author 2026-10-13 to merge request
+!1032 (<https://gitlab.com/sane-project/backends/-/merge_requests/1032>),
+whose fork source branch keeps the name `wp3-gl126-submission-v5` and now
+holds the five v7 commits. The conflict the merge request showed against
+upstream is gone. The merge request's GitLab pipeline on v7 passed all eight jobs (2943836952) and the merge request is mergeable; still under review, not merged.** v7 is v6 rebased onto current upstream plus one new
 commit. The series is exactly the repository's `sane/` (the nine
 `gl126_*` files and `gl126-integration.patch`) with the two edits
 described below, as five commits in two forms that recreate it without
