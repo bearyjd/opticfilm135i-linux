@@ -125,12 +125,21 @@ def _build_probe():
     g = sb / "backend" / "genesys"
     libs = sb / "backend" / ".libs"
     binary = str(Path(tempfile.mkdtemp(prefix="gl126-magazine-")) / "magprobe")
+    # sane-backends' autogen patches libtool so every backend plugin gets
+    # the SONAME libsane.so.1 (patches/ltmain.sh.patch); a probe linked
+    # against such a build would then resolve that name to the system's
+    # libsane at run time. A shim directory on the rpath, holding
+    # libsane.so.1 -> the built plugin, keeps the probe on the build under
+    # test. Unused (harmless) when the SONAME is libsane-genesys.so.1.
+    shim = Path(binary).parent / "ldshim"
+    shim.mkdir()
+    (shim / "libsane.so.1").symlink_to(libs / "libsane-genesys.so")
     cmd = [gxx, "-std=gnu++11", "-Wall", "-Wextra",
            "-DHAVE_CONFIG_H", "-DBACKEND_NAME=genesys",
            "-I", str(sb), "-I", str(g), "-I", str(sb / "backend"),
            "-I", str(sb / "include"), "-I", str(sb / "include" / "sane"),
            str(PROBE_SRC),
-           "-L", str(libs), "-lsane-genesys", f"-Wl,-rpath,{libs}",
+           "-L", str(libs), "-lsane-genesys", f"-Wl,-rpath,{shim}:{libs}",
            "-o", binary]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
@@ -1347,9 +1356,13 @@ def test_dead_options_are_inactive_and_film_group_is_placed_and_ordered():
     items = r["items"]
     by_name = {f["name"]: (idx, f) for idx, f in items if "name" in f}
 
-    dead = ["scan-exposure-time", "brightness", "contrast", "lamp-off-time",
+    dead = ["brightness", "contrast", "lamp-off-time",
             "lamp-off-scan", "color-filter", "calibration-file", "expiration-time",
             "clear-calibration", "force-calibration", "ignore-internal-offsets"]
+    # scan-exposure-time exists only on sane-backends up to 7103e09b0;
+    # upstream reverted the feature (675c285e0). Inactive where present.
+    if "scan-exposure-time" in by_name:
+        dead.append("scan-exposure-time")
     for name in dead:
         assert name in by_name, (name, sorted(by_name))
         _, f = by_name[name]

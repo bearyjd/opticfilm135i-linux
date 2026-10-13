@@ -1,83 +1,96 @@
 # WP-3 package — the exact SANE submission series, exported
 
-**Status: merge request !1032 is open (v5 submitted 2026-09-29,
-<https://gitlab.com/sane-project/backends/-/merge_requests/1032>); this
-directory holds revision v6, which the author pushed to the merge
-request's source branch on 2026-10-02. The merge request shows these four
-commits on base `7103e09b0`, no conflicts, and its GitLab pipeline passed
-all seven jobs. The branch in the fork keeps the name
-`wp3-gl126-submission-v5`; it holds the v6 commits.** v6 exists because upstream moved: it
-is v5 rebased onto current upstream. The series is exactly the
-repository's `sane/` (the nine `gl126_*` files and
-`gl126-integration.patch`), as four commits in two forms that recreate
-it without manual reconstruction.
+**Status: revision v7 PREPARED 2026-10-13, NOT pushed.** Merge request
+!1032 (<https://gitlab.com/sane-project/backends/-/merge_requests/1032>)
+currently shows a conflict against upstream; what the merge request
+holds is **v6** (four commits on base `7103e09b0`, pushed by the author
+on 2026-10-02 to the fork branch `wp3-gl126-submission-v5`, which carries
+the v6 commits). v7 is v6 rebased onto current upstream plus one new
+commit. The series is exactly the repository's `sane/` (the nine
+`gl126_*` files and `gl126-integration.patch`) with the two edits
+described below, as five commits in two forms that recreate it without
+manual reconstruction.
 
-## Why v6 exists
+## Why v7 exists
 
-After v5 was submitted, upstream merged a series adding the GL128 ASIC
-(Plustek OpticFilm 8200i SE) that touches the same lines of
-`backend/Makefile.am`, `backend/genesys/enums.h`, `low.cpp` and
-`scanner_interface_usb.cpp`, so the merge request no longer merged
-cleanly. v6 is v5 rebased onto upstream `7103e09b0`:
+Upstream moved to `a8676a6f7`, 34 commits past `7103e09b0`. Among them is
+a revert (`675c285e0`, `be064801b`) of the "scan exposure time" feature:
+`Genesys_Settings::exposure_lperiod`, `SetupParams::exposure_lperiod` and
+the frontend option `scan-exposure-time` (`OPT_EXPOSURE_TIME`) no longer
+exist. The series touched all three, so the rebase has two parts.
 
-- Every conflict was of the kind "both sides added a line at the same
-  spot" (a source list, an enumerator, an include, a `case` label, an
-  `||` condition). Both lines were kept, GL126 before GL128, in the
-  style upstream used for GL128. No GL126 code changed to resolve them.
-- The first commit of v5, the `ImagePipelineNodeExtract`
-  bytes-per-pixel fix, is **dropped**: upstream now carries an
-  equivalent fix (`2bf54be64`), the rebase took upstream's version
-  and the commit became empty. The series is four commits, not five.
-- The nine GL126 source files are byte-identical to v5's. The patches of
-  the model entry, the options and the documentation commits (2 to 4 here)
-  are identical to v5's apart from context lines; commit 1 (the ASIC
-  support) additionally carries the conflict resolutions above.
+- **One conflict**, `backend/genesys/settings.h` (commit 1): both sides
+  added a field after `expiration_time`. Resolved by keeping our
+  `unsigned frame = 1;` with its comment and not re-adding
+  `exposure_lperiod`, following upstream's revert. Every other file
+  merged without conflict (the OpticFilm 7600i changes `90a16470f`,
+  `908b0cb7b` touched other model entries).
+- **Two edits that the revert forced, not conflicts**, made inside the
+  commits that introduced the lines:
+  - commit 1, `backend/genesys/gl126.cpp`: the assignment
+    `session.params.exposure_lperiod = dev->settings.exposure_lperiod;`
+    is removed (the field is gone; the value was always 0 for GL126) and
+    the comment above it no longer mentions the exposure field. Nothing
+    else in `gl126.cpp` differs from v6.
+  - commit 3, `backend/genesys/genesys.cpp`: the line
+    `DISABLE(OPT_EXPOSURE_TIME);` in the GL126 block that deactivates
+    options doing nothing on this chip is removed (the option is gone;
+    nothing is left to deactivate), and the comment's mention of
+    "scan-exposure-time" with it. This was found by the first v7 build,
+    which failed to compile on the missing enumerator.
+- **A fifth commit** carries the cold-start fix: the hand-written cold
+  homing round had dropped a read-modify-write of reg 0x32 (set bit 0x02)
+  that the vendor driver performs between motor moves 2 and 3. The change
+  is in the generated `gl126_tables.cpp` only (three steps, one per
+  homing round; `cold_init` 218 -> 224 transfers). Hardware evidence:
+  `docs/test-log.md` Test 98 (both the companion driver and the backend).
 
-v5 (2026-09-29): base `f8b5e16`, five commits, tip `c026a333a6ff8b85a789e919f07047ac7140f3f9`,
-tip tree `b166a3daf8fd4da719cf52657e3c4e78e73ab002`. Earlier revisions
-v1 to v4 are described in `docs/sane-wp3-submission.md`; v4 and v5 differ
-from each other only by dead-code removal, v3 and v4 only in comments.
+v6 (2026-10-02): base `7103e09b0`, four commits, tip
+`ec21b712f1c120c6cc6d041f98385dcdb1876dde`, tip tree
+`83568e8e8eaf8d77add24174b2b473e819198c0a`. Earlier revisions are
+described in `docs/sane-wp3-submission.md`.
 
 ## What is in here
 
 | file | what |
 |---|---|
-| `wp3-gl126-submission.bundle` | `git bundle` of the series, `7103e09b0..wp3-gl126-submission-v6`. Preserves the exact commit ids. |
+| `wp3-gl126-submission.bundle` | `git bundle` of the series, `a8676a6f7..wp3-gl126-submission-v7`. Preserves the exact commit ids. |
 | `0001-genesys-add-support-for-the-GL126-ASIC.patch` | commit 1 |
 | `0002-genesys-add-the-Plustek-OpticFilm-135i-07b3-1436.patch` | commit 2 |
 | `0003-genesys-frame-selection-and-magazine-handling-for-th.patch` | commit 3 |
 | `0004-genesys-document-the-GL126-and-the-OpticFilm-135i.patch` | commit 4 |
+| `0005-genesys-GL126-cold-start-restore-the-reg-0x32-write-.patch` | commit 5 |
 
 ## Revisions
 
-Base: sane-backends `7103e09b03aa8c7041c75e12f4d51fdf511be151` — "Merge
-branch 'genesys-gl128-opticfilm-8200i-se' into 'master'", `origin/master`
-as fetched 2026-10-02 from `https://gitlab.com/sane-project/backends.git`.
+Base: sane-backends `a8676a6f7d21adf5137936a3b406fbde70795220` — "Merge
+branch 'xerox_mfp-tcp-partial-read' into 'master'", `origin/master` as
+fetched 2026-10-13 from `https://gitlab.com/sane-project/backends.git`.
 
 | # | commit | tree | subject |
 |---|---|---|---|
-| 1 | `7c2f94b915e335d0d5882077dc279e795f48dfa8` | `4be67132f0d14890316156300c5d33d63de2bf40` | genesys: add support for the GL126 ASIC |
-| 2 | `38b59041b7c80d9b2bbd90ad4ee9d10656d5bcc0` | `9a927927a96a5c27cd56b89b4b4b01a9dc8a406c` | genesys: add the Plustek OpticFilm 135i (07b3:1436) |
-| 3 | `89352b4ac6f8085b18f40adb7b44ea7d26422062` | `8e2959ebad7496fdafd4850903291daba5b1e119` | genesys: frame selection and magazine handling for the OpticFilm 135i |
-| 4 | `ec21b712f1c120c6cc6d041f98385dcdb1876dde` | `83568e8e8eaf8d77add24174b2b473e819198c0a` | genesys: document the GL126 and the OpticFilm 135i |
+| 1 | `f97e65cf805bc3c327c3830f5bbf3637ad15969a` | `8a92b9ad1cd6009f3d3179634767b71383120ac3` | genesys: add support for the GL126 ASIC |
+| 2 | `8a7fbd9f2b7e64b456d5ac4c6492d3be8c74e316` | `30fdefa99ca2bde974f7a30a21f77f9566047284` | genesys: add the Plustek OpticFilm 135i (07b3:1436) |
+| 3 | `232a71bb118c6e57faf78819e8fb88e2135bc31a` | `8d2362b4438bb12995c8afc7de03e9331ff43aee` | genesys: frame selection and magazine handling for the OpticFilm 135i |
+| 4 | `6c7e30b3ecccb4833e9451cb3803a9a28f15d371` | `ce9b4e58055cb0838bc92f2ea39d0557399d7cbb` | genesys: document the GL126 and the OpticFilm 135i |
+| 5 | `cf21d4327b86ec768c1dbfda25451052c994ee47` | `f2a530c170b91065c7b5f8b60b71e4aa73af4257` | genesys: GL126 cold start, restore the reg 0x32 write between moves 2 and 3 |
 
-The tip tree `83568e8e…` is the identity of the package: any route below
+The tip tree `f2a530c1…` is the identity of the package: any route below
 that ends on that tree has recreated it exactly.
 
 ### Hardware evidence, and whether it applies
 
-The hardware tests (`docs/test-log.md`, Tests 62 to 92) and the
+The hardware tests (`docs/test-log.md`, Tests 62 to 92, 98) and the
 `tstbackend -l 1` run (Tests 93, 94) were made on earlier builds of the
-same GL126 sources. **v6 has not been run on hardware.** The GL126
-source files are byte-identical to v5's, and v5's compiled code to v4's.
-What differs in a v6 build is upstream's shared code merged in between.
-It is conditional on GL128 almost everywhere (per-chip `case` labels,
-`AsicType::GL128` guards in `low.cpp`, `genesys.cpp` and
-`scanner_interface_usb.cpp`, model, sensor, motor and frontend table
-entries). The exception is the image pipeline: `ImagePipelineNodeMergeColorToGray`
-now takes a colour filter, which is `NONE` for GL126's host-side gray
-(the luminance weights are unchanged). A hardware run of the v6 build has
-not been made.
+same GL126 sources. **The v7 build has not been run on hardware.** The
+cold-start table change itself (commit 5) was run on hardware in the
+development build (Test 98: settle read 0x1f on the first poll, the three
+warnings gone). The `gl126.cpp` and `genesys.cpp` edits remove an
+assignment of a value that was always 0 and the deactivation of an option
+that no longer exists; they do not change what is sent to the scanner.
+Upstream's shared code merged in since v6 (OpticFilm 7600i entries, the
+exposure-time revert, other unrelated backends) was not run against the
+scanner.
 
 ## Recreate it
 
@@ -88,10 +101,10 @@ Either route needs a clone of sane-backends containing the base commit.
 ```
 git clone https://gitlab.com/sane-project/backends.git sane-backends
 cd sane-backends
-git fetch /path/to/wp3-gl126-submission.bundle wp3-gl126-submission-v6
+git fetch /path/to/wp3-gl126-submission.bundle wp3-gl126-submission-v7
 git checkout -b wp3-gl126-submission FETCH_HEAD
-git rev-parse HEAD            # ec21b712f1c120c6cc6d041f98385dcdb1876dde
-git rev-parse HEAD^{tree}     # 83568e8e8eaf8d77add24174b2b473e819198c0a
+git rev-parse HEAD            # cf21d4327b86ec768c1dbfda25451052c994ee47
+git rev-parse HEAD^{tree}     # f2a530c170b91065c7b5f8b60b71e4aa73af4257
 ```
 
 **Route B — the patches (same trees, new commit ids):**
@@ -99,13 +112,13 @@ git rev-parse HEAD^{tree}     # 83568e8e8eaf8d77add24174b2b473e819198c0a
 ```
 git clone https://gitlab.com/sane-project/backends.git sane-backends
 cd sane-backends
-git checkout -b wp3-gl126-submission 7103e09b0
-git am /path/to/000[1-4]-*.patch
-git rev-parse HEAD^{tree}     # 83568e8e8eaf8d77add24174b2b473e819198c0a
+git checkout -b wp3-gl126-submission a8676a6f7
+git am /path/to/000[1-5]-*.patch
+git rev-parse HEAD^{tree}     # f2a530c170b91065c7b5f8b60b71e4aa73af4257
 ```
 
-`git bundle verify wp3-gl126-submission.bundle` lists the one prerequisite
-(`7103e09b0…`).
+The bundle's one prerequisite is `a8676a6f7…` (`git bundle verify`, run
+inside a clone that has it).
 
 ## Build
 
@@ -120,32 +133,59 @@ make -j8 -C backend libsane-genesys.la
 nm -D backend/.libs/libsane-genesys.so | grep -c gl126     # 111
 ```
 
-## Verification of this export (v6, 2026-10-02)
+Note on the SONAME: sane-backends' `autogen.sh` patches libtool
+(`patches/ltmain.sh.patch`) so that every backend plugin carries the
+SONAME `libsane.so.1`; the v7 build has it. The v6 and development
+builds carry `libsane-genesys.so.1` (the patch had not taken there), as
+does Fedora's packaged plugin. The installed backend is loaded by absolute
+path, so the SONAME does not matter to the dll; it did matter to this
+repository's probe-based tests, which link `-lsane-genesys` and would
+resolve `libsane.so.1` to the system library. Since 2026-10-13 the tests
+put a shim directory (`libsane.so.1` -> the built plugin) first on the
+probe's rpath, so they test the build they were pointed at under either
+SONAME.
 
-Done offline, with no scanner contact. Results apply to the v6 build.
+## Verification of this export (v7, 2026-10-13)
+
+Done offline, with no scanner contact. Results apply to the v7 build.
 
 | check | result |
 |---|---|
-| Standalone build in a worktree on `7103e09b0` (`autogen`, `configure --sysconfdir=/etc`, `lib`, `sanei`, `backend/libsane-genesys.la`, `-j8`) | exit 0, **0 compiler warnings** from any source file |
-| exported symbols | **111** mentioning `gl126` (same as v5) |
+| Standalone build in a worktree on `a8676a6f7` (`autogen`, `configure --sysconfdir=/etc`, `lib`, `sanei`, `backend/libsane-genesys.la`, `-j8`) | exit 0, **0 compiler warnings** from any source file (the first attempt, before the `OPT_EXPOSURE_TIME` line was removed from commit 3, failed to compile; the series was amended and rebuilt) |
+| exported symbols | **111** mentioning `gl126` (same as v6) |
 | `tests/test_sane_open_params.py` against that build | 7 passed |
 | `tests/test_sane_calibration_cache.py` against that build | 6 passed |
-| `tests/test_sane_magazine.py` against that build | 42 passed |
-| upstream `genesys_unit_tests` (`make -C testsuite/backend/genesys check`) | PASS |
-| Route A: fetch from the bundle in a clean repository | tip `ec21b712…`, tree `83568e8e…`, identical |
-| Route B: `git am` of the four patches onto `7103e09b0` in a clean repository | tree `83568e8e…`, identical |
-| upstream CI `.gitlab-ci.yml` unchanged since `f8b5e16`; local replay of its jobs in the project's CI images | `make-dist` job replay (style check, autogen, configure, `make dist`) exit 0; `fedora-39-clang` replay (clang 17.0.1, `-Werror`) build exit 0 with 0 errors and 0 warnings in the series' files, and `genesys_unit_tests` PASS, after which `make check` stops at `testsuite/backend/escl_test` (`escl.h: requires libcurl, libavahi and libxml2`) — the same stop, same errors, on unmodified upstream `7103e09b0` run through the same dist-tarball path, so it is upstream's, not this series'. The real GitLab pipeline on v6 passed all seven jobs, so this stop did not occur there |
-| symlinks in the recreated tree | 0 (`git ls-files -s`, mode 120000) |
+| `tests/test_sane_magazine.py` against that build | 42 passed (after the test change described below; the test as of v6 failed one assertion against v7) |
+| upstream `genesys_unit_tests` (`make -C testsuite/backend/genesys check`) | PASS (1/1) |
+| `tests/test_sane_ops.py` | 47 passed; this suite does not use `SANE_BACKENDS_DIR`: it compiles this repository's `sane/gl126_ops.cpp` and tables (the cold-start table of commit 5 included), not the v7 build |
+| `tools/release_check.py`, default development build in `~/Dokument/Github/sane-backends` (not v7) | FULL VERIFICATION PASSED, 401 tests, 0 skipped |
+| Route A: fetch from the bundle in a clean clone | tip `cf21d432…`, tree `f2a530c1…`, identical |
+| Route B: `git am` of the five patches onto `a8676a6f7` in a clean clone | tree `f2a530c1…`, identical (tip `4f8f8b94…`) |
+| upstream CI `.gitlab-ci.yml`; local replay of its jobs in the project's CI images | `make-dist` job replay exit 0; `fedora-39-clang` replay (clang 17.0.1, `-Werror`) `BUILD_EXIT=0`, no `error:`/`warning:` lines in the series' files, `genesys_unit_tests` PASS, after which `make check` stops at `testsuite/backend/escl_test` (`escl.h: requires libcurl, libavahi and libxml2`, `CHECK_EXIT=2`) — the same stop as on v6, which is the local environment's, not the series' |
+| symlinks in the recreated trees | 0 (`git ls-files -s`, mode 120000), both routes |
+
+Two test changes were needed in this repository (2026-10-13), both in the
+tests, not in the series. (1) The SONAME shim described above; without it
+the probes loaded the system `libsane.so.1` and failed with an undefined
+symbol. (2) `test_sane_magazine.py` asserted that the option
+`scan-exposure-time` is inactive on GL126; upstream removed that option,
+so the assertion failed against v7 (`AssertionError:
+('scan-exposure-time', [...])`). The test now checks that option only
+where it exists, so the same test passes against the development clone
+(older upstream, option present) and against v7. All three suites were
+re-run after the changes: 7 / 6 / 42 against v7 and 7 / 6 / 42 against the
+development build.
 
 Not run: `tstbackend` (any level), `scanimage`, and anything that touches
-the scanner. The `tstbackend -l 1` result in the history above is for the
-v3 and v4 builds.
+the scanner.
 
 ## What was pushed, and from where
 
-This package is built and exported locally and committed to
-`cgillinger/opticfilm135i-linux`. The owner pushed the v5 branch to his
-own fork himself, from the v5 worktree, to open the merge request. v6
-was pushed by him to the same merge request on 2026-10-02. Nothing is pushed to the SANE project's repository from the development
-clone, which tracks the real upstream, and no automated session pushed
-anything to GitLab.
+Nothing from v7 is pushed. This package is built and exported locally and
+committed to `cgillinger/opticfilm135i-linux` (a local branch, not
+pushed at the time of writing). The owner pushed the v5 branch to his own
+fork himself, from the v5 worktree, to open the merge request, and v6 to
+the same merge request on 2026-10-02; v7 is for him to push if he decides
+to. Nothing is pushed to the SANE project's repository from the
+development clone, which tracks the real upstream, and no automated
+session pushed anything to GitLab.

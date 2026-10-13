@@ -86,12 +86,21 @@ def _build_probe():
     g = sb / "backend" / "genesys"
     libs = sb / "backend" / ".libs"
     binary = str(Path(tempfile.mkdtemp(prefix="gl126-cache-")) / "cacheprobe")
+    # sane-backends' autogen patches libtool so every backend plugin gets
+    # the SONAME libsane.so.1 (patches/ltmain.sh.patch); a probe linked
+    # against such a build would then resolve that name to the system's
+    # libsane at run time. A shim directory on the rpath, holding
+    # libsane.so.1 -> the built plugin, keeps the probe on the build under
+    # test. Unused (harmless) when the SONAME is libsane-genesys.so.1.
+    shim = Path(binary).parent / "ldshim"
+    shim.mkdir()
+    (shim / "libsane.so.1").symlink_to(libs / "libsane-genesys.so")
     cmd = [gxx, "-std=gnu++11", "-Wall", "-Wextra",
            "-DHAVE_CONFIG_H", "-DBACKEND_NAME=genesys",
            "-I", str(sb), "-I", str(g), "-I", str(sb / "backend"),
            "-I", str(sb / "include"), "-I", str(sb / "include" / "sane"),
            str(PROBE_SRC),
-           "-L", str(libs), "-lsane-genesys", f"-Wl,-rpath,{libs}",
+           "-L", str(libs), "-lsane-genesys", f"-Wl,-rpath,{shim}:{libs}",
            "-o", binary]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
