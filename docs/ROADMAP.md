@@ -972,8 +972,12 @@ acted on by the application, not by the firmware. Consequences:
   re-arm quickly — the application re-submits its interrupt read 0.7–1.8 s
   after each completion; whether the device stores a notification that
   arrives inside that window is not established, so a watcher that
-  re-arms slowly may lose presses. A button watcher and auto-load remain
-  future, undecided features.
+  re-arms slowly may lose presses. *Update 2026-10-13: a read-only button
+  API exists in the Python driver (`of135i buttons`, `Scanner.poll_buttons`,
+  polling reg 0x31 at ~10 Hz so a 0.3 s press is caught even without
+  interrupts; Test 99 named all four buttons from a cold scanner), and
+  `of135i watch` ejects on the Eject button. Auto-load on insert and a
+  user service remain future, undecided features.*
 
 **A "no film in this aperture" check (added 2026-09-15, Test 83).**
 Aperture coverage verifies positioning from the holder's plastic edges,

@@ -16,6 +16,12 @@ one exists; "offline" means implemented and tested without the scanner.
   byte is a button code (Eject 0x48, Positive 0x20, Negative 0x40, Custom
   0x28 = the bits a press clears in reg 0x31); a magazine insert produces
   no interrupt (reg 0x32 bit 0x40 falls). `tools/watch_events.py` added.
+- Button API (2026-10-12): `of135i.buttons` (codes and names),
+  `Scanner.poll_buttons()` (read-only, works on a cold scanner through
+  reg 0x31 and on an initialised one through EP 0x83), `of135i buttons`
+  (print presses) and `of135i watch` (ejects on the Eject button only,
+  edge-detected, magazine present). Verified on hardware: all four
+  buttons named correctly from a cold scanner (Test 99, 2026-10-13).
 - Static-analysis isolation barrier added (docs/static-analysis.md,
   `tests/test_vendor_isolation.py`): findings from vendor-binary analysis
   are recorded separately and kept out of `vendor_derived.py` unless

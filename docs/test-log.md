@@ -6928,3 +6928,35 @@ v4l webcam as the default device on this host ("unrecognized option
 
 **Provenance.** Logs in the private analysis area, `watch-20261012/`
 (`t98-python-load.log`, `t98-sane-load.log`).
+
+### Test 99: the button API on hardware — all four buttons named, cold scanner (2026-10-13)
+
+**Purpose.** Verify the callable button API (commit 1de9c7e:
+`of135i.buttons`, `Scanner.poll_buttons`, `of135i buttons`) against the
+front panel. Test 97 measured the codes with a raw register watch; this
+run uses the shipped command and its names.
+
+**Run.** Scanner on the bus, cold (reg 0x01 = 0x00, never homed since
+power-on), magazine reported present by the sensor. Read-only session:
+
+```
+of135i buttons --duration 60
+19:44:23 eject
+19:44:26 positive
+19:44:30 negative
+19:44:33 custom
+```
+
+One press per button, in that order, about three seconds apart; Power
+not pressed. One line per press, no repeats of a held press, no unknown
+codes, nothing else printed. No interrupt flows in the cold state, so
+every press was seen through reg 0x31 alone — the path the API documents
+for the cold scanner. Nothing moved, nothing was written.
+
+**Result: PASS (n = 1 per button).** The API names the four buttons as
+Test 97 measured them. Untested here: the EP 0x83 path on an initialised
+scanner (covered indirectly by Test 97's register watch, not by the API),
+and the Power button.
+
+**Provenance.** Log in the private analysis area, `watch-20261012/
+t99-buttons.log`.
