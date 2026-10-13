@@ -27,6 +27,7 @@ one exists; "offline" means implemented and tested without the scanner.
   are recorded separately and kept out of `vendor_derived.py` unless
   captures or our own measurement confirm them.
 
+- SANE submission package revision v7 (2026-10-13, offline): v6 rebased onto upstream a8676a6f7 after the exposure-time revert removed a field gl126.cpp assigned (always 0, assignment dropped; likewise one DISABLE line in genesys.cpp), plus a fifth commit carrying the cold-start fix (Test 98). Built with 0 warnings, 111 symbols, suites 7/6/42 (two test-side changes: the probes get an rpath shim for upstream's `libsane.so.1` SONAME, and the magazine suite checks `scan-exposure-time` only where the option exists), CI replay make-dist 0 and clang BUILD_EXIT=0 with the known local escl_test stop; prepared, not pushed.
 - SANE submission package revision v6 (2026-10-02, offline): v5 rebased
   onto upstream `7103e09b0`, after upstream merged a GL128 series
   (Plustek OpticFilm 8200i SE) that touched the same lines. Four commits;

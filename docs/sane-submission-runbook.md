@@ -10,6 +10,14 @@ re-deliberation.
 
 ## Where the three stand
 
+**Update 2026-10-13: v7 prepared, awaiting the owner's push.** Upstream
+moved again (`a8676a6f7`, including a revert that removed a field the
+series used) and the merge request shows a conflict. v7 (v6 rebased, plus
+the cold-start fix as a fifth commit) is built, tested and replayed
+offline and exported to `sane/wp3-package/`; it is not pushed. The merge
+request holds v6 until the owner pushes v7 himself. See
+`docs/sane-wp3-submission.md` and `sane/wp3-package/README.md`.
+
 **Executed 2026-09-29; it ended in the submission.** Step 1 (the final
 upstream re-check): upstream `master` had moved to `ccabaad` (two
 commits, touching only `frontend/jpegtopdf.c`), so no rebase was done and

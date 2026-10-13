@@ -14,6 +14,30 @@ list. Submitted is not accepted: whether and when anything is merged is
 the maintainers' decision. The completion of B2 is recorded in
 `docs/ROADMAP.md`.
 
+**Revision v7 (2026-10-13) is prepared, not pushed.** Upstream moved to
+`a8676a6f7` (34 commits past `7103e09b0`), which shows a conflict on the
+merge request, and its revert of the "scan exposure time" feature removed
+`Genesys_Settings::exposure_lperiod`, `SetupParams::exposure_lperiod` and
+the `scan-exposure-time` option that the series used. v7 is v6 rebased
+onto `a8676a6f7` (one conflict, `settings.h`, resolved by keeping our
+`frame` field and not re-adding `exposure_lperiod`; two one-line edits
+forced by the revert, in `gl126.cpp` and `genesys.cpp`) plus a fifth
+commit with the cold-start fix (Test 98). Branch and worktree
+`wp3-gl126-submission-v7` / `~/Dokument/Github/sane-wp3-v7`; five commits,
+tip `cf21d4327b86ec768c1dbfda25451052c994ee47`, tree
+`f2a530c170b91065c7b5f8b60b71e4aa73af4257`. Built with 0 warnings and 111
+gl126 symbols; suites 7 / 6 / 42 (two test-side changes were needed, an rpath shim
+for the `libsane.so.1` SONAME upstream's libtool patch gives the plugin and
+a conditional check of the removed `scan-exposure-time` option; the same
+tests pass against the development build); upstream `genesys_unit_tests`
+pass; the CI replay gave `make-dist` exit 0, clang `BUILD_EXIT=0`, and the
+same local `escl_test` stop as v6; both recreation routes give the same
+tree. The v7 build has not been run on hardware. Details and ids:
+`sane/wp3-package/README.md`. The development clone (`sane/`) is based on
+the older upstream and still has the exposure field, so `sane/gl126.cpp`
+and `sane/gl126-integration.patch` differ from v7 in those two lines by
+design. The merge request still holds v6 until the owner pushes v7.
+
 **Revision v6 (2026-10-02) was pushed by the author to the merge
 request's source branch on 2026-10-02.** Upstream had merged a GL128
 series (Plustek OpticFilm 8200i SE) that touches the same lines, so the
@@ -45,6 +69,7 @@ has not started and nothing is merged. §1 has the details.
 
 | | |
 |---|---|
+| v7 (prepared 2026-10-13, not pushed) | branch `wp3-gl126-submission-v7`, worktree `~/Dokument/Github/sane-wp3-v7`, base `a8676a6f7d21adf5137936a3b406fbde70795220`, 5 commits, tip `cf21d4327b86ec768c1dbfda25451052c994ee47`, tree `f2a530c170b91065c7b5f8b60b71e4aa73af4257` |
 | Branch | `wp3-gl126-submission-v6` (local name; pushed 2026-10-02 to the merge request, whose source branch in the fork is still named `wp3-gl126-submission-v5` but holds these v6 commits) |
 | Worktree | `~/Dokument/Github/sane-wp3-v6` (a `git worktree` of the sane-backends clone) |
 | Base | `7103e09b03aa8c7041c75e12f4d51fdf511be151`, "Merge branch 'genesys-gl128-opticfilm-8200i-se' into 'master'", fetched 2026-10-02 |

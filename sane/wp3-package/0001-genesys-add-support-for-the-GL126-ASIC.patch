@@ -1,7 +1,7 @@
-From 7c2f94b915e335d0d5882077dc279e795f48dfa8 Mon Sep 17 00:00:00 2001
+From f97e65cf805bc3c327c3830f5bbf3637ad15969a Mon Sep 17 00:00:00 2001
 From: Christian Gillinger <christian.gillinger@gmail.com>
 Date: Mon, 28 Sep 2026 19:07:54 +0200
-Subject: [PATCH 1/4] genesys: add support for the GL126 ASIC
+Subject: [PATCH 1/5] genesys: add support for the GL126 ASIC
 
 The Genesys GL126 as its own command set. It is close enough to the
 GL124 for the framework to fit, but its scan flow is the vendor's, so it
@@ -21,7 +21,7 @@ read-only wait put nothing on the wire.
  backend/Makefile.am                        |     4 +
  backend/genesys/enums.cpp                  |     2 +
  backend/genesys/enums.h                    |     3 +
- backend/genesys/gl126.cpp                  |  2734 ++
+ backend/genesys/gl126.cpp                  |  2731 ++
  backend/genesys/gl126.h                    |   183 +
  backend/genesys/gl126_lock.cpp             |   386 +
  backend/genesys/gl126_lock.h               |   244 +
@@ -37,7 +37,7 @@ read-only wait put nothing on the wire.
  backend/genesys/test_scanner_interface.h   |    21 +
  backend/genesys/test_usb_device.cpp        |     3 +
  backend/genesys/test_usb_device.h          |    15 +
- 19 files changed, 31139 insertions(+), 1 deletion(-)
+ 19 files changed, 31136 insertions(+), 1 deletion(-)
  create mode 100644 backend/genesys/gl126.cpp
  create mode 100644 backend/genesys/gl126.h
  create mode 100644 backend/genesys/gl126_lock.cpp
@@ -64,7 +64,7 @@ index 2233517bd..7f8cb0614 100644
      genesys/gl841.cpp genesys/gl841.h genesys/gl841_registers.h \
      genesys/gl842.cpp genesys/gl842.h genesys/gl842_registers.h \
 diff --git a/backend/genesys/enums.cpp b/backend/genesys/enums.cpp
-index f4d5669bb..2054a5515 100644
+index 4012e0bac..8a5aa284e 100644
 --- a/backend/genesys/enums.cpp
 +++ b/backend/genesys/enums.cpp
 @@ -118,6 +118,7 @@ std::ostream& operator<<(std::ostream& out, ModelId id)
@@ -84,7 +84,7 @@ index f4d5669bb..2054a5515 100644
          case SensorId::CCD_PLUSTEK_OPTICFILM_7400_V1: out << "CCD_PLUSTEK_OPTICFILM_7400_V1"; break;
          case SensorId::CCD_PLUSTEK_OPTICFILM_7400_V2: out << "CCD_PLUSTEK_OPTICFILM_7400_V2"; break;
 diff --git a/backend/genesys/enums.h b/backend/genesys/enums.h
-index a9a83d42c..284627d49 100644
+index b8db6fa81..974fd2887 100644
 --- a/backend/genesys/enums.h
 +++ b/backend/genesys/enums.h
 @@ -179,6 +179,7 @@ enum class ModelId : unsigned
@@ -103,7 +103,7 @@ index a9a83d42c..284627d49 100644
      CCD_PLUSTEK_OPTICFILM_7300,
      CCD_PLUSTEK_OPTICFILM_7400_V1,
      CCD_PLUSTEK_OPTICFILM_7400_V2,
-@@ -463,6 +465,7 @@ enum class AsicType : unsigned
+@@ -464,6 +466,7 @@ enum class AsicType : unsigned
      GL846,
      GL847,
      GL124,
@@ -113,10 +113,10 @@ index a9a83d42c..284627d49 100644
  
 diff --git a/backend/genesys/gl126.cpp b/backend/genesys/gl126.cpp
 new file mode 100644
-index 000000000..7d6d126d2
+index 000000000..52df54993
 --- /dev/null
 +++ b/backend/genesys/gl126.cpp
-@@ -0,0 +1,2734 @@
+@@ -0,0 +1,2731 @@
 +/* sane - Scanner Access Now Easy.
 +
 +   Copyright (C) 2026 Christian Gillinger
@@ -2106,12 +2106,9 @@ index 000000000..7d6d126d2
 +        session.params.starty = 0;
 +    }
 +    /* As gl124: these come from the device's current settings, which the
-+       core keeps valid from sane_open on, whereas the incoming settings
-+       object carries the frontend's exposure field unset at option-init
-+       time. */
++       core keeps valid from sane_open on. */
 +    session.params.contrast_adjustment = dev->settings.contrast;
 +    session.params.brightness_adjustment = dev->settings.brightness;
-+    session.params.exposure_lperiod = dev->settings.exposure_lperiod;
 +    /* No pixel stagger (the sensor is a single line per colour); the colour
 +       line shift is not ignored, for the infrared image either:
 +       compute_session() takes it from the model's ld_shift and
@@ -31292,7 +31289,7 @@ index e1fcbf749..b80c7a664 100644
          reg.init_reg(0x5e, value & 0xff);
      } else {
 diff --git a/backend/genesys/settings.h b/backend/genesys/settings.h
-index 5713912ae..54e4f6fa9 100644
+index d4049410f..2d1daccdd 100644
 --- a/backend/genesys/settings.h
 +++ b/backend/genesys/settings.h
 @@ -64,6 +64,10 @@ struct Genesys_Settings
@@ -31303,10 +31300,10 @@ index 5713912ae..54e4f6fa9 100644
 +    // the transport is positioned to it by an absolute feed from home
 +    unsigned frame = 1;
 +
-     // exposure time sent to scanner (i.e. LPERIOD)
-     int exposure_lperiod = 0;
- 
-@@ -247,6 +251,11 @@ struct ScanSession {
+     unsigned get_channels() const
+     {
+         if (scan_mode == ScanColorMode::COLOR_SINGLE_PASS)
+@@ -240,6 +244,11 @@ struct ScanSession {
      // thinner than the CCD element). Computed according to stagger_y.
      unsigned num_staggered_lines = 0;
  
