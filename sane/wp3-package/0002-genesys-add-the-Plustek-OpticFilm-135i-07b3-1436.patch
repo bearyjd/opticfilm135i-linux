@@ -1,4 +1,4 @@
-From 8a7fbd9f2b7e64b456d5ac4c6492d3be8c74e316 Mon Sep 17 00:00:00 2001
+From 787f0371851deee74449750466a172bae2dade76 Mon Sep 17 00:00:00 2001
 From: Christian Gillinger <christian.gillinger@gmail.com>
 Date: Mon, 28 Sep 2026 19:07:54 +0200
 Subject: [PATCH 2/5] genesys: add the Plustek OpticFilm 135i (07b3:1436)
