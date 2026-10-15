@@ -24,7 +24,7 @@
 #include "gl126_registers.h"
 #include "gl126_tables.h"
 #include "gl126_ops.h"
-#include "gl126_lock.h"
+#include "gl126_mark.h"
 #include "test_settings.h"
 #include "image_pipeline.h"
 
@@ -861,7 +861,7 @@ MagazineSensor read_magazine_sensor(Genesys_Device* dev)
    100 ms; require the loader sensor clear on 2 consecutive reads, then
    present on 5 consecutive reads, then a 600 ms settle (the vendor's
    own insert-to-LOAD delay) before returning Seen. Timeout at 120 s
-   (capped, test mode only, by $OF135I_SANE_POLL_CAP_MS, the same gate
+   (capped, test mode only, by $SANE_GL126_TEST_POLL_CAP_MS, the same gate
    magazine_policy() uses, so a shorter wait can never reach real
    hardware). No register write of any kind occurs in this loop: only
    read_register, sleep_ms and the one test_checkpoint() per poll a
@@ -880,7 +880,7 @@ enum class EdgeWaitOutcome {
 };
 
 /* The wait's own timeout budget, gated exactly like magazine_policy():
-   $OF135I_SANE_POLL_CAP_MS only ever shortens it, and only when the wire
+   $SANE_GL126_TEST_POLL_CAP_MS only ever shortens it, and only when the wire
    is a mock in test mode, never on real hardware, no matter what an
    environment happens to carry (the same reasoning magazine_policy()
    documents). This wait has no wire and no run_program() budget of its
@@ -891,7 +891,7 @@ unsigned edge_wait_timeout_ms(Genesys_Device* dev)
     if (!dev->interface->is_mock() || !is_testing_mode()) {
         return budget;
     }
-    const char* cap = std::getenv("OF135I_SANE_POLL_CAP_MS");
+    const char* cap = std::getenv("SANE_GL126_TEST_POLL_CAP_MS");
     if (cap != nullptr && *cap != '\0') {
         long v = std::strtol(cap, nullptr, 10);
         if (v > 0 && static_cast<unsigned>(v) < budget) {
@@ -1042,7 +1042,7 @@ RunPolicy magazine_policy(Genesys_Device* dev)
     RunPolicy policy;
     policy.poll_timeout_ms = 30000;
     policy.masked_timeout_ms = 30000;
-    /* $OF135I_SANE_POLL_CAP_MS caps every poll site's wait, and is read
+    /* $SANE_GL126_TEST_POLL_CAP_MS caps every poll site's wait, and is read
        only when the wire is a mock, the backend's test mode, where the
        device answers nothing and the cold-start program would otherwise
        spend the driver's real 1.5 s and 30 s budgets at nineteen poll
@@ -1059,7 +1059,7 @@ RunPolicy magazine_policy(Genesys_Device* dev)
     if (!dev->interface->is_mock() || !is_testing_mode()) {
         return policy;
     }
-    const char* cap = std::getenv("OF135I_SANE_POLL_CAP_MS");
+    const char* cap = std::getenv("SANE_GL126_TEST_POLL_CAP_MS");
     if (cap != nullptr && *cap != '\0') {
         long v = std::strtol(cap, nullptr, 10);
         if (v > 0) {

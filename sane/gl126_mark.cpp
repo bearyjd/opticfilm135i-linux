@@ -18,10 +18,9 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#include "gl126_lock.h"
+#include "gl126_mark.h"
 
 #include <fcntl.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -29,24 +28,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <stdexcept>
 
 namespace genesys {
 namespace gl126 {
 
 namespace {
-
-/* One fd for the whole process, one lock path per host, exactly like
-   the driver (a single process lock instance per session, no per-device
-   path). -1 means not held. flock() is a property of the open file
-   description, so a second fd in the same process would conflict with
-   the first rather than share it, hence one fd, reference-counted rather
-   than reopened. */
-int g_lock_fd = -1;
-
-/* How many acquire() calls are currently outstanding. 0 means not held
-   (g_lock_fd == -1 iff g_lock_refs == 0). */
-int g_lock_refs = 0;
 
 std::string now_iso8601_utc()
 {
@@ -58,176 +44,17 @@ std::string now_iso8601_utc()
     return std::string(buf);
 }
 
-/* Refuse to lock or write through anything but a plain, ordinary file at
-   the well-known path, with exactly one hard link, at the well-known
-   path: both the lock and the magazine mark live at a predictable spot
-   in a world-writable directory (/tmp), so a symlink planted there
-   (pointing at, say, a config file this process can overwrite), a
-   directory dropped in its place, or a hard link to some other file
-   this process can write must never be locked or written through.
-   O_NOFOLLOW makes the open() itself fail (ELOOP) on the symlink case;
-   this check catches what O_NOFOLLOW does not: a directory (an
-   O_RDONLY open of a directory succeeds), a device node created at the
-   path, or, since a hard link is not a symlink at all, just another
-   directory entry for the same regular-file inode, a hard link onto
-   a victim file (st_nlink >= 2; an ordinary, never-linked lock/mark
-   file always has st_nlink == 1). Throws with `path` in the message;
-   the caller has not touched the fd's content yet. */
-void require_plain_file(int fd, const std::string& path)
-{
-    struct stat st{};
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-        close(fd);
-        throw std::runtime_error(std::string("gl126: ") + path +
-                                 " is not a regular file, refusing to use it "
-                                 "as the lock/mark file");
-    }
-    if (st.st_nlink != 1) {
-        close(fd);
-        throw std::runtime_error(std::string("gl126: ") + path +
-                                 " has more than one hard link (possible "
-                                 "hard-link attack), refusing to use it as "
-                                 "the lock/mark file");
-    }
-}
-
-std::string read_holder(int fd)
-{
-    if (lseek(fd, 0, SEEK_SET) < 0) {
-        return std::string();
-    }
-    char buf[128];
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n <= 0) {
-        return std::string();
-    }
-    std::string s(buf, static_cast<std::size_t>(n));
-    // trim trailing whitespace (the file ends in "\n")
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' ||
-                          s.back() == ' ' || s.back() == '\t')) {
-        s.pop_back();
-    }
-    return s;
-}
-
 } // namespace
-
-const char* process_lock_default_path()
-{
-    return "/tmp/of135i-07b3-1436.lock";
-}
-
-std::string process_lock_path()
-{
-    const char* env = std::getenv("OF135I_LOCK_FILE");
-    if (env != nullptr && env[0] != '\0') {
-        return std::string(env);
-    }
-    return std::string(process_lock_default_path());
-}
-
-bool process_lock_acquire(std::string* holder)
-{
-    if (g_lock_fd != -1) {
-        // Already held by this process: hand out another reference
-        // rather than retaking the flock (which would be a harmless
-        // no-op anyway, but refs must track how many releases are owed).
-        ++g_lock_refs;
-        return true;
-    }
-
-    std::string path = process_lock_path();
-
-    // O_NOFOLLOW: the lock lives at a predictable path in a shared,
-    // world-writable directory (/tmp), never follow a symlink planted
-    // there onto some other file this process happens to be able to
-    // write to. A symlink at the path fails open() with ELOOP.
-    // O_NONBLOCK: the same predictable path could instead hold a FIFO or
-    // a device node; without O_NONBLOCK, opening a FIFO for reading (or
-    // some character devices) blocks the open() itself until a writer
-    // shows up, which would hang this call before the regular-file check
-    // below ever runs. On a regular file O_NONBLOCK is a no-op, it does
-    // not affect the flock() or the later read()/write() calls.
-    int fd = open(path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0666);
-    if (fd < 0 && (errno == EACCES || errno == EPERM)) {
-        // Read-only fallback: flock() works on a read-only fd, it is the
-        // write of the holder line afterwards that is best-effort.
-        fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-    }
-    if (fd < 0 && errno == ELOOP) {
-        throw std::runtime_error(std::string("gl126: ") + path +
-                                 " is a symbolic link, refusing to lock through it");
-    }
-    if (fd < 0) {
-        throw std::runtime_error(std::string("gl126: could not open lock file ") +
-                                 path + ": " + std::strerror(errno));
-    }
-
-    require_plain_file(fd, path); // throws; e.g. a directory or hard link at the path
-
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        if (errno == EWOULDBLOCK || errno == EAGAIN) {
-            if (holder != nullptr) {
-                *holder = read_holder(fd);
-            }
-            close(fd);
-            return false;
-        }
-        int err = errno;
-        close(fd);
-        throw std::runtime_error(std::string("gl126: could not lock ") +
-                                 path + ": " + std::strerror(err));
-    }
-
-    g_lock_fd = fd;
-    g_lock_refs = 1;
-
-    // Best-effort holder line, exactly the driver's own format; a
-    // read-only fd cannot be written to, and that is fine, the lock
-    // itself is what matters.
-    if (ftruncate(g_lock_fd, 0) == 0) {
-        std::string line = "pid " + std::to_string(static_cast<long>(getpid())) +
-                           " since " + now_iso8601_utc() + " (sane genesys gl126)\n";
-        ssize_t written = write(g_lock_fd, line.data(), line.size());
-        (void)written; // best-effort, mirrors the driver's "except OSError: pass"
-    }
-
-    return true;
-}
-
-void process_lock_release()
-{
-    if (g_lock_refs == 0) {
-        // No-op: nothing to release. Covers both "never acquired" and
-        // "already released"; callers are not required to track
-        // whether their own acquire succeeded before calling this.
-        return;
-    }
-    --g_lock_refs;
-    if (g_lock_refs > 0) {
-        // Another owner in this process still holds a reference.
-        return;
-    }
-    flock(g_lock_fd, LOCK_UN);
-    close(g_lock_fd);
-    g_lock_fd = -1;
-}
-
-bool process_lock_held()
-{
-    return g_lock_refs > 0;
-}
-
-int process_lock_refs()
-{
-    return g_lock_refs;
-}
 
 // ------------------------------------------------ the magazine mark
 
 std::string magazine_mark_path()
 {
-    return process_lock_path() + ".magazine";
+    const char* env = std::getenv("SANE_GL126_MAGAZINE_MARK");
+    if (env != nullptr && env[0] != '\0') {
+        return std::string(env);
+    }
+    return std::string("/tmp/sane-gl126-07b3-1436.magazine");
 }
 
 const char* magazine_mark_kind_name(MagazineMarkKind kind)

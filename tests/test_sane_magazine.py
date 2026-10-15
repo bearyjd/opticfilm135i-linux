@@ -11,7 +11,7 @@ sane_start. "Load film" releases, the next scan loads.
 What the other suites already cover: tests/test_sane_ops.py proves every
 one of the five programs (cold_init, open, jog, load, eject) puts exactly
 the Python driver's transfers on the wire, in the driver's order, and
-tests/test_sane_lock.py proves the on-disk "a release is pending" mark.
+tests/test_sane_mark.py proves the on-disk "a release is pending" mark.
 What is left, and what this file covers, is the part that only exists
 inside the built backend:
 
@@ -154,9 +154,9 @@ def _skip(name):
     return "skipped"
 
 
-def _run(probe, *args, lock_dir=None, poll_cap_ms=5):
+def _run(probe, *args, mark_dir=None, poll_cap_ms=5):
     """Run the probe with an isolated HOME (so no real calibration file is
-    read) and an isolated lock/mark path (so a test can never disturb the
+    read) and an isolated mark path (so a test can never disturb the
     real one, nor a real session a test).
 
     `poll_cap_ms` defaults to 5: the mock never answers a poll, so every
@@ -170,8 +170,8 @@ def _run(probe, *args, lock_dir=None, poll_cap_ms=5):
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, HOME=tmp)
         env.pop("SANE_DEBUG_GENESYS", None)
-        env["OF135I_LOCK_FILE"] = str(Path(lock_dir or tmp) / "of135i.lock")
-        env["OF135I_SANE_POLL_CAP_MS"] = str(poll_cap_ms)
+        env["SANE_GL126_MAGAZINE_MARK"] = str(Path(mark_dir or tmp) / "mark")
+        env["SANE_GL126_TEST_POLL_CAP_MS"] = str(poll_cap_ms)
         r = subprocess.run([probe, *args], capture_output=True, text=True,
                            env=env, timeout=180)
     assert r.returncode == 0, f"probe exit {r.returncode}: {r.stdout}\n{r.stderr}"
@@ -503,7 +503,7 @@ def test_a_cold_read_forces_the_full_release_path_even_from_ejected():
 def test_an_ejected_mark_from_another_process_refuses_the_scan():
     """The cross-process case the mark was built for in the first place:
     `scanimage --eject-film=yes` in one process, a plain scan in the
-    next. Two SEPARATE probe invocations sharing one OF135I_LOCK_FILE --
+    next. Two SEPARATE probe invocations sharing one SANE_GL126_MAGAZINE_MARK --
     the first writes an Ejected mark and exits (no in-process state
     survives that), the second knows nothing except what it reads from
     disk, and (WP-5) load_document() refuses NO_DOCS regardless -- the
@@ -515,18 +515,18 @@ def test_an_ejected_mark_from_another_process_refuses_the_scan():
     on either write or read, the mark would name a device that never
     matches and the refusal would not happen -- the scan would proceed
     with a warning instead. (The Released kind's equivalent round trip is
-    covered by tests/test_sane_lock.py's test_magazine_mark_round_trip,
+    covered by tests/test_sane_mark.py's test_magazine_mark_round_trip,
     unaffected by this change.)"""
     probe = _build_probe()
     if probe is None:
         return _skip("test_an_ejected_mark_from_another_process_refuses_the_scan")
 
-    with tempfile.TemporaryDirectory() as lock_dir:
-        r1 = _run(probe, "scenario", "state-mark-ejected-pending", lock_dir=lock_dir)
+    with tempfile.TemporaryDirectory() as mark_dir:
+        r1 = _run(probe, "scenario", "state-mark-ejected-pending", mark_dir=mark_dir)
         assert r1["mark"].startswith("present ejected"), r1["mark"]
         assert " " in r1["key"], r1["key"]   # the test device's name has a space
 
-        r2 = _run(probe, "scenario", "load-mark-ejected-crossproc", lock_dir=lock_dir)
+        r2 = _run(probe, "scenario", "load-mark-ejected-crossproc", mark_dir=mark_dir)
     assert r2["key"] == r1["key"], (r1["key"], r2["key"])
     status, msg = r2["statuses"][0]
     assert status == SANE_STATUS_NO_DOCS, r2["statuses"]
@@ -1254,12 +1254,12 @@ def test_a_failed_mark_persists_and_blocks_everything():
     assert "failed earlier" in load[1], load[1]
     assert r["mark"].startswith("present failed"), r["mark"]
 
-    with tempfile.TemporaryDirectory() as lock_dir:
-        r1 = _run(probe, "scenario", "state-mark-failed-pending", lock_dir=lock_dir)
+    with tempfile.TemporaryDirectory() as mark_dir:
+        r1 = _run(probe, "scenario", "state-mark-failed-pending", mark_dir=mark_dir)
         assert r1["mark"].startswith("present failed"), r1["mark"]
         assert r1["text"].startswith("failed"), r1["text"]
 
-        r2 = _run(probe, "scenario", "load-mark-failed-crossproc", lock_dir=lock_dir)
+        r2 = _run(probe, "scenario", "load-mark-failed-crossproc", mark_dir=mark_dir)
     assert len(r2["statuses"]) == 3, r2["statuses"]
     for status, msg in r2["statuses"]:
         assert status == SANE_STATUS_INVAL, r2["statuses"]

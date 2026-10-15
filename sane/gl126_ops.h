@@ -29,7 +29,7 @@
    plus the pure offset/residual computation.
 
    Deliberately free of genesys headers (no genesys.h, no Genesys_Device),
-   like gl126_lock, so it compiles and is exercised standalone with a
+   like gl126_mark, so it compiles and is exercised standalone with a
    tiny probe program. gl126.cpp (the main session's file, not touched
    here) implements `Wire` over `UsbDevice` with three one-line forwards
    and calls run_program() for offset_calibration(). */
@@ -180,7 +180,7 @@ struct RunPolicy {
         1.5 s and 30 s budgets, which a test would otherwise spend in real
         wall-clock time at every one of its nineteen poll sites (ten
         best-effort, nine fail-closed motor completions).
-        gl126.cpp sets it from $OF135I_SANE_POLL_CAP_MS. */
+        gl126.cpp sets it from $SANE_GL126_TEST_POLL_CAP_MS. */
     unsigned max_poll_timeout_ms = 0;
 };
 
