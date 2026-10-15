@@ -226,7 +226,7 @@ for the whole session. A second of135i process — writing **or**
 read-only `doctor` — is refused with `ScannerBusyError` before it
 touches the device; two processes configuring or driving the scanner
 at once is itself a hazard, so `doctor` respects the lock rather than
-racing a running scan. The kernel drops the lock when the holder
+racing a running scan. The lock is between `of135i` processes only: the SANE backend takes no process lock (it did in revisions v1 to v7 of the submission), so do not run `of135i` commands, not even read-only ones, while a SANE session is open. The kernel drops the lock when the holder
 exits, so a crash never leaves a stale lock. Releasing the lock says
 nothing about the scanner's physical state: a failed session releases
 it too, and the hardware may still need a power cycle.

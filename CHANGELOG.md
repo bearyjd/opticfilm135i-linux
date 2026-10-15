@@ -6,6 +6,20 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- SANE submission revision v8 (2026-10-15, prepared offline, not pushed, not
+  hardware-run): the maintainer asked why the backend takes a process lock
+  shared with an external driver, so v8 drops the lock from the backend
+  entirely. `sane/gl126_lock.{h,cpp}` is now `sane/gl126_mark.{h,cpp}` and
+  holds only the magazine mark (same file hardening); the mark file moved
+  to `/tmp/sane-gl126-07b3-1436.magazine` (override
+  `SANE_GL126_MAGAZINE_MARK`, was `$OF135I_LOCK_FILE` + `.magazine`); the
+  test-mode `OF135I_SANE_POLL_CAP_MS` is now `SANE_GL126_TEST_POLL_CAP_MS`.
+  The `.desc` entry says `:basic` with "Experimental: developed and tested on
+  a single unit". The Python driver is unchanged and keeps its own
+  `ProcessLock`; do not run `of135i` commands while a SANE session is open.
+  `tests/test_sane_lock.py` became `tests/test_sane_mark.py`. Package:
+  `sane/wp3-package/`.
+
 ## v0.2.2 — 2026-10-13
 The cold-start fix (first finding admitted through the static-analysis barrier), the readable front-panel buttons, and submission revision v7 on the merge request. See [docs/release-notes-v0.2.2.md](docs/release-notes-v0.2.2.md).
 

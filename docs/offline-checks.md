@@ -87,14 +87,14 @@ hardware.
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```
-for t in test_sane_lock test_sane_ops test_sane_geometry test_sane_install; do
+for t in test_sane_mark test_sane_ops test_sane_geometry test_sane_install; do
     .venv/bin/python tests/$t.py || exit 1
 done
 ```
 
 Each builds a small standalone probe (or, for `test_sane_install`, a
-stand-in library) with `g++`/`cc` and exercises it: the process lock and
-the hardened lock-file handling, the op programs' byte-for-byte
+stand-in library) with `g++`/`cc` and exercises it: the magazine mark file and
+its hardened file handling, the op programs' byte-for-byte
 wire-equality against the Python driver, the geometry ledger, and the
 installer's staging behaviour. Without a compiler they self-skip.
 

@@ -26,7 +26,7 @@ done
 ```
 
 All **nine** files: `Makefile.am` lists `gl126_ops` (the op-program runner,
-hooks 2-7) and `gl126_lock` (the process lock shared with the Python driver)
+hooks 2-7) and `gl126_mark` (the cross-process magazine mark; named `gl126_lock` and also holding a process lock shared with the Python driver until v8)
 as well, and a five-file symlink set -- the list this document carried until
 2026-09-13 -- produces a library that does not link. `tools/sane_install.sh
 status` checks all nine.
@@ -158,7 +158,7 @@ Precondition: reg 0x01 = 0x22 or 0x00. Trigger: `scanimage -d genesys:… -A`.
 
 | Step | Wire | Same as the driver? |
 |---|---|---|
-| process lock | `gl126::process_lock_acquire()` (`sane/gl126_lock.{h,cpp}`), no wire traffic; `EWOULDBLOCK` refuses with `SANE_STATUS_DEVICE_BUSY` before `sanei_usb_open` | yes (same lock file/path as `ProcessLock`, see "Mutual exclusion with the driver" below) |
+| process lock (**removed in v8**) | `gl126::process_lock_acquire()` (`sane/gl126_lock.{h,cpp}`), no wire traffic; `EWOULDBLOCK` refuses with `SANE_STATUS_DEVICE_BUSY` before `sanei_usb_open` | yes (same lock file/path as `ProcessLock`, see "Mutual exclusion with the driver" below) |
 | `sanei_usb_open` | `libusb_open`, read the current configuration, claim interface 0 -- no SET_CONFIGURATION when the kernel has already configured the unit (it has: one configuration, value 1), no kernel-driver detach | driver: `set_configuration` after the check (step 6 of `UsbIo.open`) -- see decision 6 |
 | `check_start_state` | read reg 0x01 (`0xc0/0x04 0x8e`) | yes (`safety.py`) |
 | `init` / `asic_boot` | nothing | yes (`Scanner.open()` writes nothing) |
@@ -342,7 +342,7 @@ buffers. From `tables_dpi*.py`:
    only the engine-running states are then unprotected by that one
    request, and no write follows a failed check either way.
 
-   *Mutual exclusion with the driver -- decided 2026-09-07, implemented
+   *Mutual exclusion with the driver -- HISTORICAL: dropped in v8 (2026-10-15) at the SANE maintainer's request. The Python driver keeps its own `ProcessLock`; the backend no longer takes it, so on a host that runs both, do not run `of135i` read-only commands while a SANE session is open. The paragraph below describes what v1 to v7 did.* Mutual exclusion with the driver -- decided 2026-09-07, implemented
    2026-09-08:* before this it rested on the interface claim alone. That
    fails closed in both directions (the driver's `set_configuration`
    gets `EBUSY` after its check and refuses with zero writes, Test 45;

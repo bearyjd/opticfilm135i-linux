@@ -101,9 +101,10 @@ magazine loose). So the mark is kept in two places and both must
 agree before Stage B runs:
 
 1. **In-process:** a per-device record set by Stage A.
-2. **On disk:** `<lock path>.magazine` next to the process lock
-   (`/tmp/of135i-07b3-1436.lock.magazine`, `$OF135I_LOCK_FILE` respected
-   like the lock), written by Stage A with the USB bus:address of the
+2. **On disk:** `/tmp/sane-gl126-07b3-1436.magazine` (`$SANE_GL126_MAGAZINE_MARK`
+   respected; until v8 this was `<lock path>.magazine`, i.e.
+   `/tmp/of135i-07b3-1436.lock.magazine`, next to the process lock),
+   written by Stage A with the USB bus:address of the
    unit it jogged, read by a later process.
 
 A disk mark alone is never enough: before LOAD the backend re-reads
@@ -334,10 +335,10 @@ survives a process boundary the same way a release's does.
 - `sane/gl126_ops.{h,cpp}` — the two kinds in `run_program()`;
   `do_read` reads the op's own length; `magazine_program()` lookup;
   `LoadStatusMask` constants mirrored from `device.py`.
-- `sane/gl126_lock.{h,cpp}` — the disk mark (`magazine_mark_path/
-  _write/_read/_clear`), next to the process lock whose path it borrows.
+- `sane/gl126_mark.{h,cpp}` (`gl126_lock.{h,cpp}` until v8) — the disk mark (`magazine_mark_path/
+  _write/_read/_clear`); until v8 it sat next to the process lock whose path it borrowed.
   It lives there, not in `gl126.cpp`, so it has no genesys dependency and
-  is exercised standalone by `tests/test_sane_lock.py`. The device key
+  is exercised standalone by `tests/test_sane_mark.py` (`test_sane_lock.py` until v8). The device key
   goes on its own line: a SANE device name can contain spaces (the
   backend's own test mode produces `test device:0x07b3:0x1436`), and a
   space-delimited field silently truncated it into a different device.
@@ -399,7 +400,7 @@ survives a process boundary the same way a release's does.
    base-table-only state refuses read-only; `magazine` renders the
    expected text in each state.
 5. **The disk mark:** written/consumed/ignored as §2.1 says, under a
-   temporary `$OF135I_LOCK_FILE`; a mark for a different bus:address
+   temporary `$SANE_GL126_MAGAZINE_MARK` (`$OF135I_LOCK_FILE` until v8); a mark for a different bus:address
    is ignored; a mark with reg 0x01 ≠ 0x22 is ignored.
 6. `release_check` green, `gen_sane_tables.py --check` clean, the
    backend builds with zero warnings, the patch regenerated from the
@@ -552,7 +553,7 @@ not a tidy-up.
    `validate_scan_request()`, called by both, and the load half runs it
    before touching the device.
 3. **The poll cap was honoured on real hardware.**
-   `$OF135I_SANE_POLL_CAP_MS` was read unconditionally. A shorter wait is
+   `$OF135I_SANE_POLL_CAP_MS` (now `$SANE_GL126_TEST_POLL_CAP_MS`) was read unconditionally. A shorter wait is
    not automatically a safer one — a best-effort poll that gives up early
    continues to the next op, which on the unit could mean continuing
    before a move has finished. It is now read only when the scanner
@@ -565,7 +566,7 @@ not a tidy-up.
    completion failed.
 
 Also corrected in `docs/sane-wp4-hardware-plan.md`: the mark's path
-(`<lock path>.magazine`, i.e. `/tmp/of135i-07b3-1436.lock.magazine`),
+(`<lock path>.magazine`, i.e. `/tmp/of135i-07b3-1436.lock.magazine`; since v8 `/tmp/sane-gl126-07b3-1436.magazine`),
 and the stop rules — a failure ends the approved attempt and the log is
 read before any further motor command, rather than "power-cycle and
 start over".
@@ -913,7 +914,7 @@ wait for the operator's reseat, and LOAD, all inside a single call.
   exactly as this document describes (§3, §5).
 - The cross-process mark mechanism (§2.1, §10.1): `gl126_lock.h`'s
   `MagazineMarkKind`, now three kinds (`Released`, `Ejected`, and a new
-  `Loaded`, WP-5 section 3.3) instead of two, still living next to the
+  `Loaded`, WP-5 section 3.3) instead of two, still living (until v8) next to the
   process lock and still re-verified against the hardware before any use.
 - `eject-film` and its own state machine and preconditions (§3.4, §10.2,
   §10.3): unchanged by WP-5, since the button that used to trigger a

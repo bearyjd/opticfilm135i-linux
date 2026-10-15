@@ -26,8 +26,8 @@ deviation into a mystery.
 1. The Windows VM is off or the scanner is detached from it
    (`autoConnect` can steal the device at re-enumeration).
 2. No `of135i` process is running and no stale process lock is held:
-   `cat /tmp/of135i-07b3-1436.lock` (absent or a dead pid).
-3. No stale magazine mark: `rm -f /tmp/of135i-07b3-1436.lock.magazine`.
+   `cat /tmp/of135i-07b3-1436.lock` (absent or a dead pid; the SANE backend no longer takes this lock since v8).
+3. No stale magazine mark: `rm -f /tmp/sane-gl126-07b3-1436.magazine` (until v8: `/tmp/of135i-07b3-1436.lock.magazine`).
    A mark from an earlier session names a device address that no longer
    exists after a power cycle and would be ignored anyway, but starting
    from a clean state makes the log unambiguous.
@@ -44,7 +44,7 @@ deviation into a mystery.
 5. `SANE_DEBUG_GENESYS=8` for the runs below — enough to see every
    magazine transition and poll, low enough not to hex-dump an image
    (level 255 made a scan take 65 s instead of 18 s; never time with it).
-6. `OF135I_SANE_POLL_CAP_MS` is ignored on real hardware — the backend
+6. `OF135I_SANE_POLL_CAP_MS` (`SANE_GL126_TEST_POLL_CAP_MS` since v8) is ignored on real hardware — the backend
    reads it only when the scanner interface is a mock **and** the
    library is in test mode (`sane/gl126.cpp`, `magazine_policy()`), so a
    stray value in a shell profile cannot shorten a motor wait on the
@@ -94,7 +94,7 @@ Expected on the wire, in the debug log:
   loader-sensor bit set (0xf8);
 - `magazine unknown -> released`;
 - the mark file exists and names this device:
-  `cat /tmp/of135i-07b3-1436.lock.magazine`.
+  `cat /tmp/sane-gl126-07b3-1436.magazine` (until v8 `/tmp/of135i-07b3-1436.lock.magazine`).
 
 Expected mechanically: **the magazine pops loose.** Sound: the jog is a
 verified transport (Tests 17–23, 45, 51); report anything unusual.
@@ -241,7 +241,7 @@ any.
    that part is automatic and is the design.
 2. **Preserve what happened, before touching anything.** The debug
    output of the run, the magazine mark file if it still exists
-   (`/tmp/of135i-07b3-1436.lock.magazine`), the exit status, and what
+   (`/tmp/sane-gl126-07b3-1436.magazine`; until v8 `/tmp/of135i-07b3-1436.lock.magazine`), the exit status, and what
    the operator saw and heard. `of135i status` and `doctor` are
    read-only and may be run; nothing else may.
 3. **Then stop for real.** No further motor operation of any kind until

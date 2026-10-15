@@ -7,12 +7,38 @@ SANE project himself:
 "genesys: support for the GL126 and the Plustek OpticFilm 135i", from
 his own fork (`gitlab.com/cgillinger/backends`, branch
 `wp3-gl126-submission-v5`) into `sane-project/backends` `master`. Its
-description is §5 of this document followed by the ten known limitations
+description is §5 of this document followed by the known limitations
 of §6. The merge request's pipeline is green. There has been no
 maintainer response yet, and no mail has been sent to the sane-devel
 list. Submitted is not accepted: whether and when anything is merged is
 the maintainers' decision. The completion of B2 is recorded in
 `docs/ROADMAP.md`.
+
+**Revision v8 (2026-10-15) is prepared, offline, and not pushed.** The
+SANE maintainer asked why the backend takes a process lock shared with an
+external (out-of-tree) driver. Decision (the owner's): drop the lock from
+the submission entirely. v8 is v7 rebased onto upstream `59d255866` (none of
+the new upstream commits touch `backend/genesys` or `backend/Makefile.am`)
+with these changes: (1) `gl126_lock.{h,cpp}` becomes `gl126_mark.{h,cpp}`
+and loses everything about the lock (acquire/release, holder line,
+reference count); the magazine mark and all its file hardening are
+unchanged; (2) the mark path is now `/tmp/sane-gl126-07b3-1436.magazine`,
+override `SANE_GL126_MAGAZINE_MARK` (was `$OF135I_LOCK_FILE` + `.magazine`);
+(3) the test-mode poll cap variable `OF135I_SANE_POLL_CAP_MS` is now
+`SANE_GL126_TEST_POLL_CAP_MS` (behaviour unchanged, still read only when
+the interface is a mock and testing mode is on); (4) `sane_open_impl`/
+`sane_close_impl` no longer take or release anything (the lamp-off,
+`clear_halt` and no-`reset` handling stays); (5) the `.desc` status is
+`:basic`, not `:good`, and the comment says "Experimental: developed and
+tested on a single unit." (the owner's decision, to match how the
+maintainer described the submission). Limitation 6 (process lock) was
+removed and the state-file item rewritten on its own. **Not
+hardware-run.** No hardware run is needed for the lock removal: no byte
+sent to the scanner changes, and the lock itself never caused any USB
+traffic. The Python driver keeps its own `ProcessLock`; since the backend
+no longer takes it, on a host that runs both, do not run `of135i`
+read-only commands while a SANE session is open. Ids, test results and
+recreation routes: `sane/wp3-package/README.md`.
 
 **Revision v7 (2026-10-13) was pushed by the author to the merge request the same evening.** Upstream moved to
 `a8676a6f7` (34 commits past `7103e09b0`), which shows a conflict on the
@@ -192,7 +218,7 @@ that code path.)*
 
 1. **`genesys: add support for the GL126 ASIC`** — the command set and
    everything it needs: the nine `gl126_*` files (including
-   `gl126_lock.{h,cpp}`), the `AsicType` entry and its string mapping,
+   `gl126_mark.{h,cpp}`), the `AsicType` entry and its string mapping,
    two `ScanSession` fields for the dual-light profiles, the pipeline
    hook in `low.cpp`, the GL126 branch in the USB interface's bulk read,
    the test-interface addition and `Makefile.am`.
@@ -202,11 +228,14 @@ that code path.)*
 3. **`genesys: frame selection and magazine handling for the OpticFilm
    135i`** — the five options (`frame`, `load-film`, `eject-film`,
    `check-status`, `magazine`) in `genesys.{h,cpp}`, the options the
-   GL126 hooks do not implement made inactive for it, and the process
-   lock in `sane_open`/`sane_close`; all inactive on every other ASIC.
+   GL126 hooks do not implement made inactive for it, and the GL126-only
+   handling in `sane_close` (lamp off, `clear_halt`, no `reset`); all
+   inactive on every other ASIC. (v1 to v7 also took a process lock in
+   `sane_open`/`sane_close`; v8 does not, see the v8 note.)
 4. **`genesys: document the GL126 and the OpticFilm 135i`** — the man
    page's chip list, an `AUTHORS` entry, and the `.desc` status moving
-   from `:untested` to `:good`.
+   from `:untested` to `:basic`, with a comment marking the support as
+   experimental (v1 to v7 said `:good`).
 
 ## 3. What was verified, and how
 
@@ -448,25 +477,26 @@ Rewritten 2026-09-28 to that standard.*
    leaves it in an overflow state for other software was predicted but
    not observed: the one direct check afterwards on hardware read the
    endpoint normally.
-6. **A process lock shared with an external driver.** The backend takes a
-   `flock` on a well-known path to keep itself and the reverse-engineered
-   Python driver off the device simultaneously. No other genesys ASIC
-   needs this, and a reviewer may reasonably question it.
-7. **State on disk.** The magazine state (released, loaded, ejected or
-   failed) is recorded beside that lock so `scanimage`, which reaches the
-   backend in a fresh process each invocation, knows whether a scan may
-   start and whether the next `load-film` needs a release. Never trusted
-   alone: the hardware is re-read before any motor move. Also likely to
-   draw questions.
-8. **2400 dpi is anisotropic** (3600 across, 2400 along) and is resampled
+6. **State on disk.** The magazine state (released, loaded, ejected or
+   failed) is recorded in a small file, `/tmp/sane-gl126-07b3-1436.magazine`
+   (overridable with `SANE_GL126_MAGAZINE_MARK`, a test facility), so
+   `scanimage`, which reaches the backend in a fresh process each
+   invocation, knows whether a scan may start and whether the next
+   `load-film` needs a release. It is a hint only: the hardware is
+   re-read before any motor move, so a stale or missing file can never
+   authorise anything. The file is written atomically and opened with
+   `O_NOFOLLOW`/`O_NONBLOCK` and a regular-file, single-link check, because
+   its path is predictable and in a shared directory. The backend takes
+   no lock of any kind.
+7. **2400 dpi is anisotropic** (3600 across, 2400 along) and is resampled
    on the host so delivered pixels are square.
-9. **Colour rendering is not addressed.** The backend delivers linear raw
+8. **Colour rendering is not addressed.** The backend delivers linear raw
    data; rendering a negative is the frontend's job. The companion
    driver's preview shows a cast on some strips that also appears in the
    vendor's own rendering and has not been traced to any code
    (the analysis is in the companion repository). Nothing in this series depends
    on it.
-10. **Strip holder only.** The backend supports the 35 mm film-strip
+9. **Strip holder only.** The backend supports the 35 mm film-strip
     holder (frames 1 to 6). The four-slide holder that ships with the
     scanner and Plustek's optional panoramic holder are not supported:
     the backend has no slide positioning and no long-scan mode, and
@@ -490,7 +520,7 @@ they did before.
 | `settings.h` | `Genesys_Settings::frame` (default 1), `ScanSession::gl126_keep_parity` (default 2 = keep every line) | additive fields with defaults | none — no shared code reads them |
 | `genesys.h` | four new `Genesys_Option` values, `Genesys_Scanner::frame` | additive | option **indices** after `OPT_EXPIRATION_TIME` shift by four for every model; SANE frontends address options by name, and the four are `SANE_CAP_INACTIVE` on every other ASIC |
 | `genesys.cpp`, option setup / get / set | the `frame`, `magazine`, `load-film`, `eject-film` options | gated (inactive elsewhere) | none |
-| `genesys.cpp`, `sane_open_impl` / `sane_close_impl` | the process lock with its RAII guards; lamp-off, `clear_halt` and `reset` skipped at close | gated | none — the guard is armed only for GL126 |
+| `genesys.cpp`, `sane_open_impl` / `sane_close_impl` | lamp-off, `clear_halt` and `reset` skipped at close (v1 to v7 also carried a process lock here; removed in v8) | gated | none — gated on GL126 |
 | `genesys.cpp`, `genesys_flatbed_calibration` | `init_shading_data` and `move_to_ta` skipped | gated | none |
 | `genesys.cpp`, `genesys_start_scan` | home / TA moves, calibration-cache restore, `write_registers`, the post-`begin_scan` waits skipped; `load_document` also called for GL126 | gated | one line is not: `dev->parking = false` after the `if (dev->parking)` block now runs for every ASIC. Upstream's `sanei_genesys_wait_for_home` already clears `parking` on entry, so this is a redundant assignment, not a behaviour change |
 | `genesys.cpp`, `calculate_scan_settings` | `settings.frame = s->frame` | additive | none — the field is unused outside GL126 |
@@ -598,14 +628,14 @@ The renamed C++ functions themselves (`magazine_release` ->
 `magazine_load_film`, `magazine_load_if_pending` ->
 `magazine_check_scan_allowed`, both `gl126.h`/`gl126.cpp`), the new
 `wait_for_magazine_edge()`, `magazine_check_status_impl()`, the third
-mark kind `MagazineMarkKind::Loaded` (`gl126_lock.{h,cpp}`) and the
+mark kind `MagazineMarkKind::Loaded` (`gl126_mark.{h,cpp}`, named `gl126_lock.{h,cpp}` before v8) and the
 twelve status-value constants all live entirely inside the nine
 `gl126_*` files, not shared code, so -- like every other GL126-only
 change in this document -- they need no row here.
 
 **Review round two (2026-09-27, later the same day, docs/sane-wp5-load-
 button.md §9.5): nine more findings (A-I), all fixed inside `gl126.cpp`/
-`gl126_lock.{h,cpp}` -- a fourth mark kind (`Failed`), the post-edge
+`gl126_mark.{h,cpp}` (then `gl126_lock.{h,cpp}`) -- a fourth mark kind (`Failed`), the post-edge
 presence+class check, the pre-wait mark write, the Ejected-origin retry
 fix, the `saw_clear` debounce, and the `load_document()` cold read (item
 J) -- add NO new shared-code rows beyond the `test_scanner_interface.{h,
@@ -726,9 +756,10 @@ merged. Nothing is merged yet.
    §3); compiled code identical. The package is exactly the repository's
    `sane/` at the commit that records v5. v6 (2026-10-02) is v5 rebased
    onto upstream `7103e09b0` (§1); the nine GL126 files are unchanged.
-5. **Decide how much of the magazine machinery to offer.** Items 6 and 7
-   of §6 are the two most likely to be challenged; the file handling
-   behind them is hardened and documented in `gl126_lock.h`.
+5. **Decide how much of the magazine machinery to offer.** The state file
+   (item 6 of §6) is the most likely to be challenged; the file handling
+   behind it is hardened and documented in `gl126_mark.h`. (The process
+   lock, which was the other item, was dropped in v8.)
 6. **Christian's own decision on contact.** Nothing in this package
    initiates it, and nothing should without him doing it himself.
    Done 2026-09-29: the owner pushed the v5 branch to his own fork and

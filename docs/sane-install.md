@@ -520,16 +520,17 @@ tool:
 | position, calibrate, scan one frame, PARK | SANE — `scanimage` or digiKam | see §6 |
 | eject | the Python driver | `of135i eject` (from the post-PARK state) |
 
-The two sides exclude each other through one `flock` on
-`/tmp/of135i-07b3-1436.lock`: `sane_open` takes it, `sane_close` releases it
-(reference-counted, with scope guards). Practical consequence: **digiKam holds
-the device open for as long as its scanner dialog is open**, so `of135i eject`
-will report the scanner busy until that dialog is closed. Close the dialog
-first, then eject.
+The two sides do not lock each other: since v8 the backend takes no process
+lock (the Python driver keeps its own `ProcessLock`, which the backend does
+not take). Practical consequence: **digiKam holds the device open (the USB
+interface claimed) for as long as its scanner dialog is open**, so `of135i`
+commands that write will fail on the claim, and read-only ones such as
+`status` must not be run while a SANE session is open. Close the dialog
+first, then use `of135i`.
 
 **Mixing `of135i` and SANE leaves a mark the other side does not know
 about.** `of135i load`/`of135i eject` do not write the SANE-side
-cross-process mark (`/tmp/of135i-07b3-1436.lock.magazine`) at all -- only
+cross-process mark (`/tmp/sane-gl126-07b3-1436.magazine`; until v8 `/tmp/of135i-07b3-1436.lock.magazine`) at all -- only
 `Load film`/`Eject film`/a completed load do. So a load done through
 `of135i load` and then handed to a SANE scan is the documented CLI
 division above (Unknown, no mark -> proceeds with a warning, section
@@ -542,8 +543,8 @@ it as true again, possibly wrongly. Two ways out: press **Check status**
 (SANE) or run `scanimage -n --check-status` before the next SANE scan --
 a genuinely cold reg 0x01 clears any mark as stale; or, if the scanner
 is not cold, delete the mark file by hand
-(`rm -f /tmp/of135i-07b3-1436.lock.magazine`, or `$OF135I_LOCK_FILE.magazine`
-if that variable is set) before the next SANE session.
+(`rm -f /tmp/sane-gl126-07b3-1436.magazine`, or the file named by
+`$SANE_GL126_MAGAZINE_MARK` if that variable is set) before the next SANE session.
 
 **`scanimage -n --load-film` blocks for up to 120 s and prints nothing
 while it waits** (WP-5 section 3.7) -- this is expected, not a hang: take
