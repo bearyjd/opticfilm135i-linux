@@ -1,10 +1,11 @@
-From 6c7e30b3ecccb4833e9451cb3803a9a28f15d371 Mon Sep 17 00:00:00 2001
+From cfb390a6d9922d0b39fa7eb498b2ceef01497264 Mon Sep 17 00:00:00 2001
 From: Christian Gillinger <christian.gillinger@gmail.com>
 Date: Mon, 28 Sep 2026 19:07:54 +0200
 Subject: [PATCH 4/5] genesys: document the GL126 and the OpticFilm 135i
 
 The man page's chip list, an AUTHORS entry, and the .desc status from
-:untested to :good with a comment describing the scanner.
+:untested to :basic, with a comment describing the scanner and marking the
+support as experimental (one unit tested).
 ---
  AUTHORS                       | 3 ++-
  doc/descriptions/genesys.desc | 4 ++--
@@ -26,7 +27,7 @@ index 71d95ce58..127e83919 100644
   gt68xx:        Sergey Vlasov, Andreas Nowack, David Stevenson, and
                  Henning Geinitz
 diff --git a/doc/descriptions/genesys.desc b/doc/descriptions/genesys.desc
-index 2e8e33196..b05910e92 100644
+index 2e8e33196..236280577 100644
 --- a/doc/descriptions/genesys.desc
 +++ b/doc/descriptions/genesys.desc
 @@ -20,8 +20,8 @@
@@ -35,8 +36,8 @@ index 2e8e33196..b05910e92 100644
  :usbid "0x07b3" "0x1436"
 -:status :untested
 -:comment "GL126; backend skeleton, hardware bring-up in progress"
-+:status :good
-+:comment "GL126. 35mm film scanner: one frame of the strip per scan, selected by the 'frame' option (1-6); the magazine is loaded and ejected with the 'load-film' and 'eject-film' options. 600/1200/2400/3600/7200 dpi and an infrared pass. Tested on a single unit."
++:status :basic
++:comment "GL126. 35mm film scanner: one frame of the strip per scan, selected by the 'frame' option (1-6); the magazine is loaded and ejected with the 'load-film' and 'eject-film' options. 600/1200/2400/3600/7200 dpi and an infrared pass. Experimental: developed and tested on a single unit."
  
  :model "OpticFilm 7200"
  :interface "USB"

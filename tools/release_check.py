@@ -52,7 +52,7 @@ SUITES = (
     ("test_dual_overscan", "core"), ("test_calibration_cache", "core"),
     ("test_film110", "core"), ("test_vendor_isolation", "core"), ("test_watch_events", "core"), ("test_buttons", "core"),
     ("test_release_check", "core"),
-    ("test_sane_lock", "compiler"), ("test_sane_ops", "compiler"),
+    ("test_sane_mark", "compiler"), ("test_sane_ops", "compiler"),
     ("test_sane_geometry", "compiler"), ("test_sane_install", "compiler"),
     ("test_sane_open_params", "backend"), ("test_sane_calibration_cache", "backend"),
     ("test_sane_magazine", "backend"),

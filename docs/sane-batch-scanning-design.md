@@ -272,7 +272,7 @@ frontend calls `sane_cancel` between images.
 | residual dark_b on frame k (ROADMAP A10, Test 32) | today: `SANE_STATUS_IO_ERROR` after writes, i.e. power cycle mid-batch. The residual appears on later frames of one session (f2/f4, f2/f3/f4 on B5; frame 1 always healthy; none in Tests 59–60), so a batch is exactly where it bites. Recommended: port A10 (HW-confirmed in the driver, Test 36) — remember the last healthy dark_b per device, same profile, same `sane_open`; substitute and log; fail closed when none. It changes a calibration *input* only, as in the driver; owner's decision (§11) |
 | mid-image cancel / short read | unchanged `AbortedPass` / Failed path; batch reset |
 | PARK failure after frame k | unchanged: pass Failed, the final `sane_read` reports it; batch reset |
-| lock conflict | none mid-batch: the process `flock` is held from `sane_open` to `sane_close`, so no `of135i` or second SANE process can touch the device between frames |
+| lock conflict | none: since v8 the backend takes no process lock (before v8 it held the driver's `flock` from `sane_open` to `sane_close`). Between frames nothing but this handle drives the device unless the operator runs `of135i` or a second SANE client at the same time, which is the operator's to avoid |
 | mark conflict | cannot change mid-batch except through this handle's buttons (which reset the batch); a stale `loaded` mark at batch start is WP-5 §3.4's case, handled identically |
 | cold read between frames | `load_document()`'s reg 0x01 read clears marks, refuses; batch reset |
 

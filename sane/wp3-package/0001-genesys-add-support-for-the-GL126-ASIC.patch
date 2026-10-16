@@ -1,4 +1,4 @@
-From f97e65cf805bc3c327c3830f5bbf3637ad15969a Mon Sep 17 00:00:00 2001
+From ac80e0a8263284c2ce97620b2bd1bd53ef420ef6 Mon Sep 17 00:00:00 2001
 From: Christian Gillinger <christian.gillinger@gmail.com>
 Date: Mon, 28 Sep 2026 19:07:54 +0200
 Subject: [PATCH 1/5] genesys: add support for the GL126 ASIC
@@ -9,9 +9,7 @@ is a command set of its own rather than a GL124 model variant. The
 register sequences are generated from USB captures of the vendor driver
 and verified byte-exact against them; the generator is not part of this
 series, its output (gl126_tables.cpp) is, with the provenance in the
-header. gl126_lock.{h,cpp} keeps this backend and the reverse-engineered
-companion driver off the one unit at once, and carries the magazine
-state across processes.
+header. gl126_mark.{h,cpp} carries the magazine state across processes.
 
 The testing-mode interface gets two small additions the GL126 test
 probes rely on: the registers a GL126 reads before its first write are
@@ -23,8 +21,8 @@ read-only wait put nothing on the wire.
  backend/genesys/enums.h                    |     3 +
  backend/genesys/gl126.cpp                  |  2731 ++
  backend/genesys/gl126.h                    |   183 +
- backend/genesys/gl126_lock.cpp             |   386 +
- backend/genesys/gl126_lock.h               |   244 +
+ backend/genesys/gl126_mark.cpp             |   213 +
+ backend/genesys/gl126_mark.h               |   183 +
  backend/genesys/gl126_ops.cpp              |  1355 +
  backend/genesys/gl126_ops.h                |   767 +
  backend/genesys/gl126_registers.h          |    65 +
@@ -37,11 +35,11 @@ read-only wait put nothing on the wire.
  backend/genesys/test_scanner_interface.h   |    21 +
  backend/genesys/test_usb_device.cpp        |     3 +
  backend/genesys/test_usb_device.h          |    15 +
- 19 files changed, 31136 insertions(+), 1 deletion(-)
+ 19 files changed, 30902 insertions(+), 1 deletion(-)
  create mode 100644 backend/genesys/gl126.cpp
  create mode 100644 backend/genesys/gl126.h
- create mode 100644 backend/genesys/gl126_lock.cpp
- create mode 100644 backend/genesys/gl126_lock.h
+ create mode 100644 backend/genesys/gl126_mark.cpp
+ create mode 100644 backend/genesys/gl126_mark.h
  create mode 100644 backend/genesys/gl126_ops.cpp
  create mode 100644 backend/genesys/gl126_ops.h
  create mode 100644 backend/genesys/gl126_registers.h
@@ -49,7 +47,7 @@ read-only wait put nothing on the wire.
  create mode 100644 backend/genesys/gl126_tables.h
 
 diff --git a/backend/Makefile.am b/backend/Makefile.am
-index 2233517bd..7f8cb0614 100644
+index 2233517bd..1992888d9 100644
 --- a/backend/Makefile.am
 +++ b/backend/Makefile.am
 @@ -765,6 +765,10 @@ libgenesys_la_SOURCES = genesys/genesys.cpp genesys/genesys.h \
@@ -59,7 +57,7 @@ index 2233517bd..7f8cb0614 100644
 +    genesys/gl126.cpp genesys/gl126.h genesys/gl126_registers.h \
 +    genesys/gl126_tables.cpp genesys/gl126_tables.h \
 +    genesys/gl126_ops.cpp genesys/gl126_ops.h \
-+    genesys/gl126_lock.cpp genesys/gl126_lock.h \
++    genesys/gl126_mark.cpp genesys/gl126_mark.h \
      genesys/gl128.cpp genesys/gl128.h genesys/gl128_registers.h \
      genesys/gl841.cpp genesys/gl841.h genesys/gl841_registers.h \
      genesys/gl842.cpp genesys/gl842.h genesys/gl842_registers.h \
@@ -113,7 +111,7 @@ index b8db6fa81..974fd2887 100644
  
 diff --git a/backend/genesys/gl126.cpp b/backend/genesys/gl126.cpp
 new file mode 100644
-index 000000000..52df54993
+index 000000000..48e816afd
 --- /dev/null
 +++ b/backend/genesys/gl126.cpp
 @@ -0,0 +1,2731 @@
@@ -143,7 +141,7 @@ index 000000000..52df54993
 +#include "gl126_registers.h"
 +#include "gl126_tables.h"
 +#include "gl126_ops.h"
-+#include "gl126_lock.h"
++#include "gl126_mark.h"
 +#include "test_settings.h"
 +#include "image_pipeline.h"
 +
@@ -980,7 +978,7 @@ index 000000000..52df54993
 +   100 ms; require the loader sensor clear on 2 consecutive reads, then
 +   present on 5 consecutive reads, then a 600 ms settle (the vendor's
 +   own insert-to-LOAD delay) before returning Seen. Timeout at 120 s
-+   (capped, test mode only, by $OF135I_SANE_POLL_CAP_MS, the same gate
++   (capped, test mode only, by $SANE_GL126_TEST_POLL_CAP_MS, the same gate
 +   magazine_policy() uses, so a shorter wait can never reach real
 +   hardware). No register write of any kind occurs in this loop: only
 +   read_register, sleep_ms and the one test_checkpoint() per poll a
@@ -999,7 +997,7 @@ index 000000000..52df54993
 +};
 +
 +/* The wait's own timeout budget, gated exactly like magazine_policy():
-+   $OF135I_SANE_POLL_CAP_MS only ever shortens it, and only when the wire
++   $SANE_GL126_TEST_POLL_CAP_MS only ever shortens it, and only when the wire
 +   is a mock in test mode, never on real hardware, no matter what an
 +   environment happens to carry (the same reasoning magazine_policy()
 +   documents). This wait has no wire and no run_program() budget of its
@@ -1010,7 +1008,7 @@ index 000000000..52df54993
 +    if (!dev->interface->is_mock() || !is_testing_mode()) {
 +        return budget;
 +    }
-+    const char* cap = std::getenv("OF135I_SANE_POLL_CAP_MS");
++    const char* cap = std::getenv("SANE_GL126_TEST_POLL_CAP_MS");
 +    if (cap != nullptr && *cap != '\0') {
 +        long v = std::strtol(cap, nullptr, 10);
 +        if (v > 0 && static_cast<unsigned>(v) < budget) {
@@ -1161,7 +1159,7 @@ index 000000000..52df54993
 +    RunPolicy policy;
 +    policy.poll_timeout_ms = 30000;
 +    policy.masked_timeout_ms = 30000;
-+    /* $OF135I_SANE_POLL_CAP_MS caps every poll site's wait, and is read
++    /* $SANE_GL126_TEST_POLL_CAP_MS caps every poll site's wait, and is read
 +       only when the wire is a mock, the backend's test mode, where the
 +       device answers nothing and the cold-start program would otherwise
 +       spend the driver's real 1.5 s and 30 s budgets at nineteen poll
@@ -1178,7 +1176,7 @@ index 000000000..52df54993
 +    if (!dev->interface->is_mock() || !is_testing_mode()) {
 +        return policy;
 +    }
-+    const char* cap = std::getenv("OF135I_SANE_POLL_CAP_MS");
++    const char* cap = std::getenv("SANE_GL126_TEST_POLL_CAP_MS");
 +    if (cap != nullptr && *cap != '\0') {
 +        long v = std::strtol(cap, nullptr, 10);
 +        if (v > 0) {
@@ -2850,7 +2848,7 @@ index 000000000..52df54993
 +} // namespace genesys
 diff --git a/backend/genesys/gl126.h b/backend/genesys/gl126.h
 new file mode 100644
-index 000000000..1f0a096e8
+index 000000000..feec07aa9
 --- /dev/null
 +++ b/backend/genesys/gl126.h
 @@ -0,0 +1,183 @@
@@ -3020,7 +3018,7 @@ index 000000000..1f0a096e8
 +
 +    load_document() (CommandSetGl126, gl126.cpp) does not load anything:
 +    it is a pure checker of the in-process state and the cross-process
-+    mark (gl126_lock.h MagazineMarkKind, now Released, Ejected or
++    mark (gl126_mark.h MagazineMarkKind, now Released, Ejected or
 +    Loaded), called from genesys_start_scan before calibration. */
 +void magazine_load_film(Genesys_Device* dev);
 +void magazine_eject(Genesys_Device* dev);
@@ -3037,12 +3035,12 @@ index 000000000..1f0a096e8
 +} // namespace genesys
 +
 +#endif // BACKEND_GENESYS_GL126_H
-diff --git a/backend/genesys/gl126_lock.cpp b/backend/genesys/gl126_lock.cpp
+diff --git a/backend/genesys/gl126_mark.cpp b/backend/genesys/gl126_mark.cpp
 new file mode 100644
-index 000000000..ef2a42874
+index 000000000..92ab94768
 --- /dev/null
-+++ b/backend/genesys/gl126_lock.cpp
-@@ -0,0 +1,386 @@
++++ b/backend/genesys/gl126_mark.cpp
+@@ -0,0 +1,213 @@
 +/* sane - Scanner Access Now Easy.
 +
 +   Copyright (C) 2026 Christian Gillinger
@@ -3063,10 +3061,9 @@ index 000000000..ef2a42874
 +   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 +*/
 +
-+#include "gl126_lock.h"
++#include "gl126_mark.h"
 +
 +#include <fcntl.h>
-+#include <sys/file.h>
 +#include <sys/stat.h>
 +#include <unistd.h>
 +
@@ -3074,24 +3071,11 @@ index 000000000..ef2a42874
 +#include <cstdlib>
 +#include <cstring>
 +#include <ctime>
-+#include <stdexcept>
 +
 +namespace genesys {
 +namespace gl126 {
 +
 +namespace {
-+
-+/* One fd for the whole process, one lock path per host, exactly like
-+   the driver (a single process lock instance per session, no per-device
-+   path). -1 means not held. flock() is a property of the open file
-+   description, so a second fd in the same process would conflict with
-+   the first rather than share it, hence one fd, reference-counted rather
-+   than reopened. */
-+int g_lock_fd = -1;
-+
-+/* How many acquire() calls are currently outstanding. 0 means not held
-+   (g_lock_fd == -1 iff g_lock_refs == 0). */
-+int g_lock_refs = 0;
 +
 +std::string now_iso8601_utc()
 +{
@@ -3103,176 +3087,17 @@ index 000000000..ef2a42874
 +    return std::string(buf);
 +}
 +
-+/* Refuse to lock or write through anything but a plain, ordinary file at
-+   the well-known path, with exactly one hard link, at the well-known
-+   path: both the lock and the magazine mark live at a predictable spot
-+   in a world-writable directory (/tmp), so a symlink planted there
-+   (pointing at, say, a config file this process can overwrite), a
-+   directory dropped in its place, or a hard link to some other file
-+   this process can write must never be locked or written through.
-+   O_NOFOLLOW makes the open() itself fail (ELOOP) on the symlink case;
-+   this check catches what O_NOFOLLOW does not: a directory (an
-+   O_RDONLY open of a directory succeeds), a device node created at the
-+   path, or, since a hard link is not a symlink at all, just another
-+   directory entry for the same regular-file inode, a hard link onto
-+   a victim file (st_nlink >= 2; an ordinary, never-linked lock/mark
-+   file always has st_nlink == 1). Throws with `path` in the message;
-+   the caller has not touched the fd's content yet. */
-+void require_plain_file(int fd, const std::string& path)
-+{
-+    struct stat st{};
-+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-+        close(fd);
-+        throw std::runtime_error(std::string("gl126: ") + path +
-+                                 " is not a regular file, refusing to use it "
-+                                 "as the lock/mark file");
-+    }
-+    if (st.st_nlink != 1) {
-+        close(fd);
-+        throw std::runtime_error(std::string("gl126: ") + path +
-+                                 " has more than one hard link (possible "
-+                                 "hard-link attack), refusing to use it as "
-+                                 "the lock/mark file");
-+    }
-+}
-+
-+std::string read_holder(int fd)
-+{
-+    if (lseek(fd, 0, SEEK_SET) < 0) {
-+        return std::string();
-+    }
-+    char buf[128];
-+    ssize_t n = read(fd, buf, sizeof(buf));
-+    if (n <= 0) {
-+        return std::string();
-+    }
-+    std::string s(buf, static_cast<std::size_t>(n));
-+    // trim trailing whitespace (the file ends in "\n")
-+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' ||
-+                          s.back() == ' ' || s.back() == '\t')) {
-+        s.pop_back();
-+    }
-+    return s;
-+}
-+
 +} // namespace
-+
-+const char* process_lock_default_path()
-+{
-+    return "/tmp/of135i-07b3-1436.lock";
-+}
-+
-+std::string process_lock_path()
-+{
-+    const char* env = std::getenv("OF135I_LOCK_FILE");
-+    if (env != nullptr && env[0] != '\0') {
-+        return std::string(env);
-+    }
-+    return std::string(process_lock_default_path());
-+}
-+
-+bool process_lock_acquire(std::string* holder)
-+{
-+    if (g_lock_fd != -1) {
-+        // Already held by this process: hand out another reference
-+        // rather than retaking the flock (which would be a harmless
-+        // no-op anyway, but refs must track how many releases are owed).
-+        ++g_lock_refs;
-+        return true;
-+    }
-+
-+    std::string path = process_lock_path();
-+
-+    // O_NOFOLLOW: the lock lives at a predictable path in a shared,
-+    // world-writable directory (/tmp), never follow a symlink planted
-+    // there onto some other file this process happens to be able to
-+    // write to. A symlink at the path fails open() with ELOOP.
-+    // O_NONBLOCK: the same predictable path could instead hold a FIFO or
-+    // a device node; without O_NONBLOCK, opening a FIFO for reading (or
-+    // some character devices) blocks the open() itself until a writer
-+    // shows up, which would hang this call before the regular-file check
-+    // below ever runs. On a regular file O_NONBLOCK is a no-op, it does
-+    // not affect the flock() or the later read()/write() calls.
-+    int fd = open(path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0666);
-+    if (fd < 0 && (errno == EACCES || errno == EPERM)) {
-+        // Read-only fallback: flock() works on a read-only fd, it is the
-+        // write of the holder line afterwards that is best-effort.
-+        fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-+    }
-+    if (fd < 0 && errno == ELOOP) {
-+        throw std::runtime_error(std::string("gl126: ") + path +
-+                                 " is a symbolic link, refusing to lock through it");
-+    }
-+    if (fd < 0) {
-+        throw std::runtime_error(std::string("gl126: could not open lock file ") +
-+                                 path + ": " + std::strerror(errno));
-+    }
-+
-+    require_plain_file(fd, path); // throws; e.g. a directory or hard link at the path
-+
-+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-+        if (errno == EWOULDBLOCK || errno == EAGAIN) {
-+            if (holder != nullptr) {
-+                *holder = read_holder(fd);
-+            }
-+            close(fd);
-+            return false;
-+        }
-+        int err = errno;
-+        close(fd);
-+        throw std::runtime_error(std::string("gl126: could not lock ") +
-+                                 path + ": " + std::strerror(err));
-+    }
-+
-+    g_lock_fd = fd;
-+    g_lock_refs = 1;
-+
-+    // Best-effort holder line, exactly the driver's own format; a
-+    // read-only fd cannot be written to, and that is fine, the lock
-+    // itself is what matters.
-+    if (ftruncate(g_lock_fd, 0) == 0) {
-+        std::string line = "pid " + std::to_string(static_cast<long>(getpid())) +
-+                           " since " + now_iso8601_utc() + " (sane genesys gl126)\n";
-+        ssize_t written = write(g_lock_fd, line.data(), line.size());
-+        (void)written; // best-effort, mirrors the driver's "except OSError: pass"
-+    }
-+
-+    return true;
-+}
-+
-+void process_lock_release()
-+{
-+    if (g_lock_refs == 0) {
-+        // No-op: nothing to release. Covers both "never acquired" and
-+        // "already released"; callers are not required to track
-+        // whether their own acquire succeeded before calling this.
-+        return;
-+    }
-+    --g_lock_refs;
-+    if (g_lock_refs > 0) {
-+        // Another owner in this process still holds a reference.
-+        return;
-+    }
-+    flock(g_lock_fd, LOCK_UN);
-+    close(g_lock_fd);
-+    g_lock_fd = -1;
-+}
-+
-+bool process_lock_held()
-+{
-+    return g_lock_refs > 0;
-+}
-+
-+int process_lock_refs()
-+{
-+    return g_lock_refs;
-+}
 +
 +// ------------------------------------------------ the magazine mark
 +
 +std::string magazine_mark_path()
 +{
-+    return process_lock_path() + ".magazine";
++    const char* env = std::getenv("SANE_GL126_MAGAZINE_MARK");
++    if (env != nullptr && env[0] != '\0') {
++        return std::string(env);
++    }
++    return std::string("/tmp/sane-gl126-07b3-1436.magazine");
 +}
 +
 +const char* magazine_mark_kind_name(MagazineMarkKind kind)
@@ -3429,12 +3254,12 @@ index 000000000..ef2a42874
 +
 +} // namespace gl126
 +} // namespace genesys
-diff --git a/backend/genesys/gl126_lock.h b/backend/genesys/gl126_lock.h
+diff --git a/backend/genesys/gl126_mark.h b/backend/genesys/gl126_mark.h
 new file mode 100644
-index 000000000..45ece45d4
+index 000000000..79f62ca34
 --- /dev/null
-+++ b/backend/genesys/gl126_lock.h
-@@ -0,0 +1,244 @@
++++ b/backend/genesys/gl126_mark.h
+@@ -0,0 +1,183 @@
 +/* sane - Scanner Access Now Easy.
 +
 +   Copyright (C) 2026 Christian Gillinger
@@ -3455,41 +3280,33 @@ index 000000000..45ece45d4
 +   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 +*/
 +
-+/* GL126 process lock: mutual exclusion with the companion userspace
-+   driver.
++/* GL126 magazine mark: a small state file that lets a magazine load span
++   two processes.
 +
-+   The companion driver and this backend are two independent programs
-+   that can both open the same physical unit (07b3:1436, one reference
-+   device in existence). Claiming the USB interface alone is not enough
-+   to keep them apart: the driver's read-only sessions (e.g. a status
-+   check) hold no interface claim at all, they talk to the device just
-+   enough to read a register, so a `sane_open` racing one of them would
-+   not see it and could send a command while the driver is mid-read.
++   The magazine flow can span two steps with the operator in between: the
++   "Load film" option releases the magazine, the person takes it out and
++   reseats it to the stop, and the load itself waits for that reseat before
++   running. Inside one frontend that keeps the device open (digiKam) a fact
++   like "released" can live in memory; `scanimage` cannot, because each
++   invocation is a fresh process. The mark is therefore also written to a
++   file. It is only a hint: the hardware is re-verified before every motor
++   move (see the comment at the magazine mark API below), so a stale or
++   missing mark can never authorise anything, the worst case is asking the
++   operator to reseat the magazine.
 +
-+   The fix is a convention, not a protocol: both programs take a
-+   non-blocking exclusive `flock` on the same well-known file before
-+   touching the device, and release it when they are done. This header
-+   is the C++ side of that convention, kept byte-for-byte compatible with
-+   the driver's own implementation:
++   Path: `/tmp/sane-gl126-07b3-1436.magazine`, or the file named by the
++   environment variable `SANE_GL126_MAGAZINE_MARK` when it is set (a test
++   facility, so a test run can use a private path; it is not meant for
++   production use). There is only one such unit per host, so the path is
++   not per-device; the device name is stored inside the file.
 +
-+     - path: `$OF135I_LOCK_FILE`, or `/tmp/of135i-07b3-1436.lock` if unset
-+       (one lock path per host, exactly like the driver: there is only
-+       ever one unit, so this is not a per-device lock).
-+     - held file content on success: `pid <pid> since <ISO8601 UTC>
-+       (sane genesys gl126)\n`, so `cat` on the lock file names the
-+       holder either way.
-+
-+   GL126-only: no other genesys ASIC has a conflicting driver, so no
-+   other command set includes this header or calls into this namespace.
-+
-+   File handling: the path is deliberately predictable, in a directory
-+   (/tmp) any local user can write to, and the file is created mode
-+   0666: two independent programs, potentially run by two different
-+   users on a shared machine, need to take the same lock, so it cannot
-+   be owner-only. That combination (fixed path, shared directory, open
-+   permissions) is exactly the setup a symlink, hard-link, or FIFO/
-+   device-node attack targets, so every open() of the lock or the
-+   magazine mark passes:
++   File handling: the path is deliberately predictable and lives in a
++   directory (/tmp) any local user can write to, and the file is created
++   mode 0666, because scanimage, saned and a desktop frontend may run as
++   different users and still need to see the same mark. That combination
++   (fixed path, shared directory, open permissions) is exactly the setup a
++   symlink, hard-link, or FIFO/device-node attack targets, so every open()
++   of the mark passes:
 +     - O_NOFOLLOW, so a symlink planted at the path fails the open()
 +       itself with ELOOP rather than being followed onto whatever it
 +       points at;
@@ -3497,93 +3314,39 @@ index 000000000..45ece45d4
 +       certain device nodes) dropped at the path would otherwise hang
 +       an O_RDONLY open with no writer attached, before any later check
 +       ever runs; it has no effect on a regular file's later read()/
-+       write(), and none on flock();
++       write();
 +   and the resulting fd is then checked to be a regular file with
 +   exactly one hard link (S_ISREG && st_nlink == 1) before anything is
-+   locked, read or written, refused otherwise (process_lock_acquire()
-+   throws; magazine_mark_read() returns false, since it runs before
-+   every load and must never fail the session). That check catches what
-+   O_NOFOLLOW/O_NONBLOCK do not: a directory (an O_RDONLY open of a
-+   directory succeeds), a device node, or a hard link onto some other
-+   file this process can write to (not a symlink at all: st_nlink
-+   climbs to 2 or more, which a lock/mark file this code created never
-+   has). The mark is additionally never modified in place:
-+   magazine_mark_write() writes a private temp file next to it and
-+   rename()s that over the mark path, so the write can never land
-+   inside whatever the mark path used to point to. A mark that cannot
-+   be written or read is by design not a failure: it is a hint for a
-+   load that spans two processes, and the hardware is re-verified
-+   before every load anyway (see the comment below), so the worst case
-+   is falling back to asking the operator to reseat the magazine.
++   read, refused otherwise (magazine_mark_read() returns false, since it
++   runs before every load and must never fail the session). That check
++   catches what O_NOFOLLOW/O_NONBLOCK do not: a directory (an O_RDONLY
++   open of a directory succeeds), a device node, or a hard link onto some
++   other file this process can write to (not a symlink at all: st_nlink
++   climbs to 2 or more, which a mark this code created never has). The
++   mark is additionally never modified in place: magazine_mark_write()
++   writes a private temp file next to it and rename()s that over the mark
++   path, so the write can never land inside whatever the mark path used to
++   point to. A mark that cannot be written or read is by design not a
++   failure.
 +
-+   What this is not: a security boundary against a privileged or
-+   same-user attacker who can also write to /tmp at will. It is a
-+   cooperative convention between two trusted programs (the driver and
-+   this backend) sharing one predictable, world-writable path, hardened
-+   against the ordinary local hazards of that spot (stale symlinks,
-+   FIFOs, hard links) rather than against a determined adversary who
-+   races the open() or has broader filesystem control.
-+
-+   Reference-counted within a process: process_lock_acquire() and
-+   process_lock_release() must be called in matched pairs (an acquire
-+   while already held just adds a reference), so that one owner's
-+   release, e.g. a failed sane_open of a second handle, cannot drop
-+   another owner's still-open session. genesys.cpp's sane_open_impl/
-+   sane_close_impl ties one reference to the lifetime of one successful
-+   open via a small RAII guard, matching the driver's own lock semantics.
++   What this is not: a security boundary against a privileged or same-user
++   attacker who can also write to /tmp at will. It is a hint, hardened
++   against the ordinary local hazards of that spot (stale symlinks, FIFOs,
++   hard links) rather than against a determined adversary who races the
++   open() or has broader filesystem control.
 +
 +   Deliberately free of genesys headers (no genesys.h, no Genesys_Device)
 +   so it can be compiled and exercised standalone, without pulling in the
 +   rest of the backend, using a small probe program that links only this
 +   file. */
 +
-+#ifndef BACKEND_GENESYS_GL126_LOCK_H
-+#define BACKEND_GENESYS_GL126_LOCK_H
++#ifndef BACKEND_GENESYS_GL126_MARK_H
++#define BACKEND_GENESYS_GL126_MARK_H
 +
 +#include <string>
 +
 +namespace genesys {
 +namespace gl126 {
-+
-+/** Default lock path: "/tmp/of135i-07b3-1436.lock". */
-+const char* process_lock_default_path();
-+
-+/** Effective lock path: $OF135I_LOCK_FILE if set, else the default. */
-+std::string process_lock_path();
-+
-+/** Acquire the driver's process lock, non-blocking. Reference-counted:
-+    each successful call to process_lock_acquire(), whether it takes
-+    the flock for the first time or finds it already held by this
-+    process, increments an internal reference count, and must be
-+    paired with exactly one call to process_lock_release(). This lets
-+    two independent owners in the same process (e.g. one open session
-+    and a second, still-being-opened one) hold the lock without either
-+    one's release dropping the other's.
-+
-+    Returns true once the lock is held, either newly acquired (fresh
-+    flock, reference count set to 1), or already held by this process
-+    (idempotent: the flock is not retaken, the reference count is
-+    incremented). Returns false if another process holds it
-+    (EWOULDBLOCK/EAGAIN on flock); when `holder` is non-null, it is set
-+    to the holder line read back from the lock file (may be empty if the
-+    file could not be read).
-+
-+    Throws std::runtime_error, with strerror() text, on any other
-+    failure (open() or flock() erroring for a reason other than the lock
-+    being held); nothing is considered acquired in that case. */
-+bool process_lock_acquire(std::string* holder);
-+
-+/** Release one reference taken by process_lock_acquire(). No-op if the
-+    reference count is already zero. Only the release that brings the
-+    count to zero actually unlocks (LOCK_UN) and closes the fd. */
-+void process_lock_release();
-+
-+/** Whether this process currently holds the lock (reference count > 0). */
-+bool process_lock_held();
-+
-+/** Current reference count (0 if not held). Exposed for the probe and
-+    the test suite; not needed by ordinary callers. */
-+int process_lock_refs();
 +
 +// ------------------------------------------------ the magazine mark
 +
@@ -3595,8 +3358,8 @@ index 000000000..45ece45d4
 +   `scanimage` cannot, each invocation is a new process, and a load
 +   without the jog before it, in the same power cycle, fails.
 +
-+   So the fact is also written next to the process lock, as
-+   `<lock path>.magazine`, holding the device it applies to. It is never
++   So the fact is also written to the mark file described at the top of
++   this header, holding the device it applies to. It is never
 +   trusted on its own: before a load the backend re-reads the hardware
 +   (reg 0x01 idle-homed, the loader-sensor bit set, the device-open
 +   register state), and a power cycle both re-enumerates the unit under a
@@ -3641,7 +3404,8 @@ index 000000000..45ece45d4
 +    file leads with. */
 +const char* magazine_mark_kind_name(MagazineMarkKind kind);
 +
-+/** Path of the magazine mark: the lock path plus ".magazine". */
++/** Path of the magazine mark: $SANE_GL126_MAGAZINE_MARK if set and
++    non-empty, else "/tmp/sane-gl126-07b3-1436.magazine". */
 +std::string magazine_mark_path();
 +
 +/** Record that `device_key` (the SANE device name, e.g.
@@ -3678,7 +3442,7 @@ index 000000000..45ece45d4
 +} // namespace gl126
 +} // namespace genesys
 +
-+#endif // BACKEND_GENESYS_GL126_LOCK_H
++#endif // BACKEND_GENESYS_GL126_MARK_H
 diff --git a/backend/genesys/gl126_ops.cpp b/backend/genesys/gl126_ops.cpp
 new file mode 100644
 index 000000000..8d2e3b9de
@@ -5042,7 +4806,7 @@ index 000000000..8d2e3b9de
 +} // namespace genesys
 diff --git a/backend/genesys/gl126_ops.h b/backend/genesys/gl126_ops.h
 new file mode 100644
-index 000000000..11ccc84dc
+index 000000000..0cdddcb08
 --- /dev/null
 +++ b/backend/genesys/gl126_ops.h
 @@ -0,0 +1,767 @@
@@ -5077,7 +4841,7 @@ index 000000000..11ccc84dc
 +   plus the pure offset/residual computation.
 +
 +   Deliberately free of genesys headers (no genesys.h, no Genesys_Device),
-+   like gl126_lock, so it compiles and is exercised standalone with a
++   like gl126_mark, so it compiles and is exercised standalone with a
 +   tiny probe program. gl126.cpp (the main session's file, not touched
 +   here) implements `Wire` over `UsbDevice` with three one-line forwards
 +   and calls run_program() for offset_calibration(). */
@@ -5228,7 +4992,7 @@ index 000000000..11ccc84dc
 +        1.5 s and 30 s budgets, which a test would otherwise spend in real
 +        wall-clock time at every one of its nineteen poll sites (ten
 +        best-effort, nine fail-closed motor completions).
-+        gl126.cpp sets it from $OF135I_SANE_POLL_CAP_MS. */
++        gl126.cpp sets it from $SANE_GL126_TEST_POLL_CAP_MS. */
 +    unsigned max_poll_timeout_ms = 0;
 +};
 +

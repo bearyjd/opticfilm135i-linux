@@ -18,41 +18,33 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-/* GL126 process lock: mutual exclusion with the companion userspace
-   driver.
+/* GL126 magazine mark: a small state file that lets a magazine load span
+   two processes.
 
-   The companion driver and this backend are two independent programs
-   that can both open the same physical unit (07b3:1436, one reference
-   device in existence). Claiming the USB interface alone is not enough
-   to keep them apart: the driver's read-only sessions (e.g. a status
-   check) hold no interface claim at all, they talk to the device just
-   enough to read a register, so a `sane_open` racing one of them would
-   not see it and could send a command while the driver is mid-read.
+   The magazine flow can span two steps with the operator in between: the
+   "Load film" option releases the magazine, the person takes it out and
+   reseats it to the stop, and the load itself waits for that reseat before
+   running. Inside one frontend that keeps the device open (digiKam) a fact
+   like "released" can live in memory; `scanimage` cannot, because each
+   invocation is a fresh process. The mark is therefore also written to a
+   file. It is only a hint: the hardware is re-verified before every motor
+   move (see the comment at the magazine mark API below), so a stale or
+   missing mark can never authorise anything, the worst case is asking the
+   operator to reseat the magazine.
 
-   The fix is a convention, not a protocol: both programs take a
-   non-blocking exclusive `flock` on the same well-known file before
-   touching the device, and release it when they are done. This header
-   is the C++ side of that convention, kept byte-for-byte compatible with
-   the driver's own implementation:
+   Path: `/tmp/sane-gl126-07b3-1436.magazine`, or the file named by the
+   environment variable `SANE_GL126_MAGAZINE_MARK` when it is set (a test
+   facility, so a test run can use a private path; it is not meant for
+   production use). There is only one such unit per host, so the path is
+   not per-device; the device name is stored inside the file.
 
-     - path: `$OF135I_LOCK_FILE`, or `/tmp/of135i-07b3-1436.lock` if unset
-       (one lock path per host, exactly like the driver: there is only
-       ever one unit, so this is not a per-device lock).
-     - held file content on success: `pid <pid> since <ISO8601 UTC>
-       (sane genesys gl126)\n`, so `cat` on the lock file names the
-       holder either way.
-
-   GL126-only: no other genesys ASIC has a conflicting driver, so no
-   other command set includes this header or calls into this namespace.
-
-   File handling: the path is deliberately predictable, in a directory
-   (/tmp) any local user can write to, and the file is created mode
-   0666: two independent programs, potentially run by two different
-   users on a shared machine, need to take the same lock, so it cannot
-   be owner-only. That combination (fixed path, shared directory, open
-   permissions) is exactly the setup a symlink, hard-link, or FIFO/
-   device-node attack targets, so every open() of the lock or the
-   magazine mark passes:
+   File handling: the path is deliberately predictable and lives in a
+   directory (/tmp) any local user can write to, and the file is created
+   mode 0666, because scanimage, saned and a desktop frontend may run as
+   different users and still need to see the same mark. That combination
+   (fixed path, shared directory, open permissions) is exactly the setup a
+   symlink, hard-link, or FIFO/device-node attack targets, so every open()
+   of the mark passes:
      - O_NOFOLLOW, so a symlink planted at the path fails the open()
        itself with ELOOP rather than being followed onto whatever it
        points at;
@@ -60,93 +52,39 @@
        certain device nodes) dropped at the path would otherwise hang
        an O_RDONLY open with no writer attached, before any later check
        ever runs; it has no effect on a regular file's later read()/
-       write(), and none on flock();
+       write();
    and the resulting fd is then checked to be a regular file with
    exactly one hard link (S_ISREG && st_nlink == 1) before anything is
-   locked, read or written, refused otherwise (process_lock_acquire()
-   throws; magazine_mark_read() returns false, since it runs before
-   every load and must never fail the session). That check catches what
-   O_NOFOLLOW/O_NONBLOCK do not: a directory (an O_RDONLY open of a
-   directory succeeds), a device node, or a hard link onto some other
-   file this process can write to (not a symlink at all: st_nlink
-   climbs to 2 or more, which a lock/mark file this code created never
-   has). The mark is additionally never modified in place:
-   magazine_mark_write() writes a private temp file next to it and
-   rename()s that over the mark path, so the write can never land
-   inside whatever the mark path used to point to. A mark that cannot
-   be written or read is by design not a failure: it is a hint for a
-   load that spans two processes, and the hardware is re-verified
-   before every load anyway (see the comment below), so the worst case
-   is falling back to asking the operator to reseat the magazine.
+   read, refused otherwise (magazine_mark_read() returns false, since it
+   runs before every load and must never fail the session). That check
+   catches what O_NOFOLLOW/O_NONBLOCK do not: a directory (an O_RDONLY
+   open of a directory succeeds), a device node, or a hard link onto some
+   other file this process can write to (not a symlink at all: st_nlink
+   climbs to 2 or more, which a mark this code created never has). The
+   mark is additionally never modified in place: magazine_mark_write()
+   writes a private temp file next to it and rename()s that over the mark
+   path, so the write can never land inside whatever the mark path used to
+   point to. A mark that cannot be written or read is by design not a
+   failure.
 
-   What this is not: a security boundary against a privileged or
-   same-user attacker who can also write to /tmp at will. It is a
-   cooperative convention between two trusted programs (the driver and
-   this backend) sharing one predictable, world-writable path, hardened
-   against the ordinary local hazards of that spot (stale symlinks,
-   FIFOs, hard links) rather than against a determined adversary who
-   races the open() or has broader filesystem control.
-
-   Reference-counted within a process: process_lock_acquire() and
-   process_lock_release() must be called in matched pairs (an acquire
-   while already held just adds a reference), so that one owner's
-   release, e.g. a failed sane_open of a second handle, cannot drop
-   another owner's still-open session. genesys.cpp's sane_open_impl/
-   sane_close_impl ties one reference to the lifetime of one successful
-   open via a small RAII guard, matching the driver's own lock semantics.
+   What this is not: a security boundary against a privileged or same-user
+   attacker who can also write to /tmp at will. It is a hint, hardened
+   against the ordinary local hazards of that spot (stale symlinks, FIFOs,
+   hard links) rather than against a determined adversary who races the
+   open() or has broader filesystem control.
 
    Deliberately free of genesys headers (no genesys.h, no Genesys_Device)
    so it can be compiled and exercised standalone, without pulling in the
    rest of the backend, using a small probe program that links only this
    file. */
 
-#ifndef BACKEND_GENESYS_GL126_LOCK_H
-#define BACKEND_GENESYS_GL126_LOCK_H
+#ifndef BACKEND_GENESYS_GL126_MARK_H
+#define BACKEND_GENESYS_GL126_MARK_H
 
 #include <string>
 
 namespace genesys {
 namespace gl126 {
-
-/** Default lock path: "/tmp/of135i-07b3-1436.lock". */
-const char* process_lock_default_path();
-
-/** Effective lock path: $OF135I_LOCK_FILE if set, else the default. */
-std::string process_lock_path();
-
-/** Acquire the driver's process lock, non-blocking. Reference-counted:
-    each successful call to process_lock_acquire(), whether it takes
-    the flock for the first time or finds it already held by this
-    process, increments an internal reference count, and must be
-    paired with exactly one call to process_lock_release(). This lets
-    two independent owners in the same process (e.g. one open session
-    and a second, still-being-opened one) hold the lock without either
-    one's release dropping the other's.
-
-    Returns true once the lock is held, either newly acquired (fresh
-    flock, reference count set to 1), or already held by this process
-    (idempotent: the flock is not retaken, the reference count is
-    incremented). Returns false if another process holds it
-    (EWOULDBLOCK/EAGAIN on flock); when `holder` is non-null, it is set
-    to the holder line read back from the lock file (may be empty if the
-    file could not be read).
-
-    Throws std::runtime_error, with strerror() text, on any other
-    failure (open() or flock() erroring for a reason other than the lock
-    being held); nothing is considered acquired in that case. */
-bool process_lock_acquire(std::string* holder);
-
-/** Release one reference taken by process_lock_acquire(). No-op if the
-    reference count is already zero. Only the release that brings the
-    count to zero actually unlocks (LOCK_UN) and closes the fd. */
-void process_lock_release();
-
-/** Whether this process currently holds the lock (reference count > 0). */
-bool process_lock_held();
-
-/** Current reference count (0 if not held). Exposed for the probe and
-    the test suite; not needed by ordinary callers. */
-int process_lock_refs();
 
 // ------------------------------------------------ the magazine mark
 
@@ -158,8 +96,8 @@ int process_lock_refs();
    `scanimage` cannot, each invocation is a new process, and a load
    without the jog before it, in the same power cycle, fails.
 
-   So the fact is also written next to the process lock, as
-   `<lock path>.magazine`, holding the device it applies to. It is never
+   So the fact is also written to the mark file described at the top of
+   this header, holding the device it applies to. It is never
    trusted on its own: before a load the backend re-reads the hardware
    (reg 0x01 idle-homed, the loader-sensor bit set, the device-open
    register state), and a power cycle both re-enumerates the unit under a
@@ -204,7 +142,8 @@ enum class MagazineMarkKind { Released, Ejected, Loaded, Failed };
     file leads with. */
 const char* magazine_mark_kind_name(MagazineMarkKind kind);
 
-/** Path of the magazine mark: the lock path plus ".magazine". */
+/** Path of the magazine mark: $SANE_GL126_MAGAZINE_MARK if set and
+    non-empty, else "/tmp/sane-gl126-07b3-1436.magazine". */
 std::string magazine_mark_path();
 
 /** Record that `device_key` (the SANE device name, e.g.
@@ -241,4 +180,4 @@ MagazineMarkClearResult magazine_mark_clear();
 } // namespace gl126
 } // namespace genesys
 
-#endif // BACKEND_GENESYS_GL126_LOCK_H
+#endif // BACKEND_GENESYS_GL126_MARK_H

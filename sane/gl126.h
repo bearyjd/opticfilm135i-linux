@@ -164,7 +164,7 @@ void push_dual_light_nodes(const ScanSession& session, ImagePipelineStack& pipel
 
     load_document() (CommandSetGl126, gl126.cpp) does not load anything:
     it is a pure checker of the in-process state and the cross-process
-    mark (gl126_lock.h MagazineMarkKind, now Released, Ejected or
+    mark (gl126_mark.h MagazineMarkKind, now Released, Ejected or
     Loaded), called from genesys_start_scan before calibration. */
 void magazine_load_film(Genesys_Device* dev);
 void magazine_eject(Genesys_Device* dev);

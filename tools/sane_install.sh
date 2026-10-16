@@ -50,7 +50,7 @@ OURS_GLOB="libsane-genesys-gl126.so.*"
 ORIG_MARK=".libsane-genesys.so.1.opticfilm135i-orig"
 CONF_BACKUP_SUFFIX=".opticfilm135i-backup"
 GL126_SOURCES=(gl126.h gl126.cpp gl126_registers.h gl126_tables.h gl126_tables.cpp
-               gl126_ops.h gl126_ops.cpp gl126_lock.h gl126_lock.cpp)
+               gl126_ops.h gl126_ops.cpp gl126_mark.h gl126_mark.cpp)
 
 die() { echo "sane_install: $*" >&2; exit 1; }
 need_root() {

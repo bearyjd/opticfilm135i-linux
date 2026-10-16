@@ -169,7 +169,7 @@ is not a backend concern (owner's decision: no custom frontends).
   again), cross-process `loaded` / `released` / `ejected` marks at Scan.
 - Wire-likeness: the programs are unchanged, so the existing byte-identity
   tests keep proving them; a new test asserts the wait sends **no write**.
-- `OF135I_SANE_POLL_CAP_MS` (test mode only) caps the 120 s wait.
+- `OF135I_SANE_POLL_CAP_MS` (test mode only; `SANE_GL126_TEST_POLL_CAP_MS` since v8) caps the 120 s wait.
 - Status values pinned, ≤ 40 chars, distinct.
 
 ## 7. Hardware plan (Test 92, owner's go required)

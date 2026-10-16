@@ -71,7 +71,7 @@ def _fake_clone(tmp: Path, config_dirs: str = ".:/etc/sane.d"):
     (clone / "backend" / ".libs").mkdir(parents=True)
     for name in ("gl126.h", "gl126.cpp", "gl126_registers.h", "gl126_tables.h",
                  "gl126_tables.cpp", "gl126_ops.h", "gl126_ops.cpp",
-                 "gl126_lock.h", "gl126_lock.cpp"):
+                 "gl126_mark.h", "gl126_mark.cpp"):
         (clone / "backend" / "genesys" / name).write_text(f"/* {name} */\n")
     lib = clone / "backend" / ".libs" / DISTRO_SO
     src = tmp / "stub.c"

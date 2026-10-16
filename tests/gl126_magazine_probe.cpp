@@ -64,7 +64,7 @@
 #include "sane/sane.h"
 #include "low.h"
 #include "genesys.h"
-#include "gl126_lock.h"
+#include "gl126_mark.h"
 #include "gl126.h"
 #include "test_settings.h"
 #include "test_scanner_interface.h"
@@ -904,12 +904,12 @@ int cmd_scenario(int argc, char** argv)
     } else if (scenario == "state-mark-failed-pending") {
         // The cross-process half of the same finding: a "failed" mark
         // written by an EARLIER PROCESS, used with load-mark-failed-
-        // crossproc under a shared OF135I_LOCK_FILE.
+        // crossproc under a shared SANE_GL126_MAGAZINE_MARK.
         gl126::magazine_mark_write(gl126::MagazineMarkKind::Failed, dev->file_name);
     } else if (scenario == "load-mark-failed-crossproc") {
         // Writes nothing: the "failed" mark must already be on disk from
         // a prior invocation of state-mark-failed-pending sharing the
-        // same lock path. A fresh process (Unknown in-process) must
+        // same mark path. A fresh process (Unknown in-process) must
         // still refuse -- on the mark alone -- for Scan, Load film and
         // Eject film alike.
         seed(dev, 0x01, 0x22);
@@ -948,7 +948,7 @@ int cmd_scenario(int argc, char** argv)
         call_hook(dev, "release");     // must run cold_init, not "already loaded"
     } else if (scenario == "state-mark-ejected-pending") {
         // An Ejected mark written by an EARLIER PROCESS -- used with
-        // load-mark-ejected-crossproc under a shared OF135I_LOCK_FILE to
+        // load-mark-ejected-crossproc under a shared SANE_GL126_MAGAZINE_MARK to
         // prove the mark (not in-process state) carries the kind across
         // a process boundary, device key with spaces included (the test
         // device's own name, printed as KEY above).
