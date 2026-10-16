@@ -666,7 +666,7 @@ promised scope require them. VueScan stays out of public docs.
 
 **WP-3 — SANE submission package (B2). SUBMITTED 2026-09-29 as merge
 request !1032 (<https://gitlab.com/sane-project/backends/-/merge_requests/1032>);
-open, under review, not merged. v8 (2026-10-15: process lock removed from the backend at the maintainer's question, mark path and test env var renamed, `.desc` status `:basic` + "Experimental") prepared, not pushed, not hardware-run.** Prepared and rebased onto current
+open, under review, not merged. v8 (2026-10-15: process lock removed from the backend at the maintainer's question, mark path and test env var renamed, `.desc` status `:basic` + "Experimental") pushed to the merge request 2026-10-16 (fork branch `wp3-gl126-submission-v5` now holds v8, tip `94628f3f2`; pipeline green, no conflicts; description's "Known limitations" rewritten, reply posted in the maintainer's thread), not hardware-run.** Prepared and rebased onto current
 upstream 2026-09-28 (v3), comments cleaned of every internal citation
 the same evening (v4), and 42 lines of dead code removed 2026-09-29 after
 the upstream clang CI job rejected them (v5), and v5 rebased onto

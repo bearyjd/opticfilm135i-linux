@@ -14,7 +14,14 @@ list. Submitted is not accepted: whether and when anything is merged is
 the maintainers' decision. The completion of B2 is recorded in
 `docs/ROADMAP.md`.
 
-**Revision v8 (2026-10-15) is prepared, offline, and not pushed.** The
+**Revision v8 (prepared offline 2026-10-15) was pushed to the merge request
+on 2026-10-16** by the owner from the `sane-wp3-v8` worktree
+(`git push fork wp3-gl126-submission-v8:wp3-gl126-submission-v5
+--force-with-lease`, `cf21d4327` → `94628f3f2`, forced update). The fork
+pipeline on `94628f3f2` passed, the merge request shows no conflicts, its
+"Known limitations" list was edited the same day (lock and state-file items
+replaced by one state-file item, nine items in all), and a reply was posted
+in the maintainer's process-lock thread (not resolved by us). The
 SANE maintainer asked why the backend takes a process lock shared with an
 external (out-of-tree) driver. Decision (the owner's): drop the lock from
 the submission entirely. v8 is v7 rebased onto upstream `59d255866` (none of

@@ -1,11 +1,11 @@
 # WP-3 package — the exact SANE submission series, exported
 
-**Status: revision v8 PREPARED offline 2026-10-15, NOT PUSHED, NOT run on
-hardware.** The merge request (!1032,
-<https://gitlab.com/sane-project/backends/-/merge_requests/1032>) holds v7
-(pushed 2026-10-13; fork source branch `wp3-gl126-submission-v5`). v8 is v7
-on current upstream plus the changes below; it is for the owner to push if
-he decides to. The series is exactly the repository's `sane/` (the nine
+**Status: revision v8 prepared offline 2026-10-15, PUSHED to the merge
+request 2026-10-16 by the owner, NOT run on hardware.** The merge request
+(!1032, <https://gitlab.com/sane-project/backends/-/merge_requests/1032>)
+now holds v8 (fork source branch `wp3-gl126-submission-v5`, tip
+`94628f3f2`, replacing v7's `cf21d4327`; pipeline green, no conflicts). v8
+is v7 on current upstream plus the changes below. The series is exactly the repository's `sane/` (the nine
 `gl126_*` files and `gl126-integration.patch`) with the two exposure-time
 edits described under v7, as five commits in two forms that recreate it
 without manual reconstruction.
@@ -197,8 +197,10 @@ the scanner.
 
 ## What was pushed, and from where
 
-Nothing from v8 is pushed. This package is built and exported locally and
-committed to `cgillinger/opticfilm135i-linux` (a local branch). Nothing is
-pushed to the SANE project's repository from the development clone, which
-tracks the real upstream, and no automated session pushed anything to
-GitLab.
+v8 was pushed on 2026-10-16 by the owner, by hand, from the
+`sane-wp3-v8` worktree to his fork's branch `wp3-gl126-submission-v5`
+(`--force-with-lease`, `cf21d4327` → `94628f3f2`), which is the merge
+request's source branch. This package is built and exported locally and
+committed to `cgillinger/opticfilm135i-linux`. Nothing is pushed to the
+SANE project's repository from the development clone, which tracks the
+real upstream, and no automated session pushed anything to GitLab.

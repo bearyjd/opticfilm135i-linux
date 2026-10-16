@@ -6,7 +6,9 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
-- SANE submission revision v8 (2026-10-15, prepared offline, not pushed, not
+- SANE submission revision v8 (prepared offline 2026-10-15, pushed to the
+  merge request 2026-10-16 by the owner: pipeline green, no conflicts,
+  description updated, reply posted in the maintainer's thread; not
   hardware-run): the maintainer asked why the backend takes a process lock
   shared with an external driver, so v8 drops the lock from the backend
   entirely. `sane/gl126_lock.{h,cpp}` is now `sane/gl126_mark.{h,cpp}` and
