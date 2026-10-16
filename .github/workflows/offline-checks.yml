@@ -43,10 +43,10 @@ jobs:
             python tests/$t.py
           done
 
-      - name: Compiler-based suites (lock, ops, geometry, install)
+      - name: Compiler-based suites (mark, ops, geometry, install)
         run: |
           set -e
-          for t in test_sane_lock test_sane_ops test_sane_geometry \
+          for t in test_sane_mark test_sane_ops test_sane_geometry \
                    test_sane_install; do
             echo "== $t"
             python tests/$t.py

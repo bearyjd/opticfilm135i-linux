@@ -20,7 +20,7 @@ cd /path/to/sane-backends/backend/genesys
 for f in gl126.h gl126.cpp gl126_registers.h \
          gl126_tables.h gl126_tables.cpp \
          gl126_ops.h gl126_ops.cpp \
-         gl126_lock.h gl126_lock.cpp; do
+         gl126_mark.h gl126_mark.cpp; do
     ln -sf /path/to/opticfilm135i-linux/sane/$f $f
 done
 ```

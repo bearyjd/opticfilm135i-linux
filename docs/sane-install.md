@@ -83,7 +83,7 @@ installer runs `restorecon` on it anyway.
 
 The port's sources live in this repository's `sane/`; a sane-backends
 checkout picks them up by symlink. **All nine files** — the older five-file
-list in `docs/sane-port.md` predates `gl126_ops` and `gl126_lock` and builds a
+list in `docs/sane-port.md` predates `gl126_ops` and `gl126_mark` and builds a
 library that does not link:
 
 ```
@@ -91,7 +91,7 @@ cd /path/to/sane-backends/backend/genesys
 for f in gl126.h gl126.cpp gl126_registers.h \
          gl126_tables.h gl126_tables.cpp \
          gl126_ops.h gl126_ops.cpp \
-         gl126_lock.h gl126_lock.cpp; do
+         gl126_mark.h gl126_mark.cpp; do
     ln -sf /path/to/opticfilm135i-linux/sane/$f $f
 done
 ```
@@ -131,8 +131,9 @@ make -C backend clean && make -j8 -C backend libsane-genesys.la
 ```
 
 `BACKENDS=genesys` builds only what we install. `--disable-locking` concerns
-SANE's own `sanei_access` device locking, which genesys does not use — our
-mutual exclusion with the Python driver is `gl126_lock` (below), unaffected.
+SANE's own `sanei_access` device locking, which genesys does not use. Since
+v8 the backend takes no process lock at all (see section 7 and the historical
+note in `docs/sane-port.md`), so the flag is irrelevant either way.
 The result is `backend/.libs/libsane-genesys.so.1.4.0` (~27 MB unstripped;
 it is installed as built, debug symbols included).
 
