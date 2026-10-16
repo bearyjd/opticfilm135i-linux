@@ -10,6 +10,17 @@ re-deliberation.
 
 ## Where the three stand
 
+**Update 2026-10-16: v8 pushed by the owner to the merge request.** The
+maintainer asked (2026-10-14) why the backend takes a process lock shared
+with an external driver; the owner decided to drop it. v8 (v7 rebased onto
+`59d255866`, lock removed, mark path and test variable renamed, `.desc`
+`:basic`) was built, tested and replayed offline on 2026-10-15 and pushed
+by the owner on 2026-10-16 (`cf21d4327` → `94628f3f2`, forced update). The
+fork pipeline passed all eight jobs (2955733976), the merge request is
+mergeable, its "Known limitations" list was rewritten (nine items) and a
+reply was posted in the maintainer's thread. Not hardware-run; no byte sent
+to the scanner changes. Still under review, not merged.
+
 **Update 2026-10-13: v7 pushed by the owner to the merge request.** Upstream
 moved again (`a8676a6f7`, including a revert that removed a field the
 series used) and the merge request shows a conflict. v7 (v6 rebased, plus

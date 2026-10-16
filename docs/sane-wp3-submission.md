@@ -104,6 +104,7 @@ has not started and nothing is merged. §1 has the details.
 | | |
 |---|---|
 | v7 (pushed 2026-10-13) | branch `wp3-gl126-submission-v7`, worktree `~/Dokument/Github/sane-wp3-v7`, base `a8676a6f7d21adf5137936a3b406fbde70795220`, 5 commits, tip `cf21d4327b86ec768c1dbfda25451052c994ee47`, tree `f2a530c170b91065c7b5f8b60b71e4aa73af4257` |
+| v8 (pushed 2026-10-16) | branch `wp3-gl126-submission-v8`, worktree `~/Dokument/Github/sane-wp3-v8`, base `59d255866046e5909208b3da3a6911dd2896a7ec`, 5 commits (`ac80e0a82`, `787f03718`, `506f5898e`, `cfb390a6d`, `94628f3f2`), tip `94628f3f2f538b7bc215d90d65ef1f92ff5dae6a`, tree `ab97f45fcb35d812262216f815423f3716a0159a` |
 | Branch | `wp3-gl126-submission-v6` (local name; pushed 2026-10-02 to the merge request, whose source branch in the fork is still named `wp3-gl126-submission-v5` but holds these v6 commits) |
 | Worktree | `~/Dokument/Github/sane-wp3-v6` (a `git worktree` of the sane-backends clone) |
 | Base | `7103e09b03aa8c7041c75e12f4d51fdf511be151`, "Merge branch 'genesys-gl128-opticfilm-8200i-se' into 'master'", fetched 2026-10-02 |

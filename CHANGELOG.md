@@ -6,6 +6,11 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.2.3 — 2026-10-16
+Submission revision v8 on the merge request: the SANE backend no longer takes a process lock, bench-only names are gone from the backend, and the `.desc` status is `:basic`. No change to anything sent to the scanner. See [docs/release-notes-v0.2.3.md](docs/release-notes-v0.2.3.md).
+
 - SANE submission revision v8 (prepared offline 2026-10-15, pushed to the
   merge request 2026-10-16 by the owner: pipeline green, no conflicts,
   description updated, reply posted in the maintainer's thread; not
@@ -21,6 +26,10 @@ one exists; "offline" means implemented and tested without the scanner.
   `ProcessLock`; do not run `of135i` commands while a SANE session is open.
   `tests/test_sane_lock.py` became `tests/test_sane_mark.py`. Package:
   `sane/wp3-package/`.
+- The offline-checks CI workflow and the two symlink lists in
+  `docs/sane-port.md` / `docs/sane-install.md` follow the
+  `gl126_lock` -> `gl126_mark` rename (the first CI run of the v8 branch
+  failed on the old test-file name).
 
 ## v0.2.2 — 2026-10-13
 The cold-start fix (first finding admitted through the static-analysis barrier), the readable front-panel buttons, and submission revision v7 on the merge request. See [docs/release-notes-v0.2.2.md](docs/release-notes-v0.2.2.md).
