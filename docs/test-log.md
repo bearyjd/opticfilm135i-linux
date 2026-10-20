@@ -7020,8 +7020,12 @@ the branch rebased onto v0.2.4 (2940fea).
    52.9/55.9/60.1/64.3 s against 54–66 s before: about 9 s per strip
    saved, as the telemetry predicted. No strict-poll timeout,
    `cr_mismatches` 20–39, no coverage failure, no `white_dips`.
-The owner then continued the roll on the same branch (about nine
-strips) without waiting; they are not part of this test.
+The owner then continued the roll on the same branch without waiting:
+nine strips, 33 frames (rolls 22–30, one of them a single-frame strip),
+all verified on IR, 0 poll timeouts, every non-strict poll settled on
+the first read, `cal_white` 0.27 s and `cal_dark_a` ≤ 0.12 s on every
+frame, gain 44–45/33–34/39, offset 265–267, no dips, no failure, nothing
+unusual in the sound. Frame totals (medians) 52.9/55.9/60.1/64.3 s.
 
 ### Test 101: first production series on the production-feedback code — ten strips, the calibration-path speck, the white-dip guard (2026-10-20)
 
