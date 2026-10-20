@@ -22,6 +22,13 @@ one exists; "offline" means implemented and tested without the scanner.
 - Console output can no longer abort a command: stdout/stderr are wrapped
   so a closed pipe is swallowed instead of raising `BrokenPipeError`
   mid-scan (offline; production telemetry 2026-09/10, 711 frames).
+- Docs: `docs/production-telemetry-2026-10.md` (what 193 strips / 711
+  frames of production use say about the driver: the four changes above,
+  the time budget behind whole-strip scanning, the per-frame calibration
+  vindicated, the shading-noise hypothesis, three items parked);
+  `docs/colour-rendering-analysis.md` §6 corrected (the band inside the
+  aperture edge is the edge's penumbra, not film base); ROADMAP candidates;
+  Test 100 planned (hardware check of the poll change on its own branch).
 
 ## v0.2.3 — 2026-10-16
 Submission revision v8 on the merge request: the SANE backend no longer takes a process lock, bench-only names are gone from the backend, and the `.desc` status is `:basic`. No change to anything sent to the scanner. See [docs/release-notes-v0.2.3.md](docs/release-notes-v0.2.3.md).
