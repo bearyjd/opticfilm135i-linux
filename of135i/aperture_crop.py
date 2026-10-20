@@ -32,7 +32,7 @@ always be inspected, never just discarded (section 5).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -62,6 +62,9 @@ class ApertureCoverage:
     trailing_margin_mm: float | None
     reason: str
     threshold: float
+    # Which array the verdict was measured on: "visible" (default; plain
+    # paths) or "ir" (dual paths, see measure_coverage_dual).
+    source: str = "visible"
 
 
 def along_strip_profile(image, *, channel="red", band=0.5) -> np.ndarray:
@@ -73,7 +76,13 @@ def along_strip_profile(image, *, channel="red", band=0.5) -> np.ndarray:
     holder every channel is saturated so red is equally fine.
     """
     arr = np.asarray(image)
-    if arr.ndim != 3 or arr.shape[2] < 3:
+    if arr.ndim == 2:
+        # A single-channel (lines, width) array, e.g. the IR channel as
+        # image.split_ir returns it: used directly, `channel` is ignored.
+        two_d = True
+    elif arr.ndim == 3 and arr.shape[2] >= 3:
+        two_d = False
+    else:
         raise ValueError(f"expected a (lines, width, channels>=3) image, got shape {arr.shape}")
     n_lines, width = arr.shape[0], arr.shape[1]
 
@@ -86,6 +95,12 @@ def along_strip_profile(image, *, channel="red", band=0.5) -> np.ndarray:
     hi = min(max(hi, lo + 1 if width > 0 else lo), width)
     if hi <= lo:
         lo, hi = 0, width
+
+    if two_d:
+        chan = arr[:, lo:hi].astype(np.float64)
+        if chan.size == 0:
+            return np.zeros(n_lines, dtype=np.float64)
+        return chan.mean(axis=1)
 
     window = arr[:, lo:hi, :].astype(np.float64)
 
@@ -195,6 +210,35 @@ def measure_coverage(image, *, dpi, min_margin_mm=0.15, channel="red") -> Apertu
         reason="ok",
         threshold=threshold,
     )
+
+
+def measure_coverage_dual(visible, ir, *, dpi, min_margin_mm=0.15) -> ApertureCoverage:
+    """Coverage for a dual-light (IR) pass: IR first, then visible.
+
+    The IR channel is blind to the picture, so the aperture edge is
+    visible in it even when film content (a black film end, a dark
+    picture beside an empty part of the opening) hides the edge in the
+    visible red channel. `ir` is the (lines, width) array from
+    image.split_ir and must share the visible array's line grid (same
+    number of lines, same line index = same position on the strip), so
+    the verdict's line positions apply to both.
+
+    Returns the IR verdict if verified, else the visible verdict if
+    verified (source "visible"), else a not-verified verdict whose reason
+    names both failures.
+    """
+    v_shape = np.asarray(visible).shape
+    i_shape = np.asarray(ir).shape
+    if v_shape[0] != i_shape[0]:
+        raise ValueError(f"visible and IR do not share a line grid: {v_shape[0]} vs {i_shape[0]} lines")
+    cov_ir = measure_coverage(ir, dpi=dpi, min_margin_mm=min_margin_mm)
+    if cov_ir.verified:
+        return replace(cov_ir, source="ir")
+    cov_vis = measure_coverage(visible, dpi=dpi, min_margin_mm=min_margin_mm)
+    if cov_vis.verified:
+        return replace(cov_vis, source="visible")
+    return replace(cov_vis, source="visible",
+                   reason=f"IR: {cov_ir.reason}; visible: {cov_vis.reason}")
 
 
 def crop_to_aperture(image, coverage: ApertureCoverage, *, dpi, pad_mm=0.0) -> np.ndarray:

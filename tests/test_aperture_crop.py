@@ -27,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from of135i import aperture
-from of135i.aperture_crop import ApertureCoverage, along_strip_profile, crop_to_aperture, measure_coverage
+from of135i.aperture_crop import (ApertureCoverage, along_strip_profile, crop_to_aperture, measure_coverage,
+                                  measure_coverage_dual)
 
 DPI = 600
 LINES_PER_MM = DPI / 25.4
@@ -308,6 +309,63 @@ def test_sane_coverage_reads_png_and_pnm_alike():
     print("test_sane_coverage_reads_png_and_pnm_alike OK")
 
 
+def _aperture_profile(leading=100, trailing=100, plastic=800.0, lit=40000.0):
+    return [plastic] * leading + [lit] * _aperture_lines() + [plastic] * trailing
+
+
+def _ir_2d(values) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    arr = np.empty((len(values), WIDTH), dtype="<u2")
+    arr[:, :] = values[:, None]
+    return arr
+
+
+def test_along_strip_profile_accepts_2d_ir_channel():
+    values = np.linspace(100, 60000, 50)
+    ir = _ir_2d(values)
+    prof = along_strip_profile(ir)
+    assert prof.shape == (50,)
+    assert np.allclose(prof, values, atol=1.0)
+    # channel is ignored for a 2-D array
+    assert np.array_equal(prof, along_strip_profile(ir, channel="blue"))
+    # 3-channel behaviour unchanged
+    rgb = _line_image(values)
+    assert np.allclose(along_strip_profile(rgb), values, atol=1.0)
+    print("test_along_strip_profile_accepts_2d_ir_channel OK")
+
+
+def test_measure_coverage_dual_ir_first_when_visible_hides_edge():
+    n = len(_aperture_profile())
+    visible = _line_image([800.0] * n)          # film content hides the edge
+    ir = _ir_2d(_aperture_profile())
+    assert not measure_coverage(visible, dpi=DPI).verified
+    cov = measure_coverage_dual(visible, ir, dpi=DPI)
+    assert cov.verified and cov.source == "ir", (cov.reason, cov.source)
+    print("test_measure_coverage_dual_ir_first_when_visible_hides_edge OK")
+
+
+def test_measure_coverage_dual_falls_back_to_visible():
+    n = len(_aperture_profile())
+    visible = _line_image(_aperture_profile())
+    ir = _ir_2d([800.0] * n)
+    cov = measure_coverage_dual(visible, ir, dpi=DPI)
+    assert cov.verified and cov.source == "visible", (cov.reason, cov.source)
+    print("test_measure_coverage_dual_falls_back_to_visible OK")
+
+
+def test_measure_coverage_dual_both_fail_combines_reasons():
+    n = len(_aperture_profile())
+    visible = _line_image([800.0] * n)
+    ir = _ir_2d([800.0] * n)
+    cov = measure_coverage_dual(visible, ir, dpi=DPI)
+    ir_reason = measure_coverage(ir, dpi=DPI).reason
+    vis_reason = measure_coverage(visible, dpi=DPI).reason
+    assert not cov.verified
+    assert cov.reason == f"IR: {ir_reason}; visible: {vis_reason}", cov.reason
+    assert ApertureCoverage(True, 0.0, 1.0, 1.0, 1.0, "ok", 0.0).source == "visible"
+    print("test_measure_coverage_dual_both_fail_combines_reasons OK")
+
+
 def main() -> int:
     tests = [
         test_measure_coverage_clean_aperture_is_verified,
@@ -321,6 +379,10 @@ def main() -> int:
         test_crop_to_aperture_clamps_to_image_bounds_with_pad,
         test_crop_to_aperture_raises_without_located_edges,
         test_sane_coverage_reads_png_and_pnm_alike,
+        test_along_strip_profile_accepts_2d_ir_channel,
+        test_measure_coverage_dual_ir_first_when_visible_hides_edge,
+        test_measure_coverage_dual_falls_back_to_visible,
+        test_measure_coverage_dual_both_fail_combines_reasons,
     ]
     passed = skipped = 0
     for t in tests:

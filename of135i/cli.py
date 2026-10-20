@@ -687,7 +687,11 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
         visible = image.remove_dust(visible, ir)
 
     from . import aperture_crop
-    cov = aperture_crop.measure_coverage(visible, dpi=args.dpi)
+    # `visible` (aligned, cropped by the colour shift at both ends) and `ir`
+    # (split_ir rolled it into register, then cropped by the same shift
+    # above) share one line grid; measure_coverage_dual checks that. The IR
+    # array is used for coverage even when no IR file is written.
+    cov = aperture_crop.measure_coverage_dual(visible, ir, dpi=args.dpi)
 
     # _orient_pair is the module-level helper above (shared with the
     # --film 110 hook): same orientation fix as the plain path, applied
@@ -727,7 +731,7 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
               f"frame.", file=sys.stderr)
         return cov
 
-    print(f"aperture coverage: VERIFIED — margins lead "
+    print(f"aperture coverage: VERIFIED (source: {cov.source}) — margins lead "
           f"{cov.leading_margin_mm:.3f} mm, trail {cov.trailing_margin_mm:.3f} mm")
     vis_c = aperture_crop.crop_to_aperture(visible, cov, dpi=args.dpi)
     ir_c = aperture_crop.crop_to_aperture(ir, cov, dpi=args.dpi) if write_ir else None
@@ -770,6 +774,7 @@ def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
             "trailing_line": coverage.trailing_line,
             "leading_margin_mm": coverage.leading_margin_mm,
             "trailing_margin_mm": coverage.trailing_margin_mm,
+            "source": getattr(coverage, "source", "visible"),
         }
     sidecar["cli"] = {
         "frame": frame,
@@ -857,7 +862,10 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
             ir = ir[_shift:-_shift]
         if args.ir and not args.no_clean:
             visible = image.remove_dust(visible, ir)
-        coverage = aperture_crop.measure_coverage(visible, dpi=args.dpi)
+        # visible and ir share one line grid (both trimmed by the same
+        # colour shift above); the IR array is used for coverage even when
+        # no IR file is written (dpi != 3600 without --ir).
+        coverage = aperture_crop.measure_coverage_dual(visible, ir, dpi=args.dpi)
         # Preserve the full overscan frame(s) regardless of the verdict
         # (raw-data principle) -- rotated like the main negative, never
         # mirrored.
@@ -885,8 +893,8 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
                   f"Kept the full overscan frame(s); no main negative "
                   f"written for this frame.", file=sys.stderr)
             return None, None, None, bool(args.ir and not args.no_clean), coverage
-        print(f"aperture coverage: VERIFIED — margins lead "
-              f"{coverage.leading_margin_mm:.3f} mm, trail "
+        print(f"aperture coverage: VERIFIED (source: {coverage.source}) — "
+              f"margins lead {coverage.leading_margin_mm:.3f} mm, trail "
               f"{coverage.trailing_margin_mm:.3f} mm")
         visible = aperture_crop.crop_to_aperture(visible, coverage, dpi=args.dpi)
         ir = aperture_crop.crop_to_aperture(ir, coverage, dpi=args.dpi)
@@ -1086,6 +1094,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             if cov is not None:
                 entry["coverage_verified"] = bool(cov.verified)
                 entry["coverage_reason"] = cov.reason
+                entry["coverage_source"] = cov.source
                 if not cov.verified:
                     incomplete.append(frame)
             del raw

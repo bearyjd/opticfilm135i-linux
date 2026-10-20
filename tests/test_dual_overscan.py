@@ -406,7 +406,7 @@ def test_dual_isotropic_profiles_square_and_pixels_unchanged():
             visible = image.align_channels(visible, dpi=dpi)
             if shift:
                 ir = ir[shift:-shift]
-            c = aperture_crop.measure_coverage(visible, dpi=dpi)
+            c = aperture_crop.measure_coverage_dual(visible, ir, dpi=dpi)
             vis_c = aperture_crop.crop_to_aperture(visible, c, dpi=dpi)
             ir_c = aperture_crop.crop_to_aperture(ir, c, dpi=dpi)
             k = args.rotate // 90
