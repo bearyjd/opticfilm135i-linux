@@ -152,6 +152,21 @@ _WARMUP_BUDGET_S = 60.0       # total wall-clock budget, hard upper bound
 _WARMUP_INTERVAL_S = 5.0      # between white-line measurements
 _WARMUP_STABLE_PCT = 3.0      # consecutive peaks must agree within this
 
+# Floor under a NON-strict poll's budget (3x the captured duration,
+# _poll_one). Was 1.0 s from 2026-09-02 to 2026-10-20. Production
+# telemetry (docs/production-telemetry-2026-10.md section 2.3, 652
+# frames): 93 % of frames timed out one to seven of these polls, each at
+# exactly the floor, on the three documented benign signatures and
+# nothing else, never followed by a failure; when the poll did match it
+# matched within the phase's first ~10 ms. The accepted-word rules in
+# _poll_one (data-ready bit, state class, reg 0x32 mask) are what end a
+# poll early; this floor only bounds the cases none of them covers.
+# Strict completion waits (motor moves) are NOT under this floor.
+# Hardware check: docs/test-log.md Test 100.
+NONSTRICT_POLL_FLOOR_S = 0.3
+# Per-scan cap on recorded poll settle entries (diag "poll_settle").
+_POLL_SETTLE_CAP = 48
+
 # Semantic PARK (see park_semantic() and docs/replay-analysis.md's
 # "Conversion order" step 1): timeout and poll interval for the two
 # condition waits that replace the captured trace's pacing.
@@ -475,6 +490,8 @@ class Scanner:
         self._diag_poll_timeouts: int = 0
         self._diag_cr_mismatches: int = 0
         self._diag_poll_timeout_details: list[dict] = []
+        self._diag_poll_settle: list[dict] = []
+        self._diag_poll_settle_max_s: float = 0.0
         self._diag_warmup: dict | None = None
         # Set by a completed load_magazine(): the transport is at the
         # vendor's scan reference position (the load's traverse). A
@@ -765,9 +782,12 @@ class Scanner:
         # Most captured polls settled in < 0.03 s; the previous 10 s
         # floor added ~200 s of wasted timeouts per scan when dynamic
         # register bits (magazine presence, sensor state) differed from
-        # the capture.  1 s is generous for state checks; real motor
+        # the capture. Strict completion waits keep a 1 s floor; the
+        # non-strict state checks get NONSTRICT_POLL_FLOOR_S (see the
+        # constant for the production telemetry behind it). Real motor
         # waits (POSITION dur ~1.6 s) still get 3× their captured time.
-        timeout = max(3 * op.dur * timeout_scale, 1.0)
+        floor = 1.0 if strict else NONSTRICT_POLL_FLOOR_S
+        timeout = max(3 * op.dur * timeout_scale, floor)
         t_start = time.monotonic()
         deadline = t_start + timeout
         dev = self.io.dev
@@ -777,6 +797,8 @@ class Scanner:
                 if strict:
                     log.info("completion poll settled %s (exact) after %.2fs",
                              got.hex(), time.monotonic() - t_start)
+                else:
+                    self._note_poll_settle(op, got, want, t_start, "exact")
                 return
             if strict:
                 if op.wv == 0x018E and status_matches(got, want, mask):
@@ -796,6 +818,21 @@ class Scanner:
                         session=self.session.snapshot())
                 time.sleep(0.004)
                 continue
+            # Extended status word at wIndex 0x0122 (reg 0x101 in the high
+            # byte): bit 0x01 is DATAENB, data ready. Where the capture
+            # settled with that bit set (ad55, bd55, a955: the calibration
+            # read-back sites), the live word's data-ready bit is what the
+            # following bulk read depends on, not the state class. The SANE
+            # backend polls exactly this bit at these sites (PollDataReady,
+            # hardware-verified since Test 48); production telemetry
+            # (docs/production-telemetry-2026-10.md section 2.3) showed the
+            # driver instead timing out on 9c55-versus-ad55/bd55 in 93 % of
+            # frames, one second each, never followed by a failure.
+            if (op.wv == 0x018E and op.wi == 0x0122
+                    and len(got) >= 1 and len(want) >= 1
+                    and (want[0] & 0x01) and (got[0] & 0x01)):
+                self._note_poll_settle(op, got, want, t_start, "dataenb")
+                return
             # Status-word polls (0x018e): the upper nibble of the high
             # byte encodes the state class (0x9=busy, 0xD=transitioning,
             # 0xF=done); the lower nibble carries session-variable bits
@@ -805,6 +842,7 @@ class Scanner:
             # instead of timing out on an irrelevant bit difference.
             if (op.wv == 0x018E and len(got) >= 1 and len(want) >= 1
                     and (got[0] & 0xF0) == (want[0] & 0xF0)):
+                self._note_poll_settle(op, got, want, t_start, "class")
                 return
             # Reg 0x32 polls (wIndex 0x3222): bits 3-4 (0x18) reflect
             # loader-sensor and transport state that vary with magazine
@@ -815,6 +853,7 @@ class Scanner:
             if (op.wv == 0x008E and op.wi == 0x3222
                     and len(got) >= 1 and len(want) >= 1
                     and (got[0] & ~0x18 & 0xFF) == (want[0] & ~0x18 & 0xFF)):
+                self._note_poll_settle(op, got, want, t_start, "reg32")
                 return
             if time.monotonic() > deadline:
                 self._diag_poll_timeouts += 1
@@ -823,6 +862,7 @@ class Scanner:
                         "wv": f"0x{op.wv:04x}", "wi": f"0x{op.wi:04x}",
                         "last": got.hex(), "want": want.hex(),
                     })
+                self._note_poll_settle(op, got, want, t_start, "timeout")
                 log.warning(
                     "poll wv=%#06x wi=%#06x timed out after %.1fs "
                     "(last %s, want %s) -- continuing",
@@ -830,6 +870,22 @@ class Scanner:
                 )
                 return
             time.sleep(0.004)
+
+    def _note_poll_settle(self, op: Op, got: bytes, want: bytes, t_start: float,
+                          how: str) -> None:
+        """Record how a NON-strict poll ended (diag sidecar ``poll_settle``):
+        ``how`` is "exact", "dataenb", "class", "reg32" or "timeout", ``s``
+        the seconds from the first read. Capped per scan so the sidecar
+        stays small; ``poll_settle_max_s`` is kept over all of them. Pure
+        bookkeeping, no USB traffic."""
+        s = time.monotonic() - t_start
+        if s > self._diag_poll_settle_max_s:
+            self._diag_poll_settle_max_s = s
+        if len(self._diag_poll_settle) < _POLL_SETTLE_CAP:
+            self._diag_poll_settle.append({
+                "wv": f"0x{op.wv:04x}", "wi": f"0x{op.wi:04x}",
+                "want": want.hex(), "got": got.hex(), "how": how, "s": round(s, 4),
+            })
 
     def _run_phase(self, phase: Phase, strict_polls: frozenset[int] = frozenset(),
                    strict_mask: int = LOAD_STATUS_MASK, poll_timeout_scale: float = 1.0,
@@ -1998,6 +2054,8 @@ class Scanner:
         self._diag_poll_timeouts = 0
         self._diag_cr_mismatches = 0
         self._diag_poll_timeout_details = []
+        self._diag_poll_settle = []
+        self._diag_poll_settle_max_s = 0.0
         self._diag_warmup = None
         self._diag_park_waits = None
         started_utc = datetime.now(timezone.utc).isoformat()
@@ -2227,6 +2285,8 @@ class Scanner:
             "poll_timeouts": self._diag_poll_timeouts,
             "cr_mismatches": self._diag_cr_mismatches,
             "poll_timeout_details": list(self._diag_poll_timeout_details),
+            "poll_settle": list(self._diag_poll_settle),
+            "poll_settle_max_s": round(self._diag_poll_settle_max_s, 4),
             "park_mode": self.park_mode,
             "park_waits": dict(self._diag_park_waits) if self._diag_park_waits is not None else None,
             "started_utc": started_utc,
@@ -2292,6 +2352,8 @@ class Scanner:
         self._diag_poll_timeouts = 0
         self._diag_cr_mismatches = 0
         self._diag_poll_timeout_details = []
+        self._diag_poll_settle = []
+        self._diag_poll_settle_max_s = 0.0
         self._diag_warmup = None
         self._diag_park_waits = None
         started_utc = datetime.now(timezone.utc).isoformat()
@@ -2507,6 +2569,8 @@ class Scanner:
             "poll_timeouts": self._diag_poll_timeouts,
             "cr_mismatches": self._diag_cr_mismatches,
             "poll_timeout_details": list(self._diag_poll_timeout_details),
+            "poll_settle": list(self._diag_poll_settle),
+            "poll_settle_max_s": round(self._diag_poll_settle_max_s, 4),
             "park_mode": self.park_mode,
             "park_waits": dict(self._diag_park_waits) if self._diag_park_waits is not None else None,
             "started_utc": started_utc,
