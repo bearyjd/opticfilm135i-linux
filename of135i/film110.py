@@ -53,6 +53,14 @@ AIR_FRAC = 0.95                 # >= this fraction of air -> "air" column
 PLASTIC_FRAC = 0.05              # <= this fraction of air -> "plastic" column (real rail: 0.033)
 PLASTIC_MIN_RUN_MM = 2.0         # shorter dark runs are film (the 110 printed border reads 0.066)
 FILM_WIDTH_TOLERANCE_MM = 1.0
+# A 16 mm strip lies loose across the 24 mm opening; its far edge can slide
+# under the rail on that side (Test 103, 2026-10-21: 0.6 mm for one strip,
+# 2.1 mm for the other), so the visible band is narrower than the film by
+# that much. Accepted up to this, when the narrow side abuts plastic (the
+# perforated edge must still face air); the hidden width is reported as
+# `rail_hidden_mm` and the picture is clipped by whatever of its own margin
+# lies under the rail.
+RAIL_HIDDEN_MAX_MM = 3.0
 FILM_PRESENT_FRAC = 0.85        # < this fraction of air -> film present (a line)
 HOLE_EDGE_MARGIN_MM = 2.5        # lateral search band next to the perforated edge
 HOLE_FRAC = 0.95                # >= this fraction of air -> hole (air-level) line
@@ -137,6 +145,7 @@ class ApertureFind:
     leading_continuation: bool
     frames: list = field(default_factory=list)
     reason: str = ""
+    rail_hidden_mm: float = 0.0        # film width hidden under a rail (0 = fully visible)
 
 
 # ------------------------------------------------------------- small helpers
@@ -569,12 +578,19 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
     # b. Film band: the longest run of film columns.
     lo, hi = _longest_true_run(is_film)
     band_width_mm = (hi - lo) / px_per_mm
-    if abs(band_width_mm - film.width_mm) > FILM_WIDTH_TOLERANCE_MM:
-        return ApertureFind(False, (lo, hi), None, None, False, [],
-                             f"no 110 film band ({band_width_mm:.1f} mm)")
 
     touches_air_lo = lo > 0 and bool(is_air[lo - 1])
     touches_air_hi = hi < width and bool(is_air[hi])
+    touches_plastic_lo = lo > 0 and bool(is_plastic[lo - 1])
+    touches_plastic_hi = hi < width and bool(is_plastic[hi])
+    rail_hidden_mm = 0.0
+    if abs(band_width_mm - film.width_mm) > FILM_WIDTH_TOLERANCE_MM:
+        hidden = film.width_mm - band_width_mm
+        under_rail = (touches_plastic_lo != touches_plastic_hi) and (touches_air_lo or touches_air_hi)
+        if not (0.0 < hidden <= RAIL_HIDDEN_MAX_MM and under_rail):
+            return ApertureFind(False, (lo, hi), None, None, False, [],
+                                 f"no 110 film band ({band_width_mm:.1f} mm)")
+        rail_hidden_mm = float(hidden)
 
     # Interior columns for the along-transport profile: the band with the
     # perforation search margin trimmed off BOTH sides, so a hole (which
@@ -622,7 +638,8 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
     if not (touches_air_lo or touches_air_hi):
         return ApertureFind(False, (lo, hi), film_line_start, film_line_end,
                              leading_continuation, [],
-                             "film band not adjacent to air; perforations hidden")
+                             "film band not adjacent to air; perforations hidden",
+                             rail_hidden_mm)
 
     # d. Perforations: resolve the perforated edge and its hole runs.
     edge_is_low = None
@@ -650,7 +667,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
         reason = ("no perforation found near either film edge" if edge_is_low is None
                    else "no perforation found in the film band")
         return ApertureFind(False, (lo, hi), film_line_start, film_line_end,
-                             leading_continuation, [], reason)
+                             leading_continuation, [], reason, rail_hidden_mm)
 
     perforated_edge_col = lo if edge_is_low else hi
     lat_len_px = film.image_mm[1] * px_per_mm
@@ -778,7 +795,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
     frames_out = frames_rev if score_rev > score_normal else frames_normal
 
     return ApertureFind(False, (lo, hi), film_line_start, film_line_end,
-                         leading_continuation, frames_out, "")
+                         leading_continuation, frames_out, "", rail_hidden_mm)
 
 
 def product_bounds(find: FrameFind, *, dpi: float | None = None, pad_mm: float = 0.0,

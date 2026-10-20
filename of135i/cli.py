@@ -525,6 +525,16 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
 
     px_per_mm = args.dpi / film110.MM_PER_INCH
     parts = []
+    if find.rail_hidden_mm:
+        # The strip's far edge lies under the rail; the picture's own
+        # margin on that side is width - lateral offset - image width.
+        margin = (_holder.FILM_110.width_mm - _holder.FILM_110.image_lateral_offset_mm
+                  - _holder.FILM_110.image_mm[1])
+        clip = max(0.0, find.rail_hidden_mm - margin)
+        parts.append(f"film edge {find.rail_hidden_mm:.1f} mm under the rail"
+                     + (f" -> picture clipped by {clip:.1f} mm on that side; "
+                        f"nudge the strip towards the open side" if clip > 0.05
+                        else ""))
     anchored = state.strips == 2 and state.slot == 2
     two = state.strips == 2
     frames = (sorted(find.frames, key=lambda f: f.line0) if anchored
@@ -567,12 +577,17 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
         if fr.split == "leading":
             # The tail of an image that started in the previous aperture
             # was numbered there (as a trailing split), so it is not
-            # counted again here -- except in slot 2 while nothing in the
-            # slot is numbered yet: then the image that started under the
-            # bar before this aperture is the strip's FIRST image
-            # (incomplete here; the other placement delivers it) and
-            # falls through to be numbered.
-            if not (anchored and state.anchor_mm is None):
+            # counted again here -- except while nothing in the slot is
+            # numbered yet and this is the slot's FIRST aperture: then the
+            # image that started under the edge before it is the strip's
+            # first image (incomplete here; the other placement delivers
+            # it) and falls through to be numbered. Test 103: image 1
+            # seated flush with aperture 1's edge (-0.1 mm) had been
+            # dropped as "already counted" by a previous aperture that
+            # does not exist.
+            first_of_slot = (aperture == state.first_aperture
+                             and not state.images)
+            if not ((anchored and state.anchor_mm is None) or first_of_slot):
                 parts.append("leading lines continue the previous "
                              "aperture's split image (already counted)")
                 continue
