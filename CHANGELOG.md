@@ -4,6 +4,20 @@ Notable changes to the Plustek OpticFilm 135i Linux driver and its SANE
 backend port. Entries name the hardware evidence (docs/test-log.md) where
 one exists; "offline" means implemented and tested without the scanner.
 
+## Unreleased
+
+- Non-strict polls (offline; production telemetry 2026-09/10, 652
+  frames; hardware check pending, Test 100): at the extended-status sites
+  whose captured settled word has the data-ready bit set (`ad55`, `bd55`,
+  `a955`), a live word with that bit set is accepted, the criterion the
+  SANE backend has used at the same sites since Test 48. The non-strict
+  poll floor is 0.3 s (`of135i.device.NONSTRICT_POLL_FLOOR_S`, was 1.0 s;
+  strict completion waits unchanged). Every non-strict poll's outcome and
+  settle time is recorded in the diag sidecar (`poll_settle`,
+  `poll_settle_max_s`). Telemetry: 93 % of production frames timed out one
+  to seven of these polls at exactly the old floor, about 9 s per strip,
+  never followed by a failure. `tests/test_poll.py`.
+
 ## v0.2.4 — 2026-10-20
 
 - Dual (IR) paths measure aperture coverage on the IR channel first and on
