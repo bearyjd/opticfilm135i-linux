@@ -452,6 +452,61 @@ failed and re-run whole
 and whether a residual dark_b was auto-corrected (docs/test-log.md
 Test 32–33).
 
+On the dual (IR) paths the aperture is located on the IR channel first —
+it is blind to the picture, so film content cannot hide the edge — and on
+the visible frame only if IR does not verify. Each per-frame manifest
+entry records `coverage_source` (`"ir"` or `"visible"`; the diag sidecar's
+`coverage` block carries the same `source`), and a `coverage_warning`
+when a margin exceeds 2.0 mm (production maximum 1.10 mm): the opening
+found is shorter than the holder's, as on a film end that is opaque to
+the measuring channel; the frame is still written. A verified frame is then
+checked for **film**: an empty holder slot passes coverage, because
+coverage checks the opening, not what is in it. An empty opening (at
+least 95 % of the sampled pixels saturated in all three channels;
+`aperture_crop.EMPTY_APERTURE_SHARE`) gets only its `fN.overscan.tiff`
+(and `-ir.overscan.tiff`) — no `fN.tiff`, `-ir` or preview — and its entry
+records `film_present: false`, `saturated_share`, `coverage_verified: true`
+and `coverage_reason: "empty aperture"`; frames with film record
+`film_present: true` and `saturated_share`, and the sidecar gets a `film`
+block. A strip end inside the opening — part open light, part film — is
+film: the frame is written and `saturated_share` says how much of the
+opening was open (an empty slot measures 0.99999; a leader frame on the
+first production series measured 0.54 over unexposed base). An empty frame is not a coverage failure: it
+never makes the roll fail and the exit code stays 0. After an empty frame
+that follows at least one frame with film in the same strip, the strip is
+taken to have ended: the remaining requested frames are skipped (no
+hardware work), the roll record gets `skipped_frames` and
+`stop_reason: "empty aperture at frame N"`, and the eject still runs
+(`frames` keeps the requested list; a skipped frame has no per-frame
+entry). An empty slot before any film frame never stops the strip.
+`--no-stop-at-empty` scans every requested frame regardless.
+
+For a flat-field experiment without the hardware, each frame that measured
+a fresh calibration also gets `fN.cal.npz` (numpy `savez_compressed`, about 13
+MB per frame on the dual path, 3 % of the raw data) next to its `.diag.json`: `white_line`, `dark_a`, `dark_b`,
+`shading_meas`, `verify_meas`, the uploaded shading tables
+(`shading_table`/`shading_table2`, or `shading_table_a/_b` and
+`shading_table2_a/_b` on the dual path), `gain_codes`, `offset_codes`,
+`dpi`, `dual` (`shading_meas` is the dark measurement, `verify_meas` the
+white one; on the dual path its odd lines are the visible pass and its
+even lines the IR pass). Frames that reuse the cached calibration have
+none (the sidecar's `cal_data` field is `null`). `--no-cal-data` (on
+`scan` and `digitize`) skips the file. The white measurement is guarded
+before the per-pixel gain is computed (`calibrate.guard_white_dips`): a
+dust speck in the calibration light path dims a few columns of it, the
+gain then over-corrects them and the frame carries a bright line through
+its whole height — on the first production series one speck, 0.1 mm
+wide, 2–4 % bright lines in 36 of 40 frames. A narrow dip (at most 40
+columns, deeper than 1.5 %) that shows in all three colour channels is
+replaced by its neighbourhood's running median; the sensor's own dim
+pixels are single-channel and are left to the gain table. The guarded
+dips are listed in the sidecar's `white_dips`; `tools/cal_dips.py
+<stem>.cal.npz` lists them for exported data together with the
+per-column factor that corrects a frame scanned before the guard
+existed. (Python driver only; the SANE backend computes its tables in
+C++ without this guard.) Console output is also protected: a closed
+stdout/stderr pipe can no longer abort a scan.
+
 ### What the driver knows about the magazine
 
 | term | meaning | how it is known |

@@ -130,6 +130,13 @@ def _u16_buffer(rows):
     return np.asarray(rows, dtype="<u2").tobytes()
 
 
+def test_cal_data_path():
+    from of135i import diag
+    assert diag.cal_data_path("a/foo.tiff") == "a/foo.cal.npz"
+    assert diag.cal_data_path("x.pnm") == "x.cal.npz"
+    print("test_cal_data_path OK")
+
+
 def test_cal_buffer_dump_flags_bit_identical_channels():
     """SYNTHETIC -- NOT a reproduction of the B5 fault (its raw buffer was
     never retained, Test 29). A dark_b whose three channels are
@@ -248,6 +255,7 @@ def main() -> int:
         test_collect_doctor_and_format,
         test_format_doctor_never_raises_on_partial_report,
         test_sidecar_path,
+        test_cal_data_path,
         test_cal_buffer_dump_flags_bit_identical_channels,
         test_cal_buffer_dump_normal_reference_not_flagged,
         test_cal_buffer_dump_short_transfer_flagged,

@@ -124,22 +124,27 @@ difference. **No colour change should be implemented on this reasoning.**
 
 These stand on their own and are reproducible.
 
-**The film base is directly measurable in our own scans.** The A+C
-overscan margin contains unexposed film. On frame 1, rows 5183–5199
-(about 0.11 mm at 3600 dpi, between the image and the holder's plastic
-edge, which is dark and near-neutral at R 640 / G 780 / B 730):
-
-| channel | value (16-bit) | density |
-|---|---|---|
-| R | 35591 | 0.265 |
-| G | 13646 | 0.681 |
-| B | 9514 | 0.838 |
-
-R/B = 3.74 — transmits red, absorbs blue, as an orange mask should. The
-holder's own geometry offers about 1.90 mm of unexposed film between
-frames, a far wider sampling site than the 0.11 mm the default 0.75 mm
-overscan exposes. Useful if a future design ever needs an explicit mask
-measurement; it does not diagnose the cast.
+**The film base is NOT measurable in the overscan margin (corrected
+2026-10-20).** An earlier revision of this section claimed it was: on
+frame 1, rows 5183–5199 (about 0.11 mm at 3600 dpi, between the image
+and the holder's plastic edge, which is dark and near-neutral at R 640 /
+G 780 / B 730) read R 35591 / G 13646 / B 9514 (densities 0.265 / 0.681
+/ 0.838, R/B = 3.74), and the text took that band for unexposed film
+showing the orange mask. The owner's digitisation workflow tested the
+premise on its own scans (2026-09-15) and it does not hold: the
+brightest flat plateau next to the edge is about 2.5× *darker* than the
+thinnest picture content on the same frame (R 17582 / G 9286 / B 6066
+against a content p99.9 of R 48104 / G 28900 / B 13270), and its
+channel ratios differ from the content's (B/R 0.35 against 0.28). That
+band is the aperture edge's penumbra, possibly combined with the
+±0.24 mm load-to-load position variation against a 0.12 mm rebate, not
+film base. Not even the ratio can be borrowed from it. The only
+unexposed film a per-frame scan could offer is the 1.90 mm gap between
+frames, which the per-frame window never captures; it would be in the
+raw data of a whole-strip sweep (docs/ROADMAP.md candidates, and
+docs/production-telemetry-2026-10.md §2.4). Until then any film-base
+figure is an estimate from picture content, and that is how the
+workflow treats it.
 
 **Our gain calibration does not see the film.** The AFE white reference
 is read before the film, and Test 60 demonstrated the consequence

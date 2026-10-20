@@ -809,6 +809,333 @@ def test_digitize_records_partial_frame_progress():
     print("test_digitize_records_partial_frame_progress OK")
 
 
+# ------------------------------------------- digitize: film presence / stop
+
+
+def _dual_frame_raw(kind, dpi=600, W=8):
+    """Alternating IR/visible raw for one digitize frame: a lit aperture
+    between dark plastic. kind "film": visible 40000 with a few saturated
+    specks; "empty": visible fully saturated (open light); "hidden": film
+    content hides the edge in the visible channel (flat dark) while IR
+    still shows the opening."""
+    lpm = dpi / 25.4
+    n = int(round(40 * lpm))
+    a, b = int(round(4 * lpm)), int(round(34 * lpm))
+    ir_col = np.full(n, 800, dtype=np.uint16)
+    ir_col[a:b] = 40000
+    vis = np.repeat(ir_col[:, None], W, axis=1)
+    if kind == "empty":
+        vis[a:b, :] = 65000
+        ir_col[a:b] = 65000
+    elif kind == "film":
+        vis[a + 10:a + 12, 2:4] = 65000
+    elif kind == "hidden":
+        vis[:, :] = 800
+    ir = np.repeat(ir_col[:, None], W, axis=1)
+    inter = np.empty((n * 2, W), dtype=np.uint16)
+    inter[0::2] = ir
+    inter[1::2] = vis
+    return np.repeat(inter[:, :, None], 3, axis=2).astype("<u2").tobytes(), W
+
+
+def _run_digitize(kinds, frames="1-4", stdout=None, **flags):
+    """Drive _cmd_digitize with a fake scanner whose frame N returns
+    kinds[N]. Returns (rc, manifest record, roll dir, scan-call list,
+    captured stdout)."""
+    import argparse
+    import contextlib
+    import io
+    from of135i import cli, digitize
+
+    scans: list = []
+
+    class _FakeScanner:
+        park_mode = "verbatim"
+        warmup_budget_s = 60.0
+        last_diag = {"gain_codes": [1, 2, 3], "offset_codes": [4, 5, 6],
+                     "dark_b_substituted": False, "calibration": "fresh"}
+
+        def check_start_state(self): pass
+        def is_magazine_present(self): return True
+        def initialize(self, ir, dpi): pass
+        def scan(self, frame, ir=None, dpi=None):
+            scans.append(frame)
+            return _dual_frame_raw(kinds[frame]) + (None,)
+        def eject(self): scans.append("eject")
+
+    with tempfile.TemporaryDirectory() as d:
+        args = argparse.Namespace(
+            out=d, prefix="", roll=1, force=True, assume_loaded=True,
+            dpi=600, positive=False, rotate=0, ir=True, no_clean=True,
+            no_diag=False, park="verbatim", warmup_budget=None, frames=frames,
+            **flags)
+        orig = cli._run_writing_session
+        cli._run_writing_session = lambda body: body(_FakeScanner())
+        buf = stdout if stdout is not None else io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = cli._cmd_digitize(args)
+        finally:
+            cli._run_writing_session = orig
+        rdir = digitize.roll_dir(d, "", 1)
+        rec = digitize.read_manifest(d)[-1]
+        files = sorted(p.name for p in rdir.iterdir())
+        sidecars = {}
+        for p in rdir.glob("*.diag.json"):
+            import json
+            sidecars[p.name] = json.loads(p.read_text())
+        return rc, rec, files, scans, getattr(buf, "getvalue", lambda: "")(), sidecars
+
+
+def test_digitize_wide_margin_is_flagged_not_failed():
+    """The synthetic frame has 4 mm / 6 mm margins (window 40 mm, opening
+    4-34 mm): far above MAX_PLAUSIBLE_MARGIN_MM, so the entry carries a
+    `coverage_warning` while the frame still verifies and is written."""
+    rc, rec, files, scans, out, sc = _run_digitize({1: "film"}, frames="1")
+    assert rc == 0 and rec["status"] == "ok", rec
+    e1 = rec["per_frame"][0]
+    assert e1["coverage_verified"] is True and e1["main"], e1
+    assert "margin above" in e1["coverage_warning"], e1
+    print("test_digitize_wide_margin_is_flagged_not_failed OK")
+
+
+def test_digitize_empty_slot_stops_strip_after_film():
+    kinds = {1: "film", 2: "film", 3: "empty", 4: "film"}
+    rc, rec, files, scans, out, sc = _run_digitize(kinds)
+    assert rc == 0, rc
+    assert rec["status"] == "ok", rec
+    assert scans == [1, 2, 3, "eject"], scans       # frame 4: no hardware work
+    assert rec["skipped_frames"] == [4] and rec["stop_reason"] == "empty aperture at frame 3"
+    assert rec["frames"] == [1, 2, 3, 4]
+    assert [e["frame"] for e in rec["per_frame"]] == [1, 2, 3]
+    e1, e3 = rec["per_frame"][0], rec["per_frame"][2]
+    assert e1["film_present"] is True and e1["saturated_share"] < 0.05, e1
+    assert e1["coverage_source"] == "ir" and e1["main"].endswith("f1.tiff")
+    assert e3["film_present"] is False and e3["saturated_share"] > 0.9, e3
+    assert e3["coverage_verified"] is True and e3["coverage_reason"] == "empty aperture"
+    assert e3["main"] is None and e3["ir"] is None and e3["preview"] is None
+    assert "f3.tiff" not in files and "f3-ir.tiff" not in files
+    assert "f3.overscan.tiff" in files and "f3-ir.overscan.tiff" in files
+    assert "f1.tiff" in files and "f4.overscan.tiff" not in files
+    assert sc["f3.diag.json"]["film"]["present"] is False
+    assert sc["f3.diag.json"]["coverage"]["reason"] == "empty aperture"
+    assert sc["f3.diag.json"]["coverage"]["verified"] is True
+    assert sc["f1.diag.json"]["film"]["present"] is True
+    assert sc["f1.diag.json"]["coverage"]["source"] == "ir"
+    assert "EMPTY" in out
+    print("test_digitize_empty_slot_stops_strip_after_film OK")
+
+
+def test_digitize_empty_first_slot_does_not_stop():
+    kinds = {1: "empty", 2: "film", 3: "film", 4: "film"}
+    rc, rec, files, scans, out, sc = _run_digitize(kinds)
+    assert rc == 0 and rec["status"] == "ok", (rc, rec)
+    assert scans == [1, 2, 3, 4, "eject"], scans
+    assert "skipped_frames" not in rec and "stop_reason" not in rec
+    assert "f1.tiff" not in files and "f2.tiff" in files
+    print("test_digitize_empty_first_slot_does_not_stop OK")
+
+
+def test_digitize_no_stop_at_empty_scans_all():
+    kinds = {1: "film", 2: "film", 3: "empty", 4: "film"}
+    rc, rec, files, scans, out, sc = _run_digitize(kinds, no_stop_at_empty=True)
+    assert rc == 0 and scans == [1, 2, 3, 4, "eject"], (rc, scans)
+    assert "skipped_frames" not in rec and "f4.tiff" in files
+    print("test_digitize_no_stop_at_empty_scans_all OK")
+
+
+def test_digitize_ir_hidden_edge_verifies_via_ir():
+    rc, rec, files, scans, out, sc = _run_digitize(
+        {1: "hidden"}, frames="1")
+    e = rec["per_frame"][0]
+    assert e["coverage_verified"] is True and e["coverage_source"] == "ir", e
+    print("test_digitize_ir_hidden_edge_verifies_via_ir OK")
+
+
+def test_digitize_plain_path_records_empty_aperture():
+    import argparse
+    import os
+    from of135i import cli
+    dpi, W = 3600, 8
+    lpm = dpi / 25.4
+    n = int(round(34 * lpm))
+    a, b = int(round(3 * lpm)), int(round(29 * lpm))
+    col = np.full(n, 800, dtype=np.uint16)
+    col[a:b] = 65000
+    arr = np.repeat(np.repeat(col[:, None], W, axis=1)[:, :, None], 3, axis=2)
+    raw = arr.astype("<u2").tobytes()
+    args = argparse.Namespace(dpi=dpi, ir=False, no_clean=True, rotate=0, positive=False)
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "f1.tiff")
+        progress: dict = {}
+        main, irf, prev, cleaned, cov = cli._finish_digitize_frame(
+            args, raw, W, out, dual=False, progress=progress)
+        assert cov.verified and cov.source == "visible", cov
+        assert main is None and not os.path.exists(out)
+        assert os.path.exists(cli._overscan_raw_path(out))
+        assert progress["film_present"] is False and progress["saturated_share"] > 0.9
+    print("test_digitize_plain_path_records_empty_aperture OK")
+
+
+# ------------------------------------------- calibration data export
+
+
+def _cal_sidecar_run(cal_data, **flags):
+    import argparse
+    import json
+    import os
+    from of135i import cli, diag
+
+    class _Sc:
+        last_diag = {"gain_codes": [1, 2, 3], "offset_codes": [4, 5, 6]}
+        last_cal_data = cal_data
+
+    args = argparse.Namespace(no_diag=False, frames="1", dpi=3600, ir=False,
+                              positive=False, rotate=0, no_clean=False, **flags)
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "f1.tiff")
+        cli._write_diag_sidecar(args, _Sc(), out, 1)
+        side = json.loads(Path(diag.sidecar_path(out)).read_text())
+        npz = diag.cal_data_path(out)
+        loaded = None
+        if os.path.exists(npz):
+            with np.load(npz) as z:
+                loaded = {k: z[k] for k in z.files}
+        return side, npz, loaded
+
+
+def test_cal_data_written_next_to_sidecar():
+    data = {"white_line": np.arange(12, dtype=np.uint16).reshape(4, 3),
+            "shading_table": np.arange(10, dtype=np.uint8),
+            "gain_codes": np.array([1, 2, 3], dtype=np.uint16),
+            "dpi": np.int64(3600), "dual": np.bool_(False)}
+    side, npz, loaded = _cal_sidecar_run(data, no_cal_data=False)
+    assert npz.endswith("f1.cal.npz") and side["cal_data"] == npz, side
+    assert loaded is not None and set(loaded) == set(data)
+    assert loaded["white_line"].dtype == np.uint16 and loaded["shading_table"].dtype == np.uint8
+    assert np.array_equal(loaded["white_line"], data["white_line"])
+    assert int(loaded["dpi"]) == 3600
+    print("test_cal_data_written_next_to_sidecar OK")
+
+
+def test_cal_data_flag_and_missing_data_write_nothing():
+    data = {"white_line": np.zeros((2, 3), dtype=np.uint16)}
+    side, npz, loaded = _cal_sidecar_run(data, no_cal_data=True)
+    assert loaded is None and side["cal_data"] is None, side
+    side, npz, loaded = _cal_sidecar_run(None, no_cal_data=False)   # cache hit
+    assert loaded is None and side["cal_data"] is None, side
+    side, npz, loaded = _cal_sidecar_run(data)                      # old args object
+    assert loaded is not None
+    print("test_cal_data_flag_and_missing_data_write_nothing OK")
+
+
+# ------------------------------------------------ resilient console output
+
+
+class _PipeBreaker:
+    """A fake stream that raises BrokenPipeError from write number
+    `fail_at` on (1-based), recording what it accepted."""
+
+    def __init__(self, fail_at=2):
+        self.fail_at = fail_at
+        self.calls = 0
+        self.accepted = []
+        self.flush_calls = 0
+
+    def write(self, data):
+        self.calls += 1
+        if self.calls >= self.fail_at:
+            raise BrokenPipeError(32, "Broken pipe")
+        self.accepted.append(data)
+        return len(data)
+
+    def flush(self):
+        self.flush_calls += 1
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def isatty(self):
+        return False
+
+
+def test_resilient_stream_swallows_broken_pipe():
+    from of135i import cli
+    fake = _PipeBreaker(fail_at=2)
+    redirects = []
+
+    class _NoDup2(cli._ResilientStream):
+        def _redirect_fd(self):
+            redirects.append(True)
+
+    st = _NoDup2(fake)
+    assert st.write("one\n") == 4
+    assert st.write("two\n") == 4          # raises inside; swallowed
+    assert st.broken and redirects == [True]
+    calls = fake.calls
+    assert st.write("three\n") == 6         # dropped silently, not forwarded
+    assert fake.calls == calls and fake.accepted == ["one\n"]
+    st.flush()                              # no-op once broken
+    assert fake.flush_calls == 0
+    assert st.isatty() is False             # delegation
+    # EPIPE as a plain OSError is also caught; other OSErrors are not.
+    import errno
+
+    class _Epipe:
+        def write(self, d): raise OSError(errno.EPIPE, "pipe")
+        def flush(self): pass
+    s2 = _NoDup2(_Epipe()); s2.write("x"); assert s2.broken
+
+    class _Eio:
+        def write(self, d): raise OSError(errno.EIO, "io")
+    try:
+        _NoDup2(_Eio()).write("x")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("a non-pipe OSError must propagate")
+    # flush path
+    s3 = _NoDup2(_PipeBreaker(fail_at=99)); s3.flush(); assert s3.broken
+    print("test_resilient_stream_swallows_broken_pipe OK")
+
+
+def test_resilient_stream_redirects_fd_to_devnull():
+    import os
+    from of135i import cli
+    r, w = os.pipe()
+    f = os.fdopen(w, "w")
+    os.close(r)                              # reader gone: next write -> EPIPE
+    st = cli._ResilientStream(f)
+    st.write("x" * 100000)
+    try:
+        st.flush()
+    except Exception as e:                    # pragma: no cover
+        raise AssertionError(f"flush must not raise: {e!r}")
+    assert st.broken
+    st.write("more"); st.flush()              # silent
+    try:
+        f.close()                             # exit-time flush cannot fail
+    except Exception as e:                    # pragma: no cover
+        raise AssertionError(f"close must not raise: {e!r}")
+    print("test_resilient_stream_redirects_fd_to_devnull OK")
+
+
+def test_digitize_survives_broken_stdout():
+    from of135i import cli
+    fake = _PipeBreaker(fail_at=2)
+
+    class _NoDup2(cli._ResilientStream):
+        def _redirect_fd(self): pass
+
+    kinds = {1: "film", 2: "film"}
+    rc, rec, files, scans, out, sc = _run_digitize(
+        kinds, frames="1-2", stdout=_NoDup2(fake))
+    assert fake.calls >= 2, "the stream must actually have been broken"
+    assert rc == 0 and rec["status"] == "ok", (rc, rec)
+    for n in ("f1.tiff", "f2.tiff", "f1-ir.tiff", "f2-ir.tiff", "f1.overscan.tiff",
+              "f2.overscan.tiff", "f1.diag.json", "f2.diag.json"):
+        assert n in files, (n, files)
+    print("test_digitize_survives_broken_stdout OK")
+
+
 # ------------------------------------------------ SANE port (stage 2 tables)
 
 
@@ -1253,6 +1580,17 @@ def main() -> int:
         test_loadflow_next_strip_refuses_when_cold,
         test_loadflow_next_strip_feed_not_engaged_names_full_load,
         test_cli_load_next_strip_excludes_release_and_double_jog,
+        test_digitize_empty_slot_stops_strip_after_film,
+        test_digitize_empty_first_slot_does_not_stop,
+        test_digitize_no_stop_at_empty_scans_all,
+        test_digitize_ir_hidden_edge_verifies_via_ir,
+        test_digitize_plain_path_records_empty_aperture,
+        test_digitize_wide_margin_is_flagged_not_failed,
+        test_cal_data_written_next_to_sidecar,
+        test_cal_data_flag_and_missing_data_write_nothing,
+        test_resilient_stream_swallows_broken_pipe,
+        test_resilient_stream_redirects_fd_to_devnull,
+        test_digitize_survives_broken_stdout,
         test_sane_tables_generated_and_current,
         test_sane_tables_injections_land_on_value_bytes,
         test_holder_geometry_measures_a_synthetic_holder,

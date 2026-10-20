@@ -85,7 +85,19 @@ single USB operation the driver would otherwise perform:
   observe, they don't change, that behaviour). `cli.py`'s `scan`
   command writes this as `<output>.diag.json` next to each frame
   (`diag.sidecar_path()`/`diag.write_sidecar()`), disable with
-  `--no-diag`.
+  `--no-diag`. The sidecar's `coverage` block carries a `source`
+  (`"ir"`/`"visible"`) and, from `digitize`, a `film` block
+  (`present`, `saturated_share`); `cal_data` names the
+  `<output>.cal.npz` file holding the frame's per-pixel calibration
+  measurements (`Scanner.last_cal_data`; `null` on a calibration-cache
+  hit or with `--no-cal-data`); `white_dips` lists the dips
+  `calibrate.guard_white_dips` replaced in the white measurement before
+  the gain table was computed (a list on the plain path, `{"a", "b"}` on
+  the dual path, `null` on a cache hit). `digitize`'s manifest entries add
+  `coverage_source`, `film_present`, `saturated_share`, and
+  `coverage_warning` when a margin exceeds
+  `aperture_crop.MAX_PLAUSIBLE_MARGIN_MM`; the roll record
+  adds `skipped_frames`/`stop_reason` when a strip is stopped early.
 
 ## Open M2 items
 

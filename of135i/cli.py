@@ -26,7 +26,9 @@ cycle instruction and exits -- it never sends a recovery command.
 from __future__ import annotations
 
 import argparse
+import errno
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -687,7 +689,11 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
         visible = image.remove_dust(visible, ir)
 
     from . import aperture_crop
-    cov = aperture_crop.measure_coverage(visible, dpi=args.dpi)
+    # `visible` (aligned, cropped by the colour shift at both ends) and `ir`
+    # (split_ir rolled it into register, then cropped by the same shift
+    # above) share one line grid; measure_coverage_dual checks that. The IR
+    # array is used for coverage even when no IR file is written.
+    cov = aperture_crop.measure_coverage_dual(visible, ir, dpi=args.dpi)
 
     # _orient_pair is the module-level helper above (shared with the
     # --film 110 hook): same orientation fix as the plain path, applied
@@ -727,7 +733,7 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
               f"frame.", file=sys.stderr)
         return cov
 
-    print(f"aperture coverage: VERIFIED — margins lead "
+    print(f"aperture coverage: VERIFIED (source: {cov.source}) — margins lead "
           f"{cov.leading_margin_mm:.3f} mm, trail {cov.trailing_margin_mm:.3f} mm")
     vis_c = aperture_crop.crop_to_aperture(visible, cov, dpi=args.dpi)
     ir_c = aperture_crop.crop_to_aperture(ir, cov, dpi=args.dpi) if write_ir else None
@@ -748,7 +754,7 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
 
 
 def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
-                        frame: int, coverage=None) -> None:
+                        frame: int, coverage=None, film=None) -> None:
     """Write <out>'s .diag.json sidecar from scanner.last_diag (see
     diag.py/device.py) unless --no-diag was given, and log a one-line
     INFO summary of the per-frame calibration/health counters.
@@ -770,7 +776,14 @@ def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
             "trailing_line": coverage.trailing_line,
             "leading_margin_mm": coverage.leading_margin_mm,
             "trailing_margin_mm": coverage.trailing_margin_mm,
+            "source": getattr(coverage, "source", "visible"),
         }
+        if film is not None:
+            # digitize only: film presence inside the verified aperture.
+            sidecar["film"] = {"present": bool(film["present"]),
+                               "saturated_share": film["saturated_share"]}
+            if not film["present"]:
+                sidecar["coverage"]["reason"] = "empty aperture"
     sidecar["cli"] = {
         "frame": frame,
         "frames": args.frames,
@@ -781,6 +794,21 @@ def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
         "no_clean": args.no_clean,
         "overscan": getattr(args, "overscan", None),
     }
+    # Per-pixel calibration data (device.Scanner.last_cal_data): only a
+    # fresh calibration has any, and --no-cal-data skips it. Decided and
+    # written BEFORE the sidecar so the sidecar records the outcome.
+    cal_path = None
+    cal_data = getattr(scanner, "last_cal_data", None)
+    if cal_data is not None and not getattr(args, "no_cal_data", False):
+        import numpy as _np
+        try:
+            cal_path = diag.cal_data_path(out)
+            _np.savez_compressed(cal_path, **cal_data)
+            print(f"wrote {cal_path}")
+        except OSError as e:
+            log.warning("could not write the calibration data file: %s", e)
+            cal_path = None
+    sidecar["cal_data"] = cal_path
     path = diag.sidecar_path(out)
     diag.write_sidecar(path, sidecar)
     print(f"wrote {path}")
@@ -845,11 +873,35 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         if progress is not None:
             progress[key] = value
 
+    def _note_film(arr, cov) -> bool:
+        """Film presence on the array coverage was measured on; records
+        it in `progress` and returns True when the aperture is empty
+        (no product is then written; the overscan frame already is)."""
+        fp = aperture_crop.film_presence(arr, cov, dpi=args.dpi)
+        _note("film_present", fp.present)
+        _note("saturated_share", fp.saturated_share)
+        if not fp.present:
+            print(f"aperture EMPTY — no film in this opening "
+                  f"({fp.saturated_share:.1%} of sampled pixels saturated in "
+                  f"all channels); no main negative written, the overscan "
+                  f"frame is kept")
+        return not fp.present
+
+    def _note_margin(cov) -> None:
+        """Flag (never fail) a verified frame whose margin is implausibly
+        wide -- the opening found is shorter than the holder's, e.g. a
+        film end opaque to the measuring channel (aperture_crop
+        MAX_PLAUSIBLE_MARGIN_MM). Recorded as `coverage_warning`."""
+        w = aperture_crop.margin_warning(cov)
+        if w:
+            _note("coverage_warning", w)
+            print(f"aperture coverage: WARNING — {w}", file=sys.stderr)
+
+    from . import aperture_crop
     ir_file = None
     preview_file = None
     coverage = None
     if dual:
-        from . import aperture_crop
         visible, ir = image.split_ir(raw, width=width, dpi=args.dpi)
         _shift = round(24 * args.dpi / 7200)
         visible = image.align_channels(visible, dpi=args.dpi)
@@ -857,7 +909,10 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
             ir = ir[_shift:-_shift]
         if args.ir and not args.no_clean:
             visible = image.remove_dust(visible, ir)
-        coverage = aperture_crop.measure_coverage(visible, dpi=args.dpi)
+        # visible and ir share one line grid (both trimmed by the same
+        # colour shift above); the IR array is used for coverage even when
+        # no IR file is written (dpi != 3600 without --ir).
+        coverage = aperture_crop.measure_coverage_dual(visible, ir, dpi=args.dpi)
         # Preserve the full overscan frame(s) regardless of the verdict
         # (raw-data principle) -- rotated like the main negative, never
         # mirrored.
@@ -885,13 +940,15 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
                   f"Kept the full overscan frame(s); no main negative "
                   f"written for this frame.", file=sys.stderr)
             return None, None, None, bool(args.ir and not args.no_clean), coverage
-        print(f"aperture coverage: VERIFIED — margins lead "
-              f"{coverage.leading_margin_mm:.3f} mm, trail "
+        print(f"aperture coverage: VERIFIED (source: {coverage.source}) — "
+              f"margins lead {coverage.leading_margin_mm:.3f} mm, trail "
               f"{coverage.trailing_margin_mm:.3f} mm")
+        _note_margin(coverage)
+        if _note_film(visible, coverage):
+            return None, None, None, bool(args.ir and not args.no_clean), coverage
         visible = aperture_crop.crop_to_aperture(visible, coverage, dpi=args.dpi)
         ir = aperture_crop.crop_to_aperture(ir, coverage, dpi=args.dpi)
     else:
-        from . import aperture_crop
         full = image.align_channels(image.assemble(raw, width), dpi=args.dpi)
         coverage = aperture_crop.measure_coverage(full, dpi=args.dpi)
         # Preserve the full overscan frame regardless of the verdict
@@ -914,6 +971,9 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         print(f"aperture coverage: VERIFIED — margins lead "
               f"{coverage.leading_margin_mm:.3f} mm, trail "
               f"{coverage.trailing_margin_mm:.3f} mm")
+        _note_margin(coverage)
+        if _note_film(full, coverage):
+            return None, None, None, False, coverage
         visible = aperture_crop.crop_to_aperture(full, coverage, dpi=args.dpi)
         del full
         ir = None
@@ -1062,7 +1122,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             print("error: no magazine detected after load", file=sys.stderr)
             return 1
         incomplete: list[int] = []
-        for frame in dig_frames:
+        seen_film = False
+        for idx, frame in enumerate(dig_frames):
             scanner.initialize(ir=dual, dpi=args.dpi)
             out = str(digitize.frame_path(args.out, args.prefix, roll, frame))
             log.info("scanning frame %d @ %d dpi%s", frame, args.dpi,
@@ -1083,20 +1144,46 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             main, irf, prev, cleaned, cov = _finish_digitize_frame(
                 args, raw, width, out, dual, progress=entry)
             entry.update(main=main, ir=irf, preview=prev, dust_cleaned=cleaned)
+            film = None
             if cov is not None:
                 entry["coverage_verified"] = bool(cov.verified)
                 entry["coverage_reason"] = cov.reason
+                entry["coverage_source"] = cov.source
                 if not cov.verified:
                     incomplete.append(frame)
+                elif "film_present" in entry:
+                    film = {"present": entry["film_present"],
+                            "saturated_share": entry["saturated_share"]}
+                    if not film["present"]:
+                        # Not a coverage failure: the opening was captured
+                        # whole, there is just nothing in it.
+                        entry["coverage_reason"] = "empty aperture"
             del raw
             entry["stage"] = "diag"
-            _write_diag_sidecar(args, scanner, out, frame, coverage=cov)
+            if film is not None:
+                _write_diag_sidecar(args, scanner, out, frame, coverage=cov, film=film)
+            else:
+                _write_diag_sidecar(args, scanner, out, frame, coverage=cov)
             d = scanner.last_diag or {}
             entry.update(stage=None,
                          calibration=d.get("calibration"),
                          gain_codes=d.get("gain_codes"),
                          offset_codes=d.get("offset_codes"),
                          dark_b_substituted=d.get("dark_b_substituted"))
+            if film is not None:
+                if film["present"]:
+                    seen_film = True
+                elif seen_film and not getattr(args, "no_stop_at_empty", False):
+                    # Empty aperture after film in this strip: the strip has
+                    # ended; skip the rest (no hardware work), still eject.
+                    skipped = list(dig_frames[idx + 1:])
+                    if skipped:
+                        record["skipped_frames"] = skipped
+                        record["stop_reason"] = f"empty aperture at frame {frame}"
+                        print(f"stopping: empty aperture at frame {frame} after film; "
+                              f"skipping frame(s) {', '.join(map(str, skipped))} "
+                              f"(--no-stop-at-empty scans them anyway)")
+                    break
         scanner.eject()
         print("ejected")
         if incomplete:
@@ -1284,6 +1371,11 @@ def build_parser() -> argparse.ArgumentParser:
              "overscan raw is kept and the exit status is non-zero")
     p_scan.add_argument("--no-diag", action="store_true",
         help="skip writing the <output>.diag.json calibration/timing sidecar")
+    p_scan.add_argument("--no-cal-data", action="store_true",
+        help="do not write the <output>.cal.npz per-pixel calibration data "
+             "(white line, dark/shading measurements, uploaded tables; about 13 "
+             "MB per frame; written only when the scan measured a fresh "
+             "calibration, and only with the .diag.json sidecar)")
     p_scan.add_argument("--warmup-budget", type=float, default=None, metavar="SECONDS",
                         help="total time to wait for the lamp after a cold start before "
                              "failing the scan (default: the driver's bounded default, 60 s)")
@@ -1397,10 +1489,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_dig.add_argument("--no-ir", dest="ir", action="store_false",
         help="skip the IR pass and dust removal (non-3600 profiles still "
              "run a dual-light capture; only the IR output is dropped)")
+    p_dig.add_argument("--no-stop-at-empty", action="store_true",
+                       help="scan every requested frame even after an empty "
+                            "aperture that follows film (default: the strip "
+                            "has ended, the remaining frames are skipped)")
     p_dig.add_argument("--no-clean", action="store_true",
         help="skip IR-based dust/scratch removal on the visible image")
     p_dig.add_argument("--no-diag", action="store_true",
         help="skip writing per-frame .diag.json sidecars")
+    p_dig.add_argument("--no-cal-data", action="store_true",
+        help="do not write the per-frame .cal.npz per-pixel calibration data "
+             "(white line, dark/shading measurements, uploaded tables; about 13 "
+             "MB per frame; written only for frames that measured a fresh "
+             "calibration, and only with the .diag.json sidecars)")
     p_dig.add_argument("--park", choices=("verbatim", "semantic"), default="semantic",
         help="PARK implementation: semantic (default since 2026-09-17, "
              "3.7-3.8 s, hardware-confirmed via the SANE backend) or "
@@ -1418,7 +1519,87 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _ResilientStream:
+    """A console stream that can never kill a scan.
+
+    A print to a stdout/stderr pipe whose reader has gone away raises
+    BrokenPipeError; unhandled, that aborted a scanning session
+    mid-strip (production telemetry, 2026-09/10, 711 frames). This
+    wrapper catches BrokenPipeError and OSError(EPIPE) in write/flush,
+    marks the stream broken, points the underlying file descriptor at
+    os.devnull (the standard recipe, so the interpreter's flush at exit
+    cannot fail either) and drops all further output silently. Everything
+    else (fileno, isatty, other attributes) delegates to the wrapped
+    stream. KeyboardInterrupt and every other error pass through.
+    """
+
+    def __init__(self, stream, *, redirect_fd: bool = True):
+        self._stream = stream
+        self._redirect_fd_on_break = redirect_fd
+        self.broken = False
+
+    @staticmethod
+    def _is_pipe_error(exc: BaseException) -> bool:
+        return isinstance(exc, BrokenPipeError) or (
+            isinstance(exc, OSError) and exc.errno == errno.EPIPE)
+
+    def _redirect_fd(self) -> None:
+        """Point the wrapped stream's fd at os.devnull. Overridable (the
+        unit test does not touch real descriptors)."""
+        try:
+            fd = self._stream.fileno()
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, fd)
+            finally:
+                os.close(devnull)
+        except Exception:
+            pass
+
+    def _mark_broken(self) -> None:
+        self.broken = True
+        if self._redirect_fd_on_break:
+            self._redirect_fd()
+
+    def write(self, data):
+        if self.broken:
+            return len(data)
+        try:
+            return self._stream.write(data)
+        except OSError as e:
+            if not self._is_pipe_error(e):
+                raise
+            self._mark_broken()
+            return len(data)
+
+    def flush(self):
+        if self.broken:
+            return None
+        try:
+            return self._stream.flush()
+        except OSError as e:
+            if not self._is_pipe_error(e):
+                raise
+            self._mark_broken()
+            return None
+
+    def __getattr__(self, name):
+        # Only reached for attributes not defined above.
+        return getattr(self._stream, name)
+
+
+def _install_resilient_console() -> None:
+    """Wrap sys.stdout/sys.stderr (once) so console output cannot abort
+    a command. Must run before logging is configured, so the logging
+    StreamHandler binds to the wrapped stderr."""
+    if not isinstance(sys.stdout, _ResilientStream):
+        sys.stdout = _ResilientStream(sys.stdout)
+    if not isinstance(sys.stderr, _ResilientStream):
+        sys.stderr = _ResilientStream(sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
+    _install_resilient_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(

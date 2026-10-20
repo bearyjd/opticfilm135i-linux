@@ -32,7 +32,7 @@ always be inspected, never just discarded (section 5).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -62,6 +62,9 @@ class ApertureCoverage:
     trailing_margin_mm: float | None
     reason: str
     threshold: float
+    # Which array the verdict was measured on: "visible" (default; plain
+    # paths) or "ir" (dual paths, see measure_coverage_dual).
+    source: str = "visible"
 
 
 def along_strip_profile(image, *, channel="red", band=0.5) -> np.ndarray:
@@ -73,7 +76,13 @@ def along_strip_profile(image, *, channel="red", band=0.5) -> np.ndarray:
     holder every channel is saturated so red is equally fine.
     """
     arr = np.asarray(image)
-    if arr.ndim != 3 or arr.shape[2] < 3:
+    if arr.ndim == 2:
+        # A single-channel (lines, width) array, e.g. the IR channel as
+        # image.split_ir returns it: used directly, `channel` is ignored.
+        two_d = True
+    elif arr.ndim == 3 and arr.shape[2] >= 3:
+        two_d = False
+    else:
         raise ValueError(f"expected a (lines, width, channels>=3) image, got shape {arr.shape}")
     n_lines, width = arr.shape[0], arr.shape[1]
 
@@ -86,6 +95,12 @@ def along_strip_profile(image, *, channel="red", band=0.5) -> np.ndarray:
     hi = min(max(hi, lo + 1 if width > 0 else lo), width)
     if hi <= lo:
         lo, hi = 0, width
+
+    if two_d:
+        chan = arr[:, lo:hi].astype(np.float64)
+        if chan.size == 0:
+            return np.zeros(n_lines, dtype=np.float64)
+        return chan.mean(axis=1)
 
     window = arr[:, lo:hi, :].astype(np.float64)
 
@@ -195,6 +210,132 @@ def measure_coverage(image, *, dpi, min_margin_mm=0.15, channel="red") -> Apertu
         reason="ok",
         threshold=threshold,
     )
+
+
+#: Largest overscan margin a verified frame is expected to show. The
+#: window is the aperture plus the overscan on each side (0.75 mm default,
+#: docs/holder-position-design.md section 4, ±0.5 mm load variation), and
+#: production telemetry over 647 verified frames measured 0.43 to 1.10 mm
+#: (docs/production-telemetry-2026-10.md section 3). A margin well above
+#: that means the opening found is SHORTER than the holder's: the strip's
+#: end lying inside the aperture and opaque to the measuring channel
+#: (seen once, IR, leading margin 2.54 mm on a film end). The verdict is
+#: not changed by this -- the edges found are real -- but the frame is
+#: flagged so a workflow can check the crop against its siblings.
+MAX_PLAUSIBLE_MARGIN_MM = 2.0
+
+
+def margin_warning(coverage: ApertureCoverage,
+                   max_margin_mm: float = MAX_PLAUSIBLE_MARGIN_MM) -> str | None:
+    """A one-line warning when a verified coverage's margin exceeds
+    `max_margin_mm` (see MAX_PLAUSIBLE_MARGIN_MM), else None."""
+    if not coverage.verified:
+        return None
+    wide = []
+    if coverage.leading_margin_mm is not None and coverage.leading_margin_mm > max_margin_mm:
+        wide.append(f"leading {coverage.leading_margin_mm:.2f} mm")
+    if coverage.trailing_margin_mm is not None and coverage.trailing_margin_mm > max_margin_mm:
+        wide.append(f"trailing {coverage.trailing_margin_mm:.2f} mm")
+    if not wide:
+        return None
+    return (f"margin above {max_margin_mm:.1f} mm ({', '.join(wide)}): the opening "
+            f"found is shorter than the holder's aperture, the strip's end may lie "
+            f"inside it; check the crop against the strip's other frames")
+
+
+def measure_coverage_dual(visible, ir, *, dpi, min_margin_mm=0.15) -> ApertureCoverage:
+    """Coverage for a dual-light (IR) pass: IR first, then visible.
+
+    The IR channel is blind to the picture, so the aperture edge is
+    visible in it even when film content (a black film end, a dark
+    picture beside an empty part of the opening) hides the edge in the
+    visible red channel. `ir` is the (lines, width) array from
+    image.split_ir and must share the visible array's line grid (same
+    number of lines, same line index = same position on the strip), so
+    the verdict's line positions apply to both.
+
+    Returns the IR verdict if verified, else the visible verdict if
+    verified (source "visible"), else a not-verified verdict whose reason
+    names both failures.
+    """
+    v_shape = np.asarray(visible).shape
+    i_shape = np.asarray(ir).shape
+    if v_shape[0] != i_shape[0]:
+        raise ValueError(f"visible and IR do not share a line grid: {v_shape[0]} vs {i_shape[0]} lines")
+    cov_ir = measure_coverage(ir, dpi=dpi, min_margin_mm=min_margin_mm)
+    if cov_ir.verified:
+        return replace(cov_ir, source="ir")
+    cov_vis = measure_coverage(visible, dpi=dpi, min_margin_mm=min_margin_mm)
+    if cov_vis.verified:
+        return replace(cov_vis, source="visible")
+    return replace(cov_vis, source="visible",
+                   reason=f"IR: {cov_ir.reason}; visible: {cov_vis.reason}")
+
+
+@dataclass(frozen=True)
+class FilmPresence:
+    """Verdict from :func:`film_presence`: ``saturated_share`` is the
+    share of sampled pixels (inside the aperture) with all three channels
+    above the saturation code; ``present`` is False for an empty opening."""
+
+    present: bool
+    saturated_share: float
+
+
+# Share of the sampled aperture that must be open light (saturated in all
+# three channels) before the opening counts as EMPTY. A strip end inside
+# the opening leaves part of it open and part under film: that frame is
+# film and is written (the first production series, 2026-10-20, had a
+# leader frame 54 % open light over unexposed base). Only an opening that
+# is practically all open light is empty (an empty holder slot measures
+# 0.99999).
+EMPTY_APERTURE_SHARE = 0.95
+
+
+def film_presence(image, coverage: ApertureCoverage, *, dpi, band=0.5,
+                  saturation_code=60000, empty_share=EMPTY_APERTURE_SHARE,
+                  inset_mm=0.3, step=4) -> FilmPresence:
+    """Is there film in the verified aperture, or only open light?
+
+    Coverage checks the opening, not what is in it: an empty holder slot
+    passes it. In the raw frame an empty opening reads above
+    `saturation_code` in all three channels across its whole width, while
+    film (even unexposed base) never saturates blue through the orange
+    mask. Over the rows strictly inside the aperture (inset by `inset_mm`
+    at each edge, so the edge penumbra is excluded), over the central
+    `band` of the width (same convention as :func:`along_strip_profile`),
+    sampled every `step` rows and columns, this returns the share of
+    pixels with all three channels > `saturation_code`; present is
+    ``share < empty_share`` (default :data:`EMPTY_APERTURE_SHARE`, 0.95:
+    a partly covered opening, as on a strip end, is film).
+
+    A coverage without located edges, or an aperture too short for the
+    inset, cannot be judged: reported as present (share 0.0), never as
+    empty. Measure it on the array `coverage` was measured on.
+    """
+    arr = np.asarray(image)
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        raise ValueError(f"expected a (lines, width, channels>=3) image, got shape {arr.shape}")
+    if coverage.leading_line is None or coverage.trailing_line is None:
+        return FilmPresence(True, 0.0)
+    n_lines, width = arr.shape[0], arr.shape[1]
+    inset = inset_mm * dpi / MM_PER_INCH
+    lo = max(int(np.ceil(coverage.leading_line + inset)), 0)
+    hi = min(int(np.floor(coverage.trailing_line - inset)), n_lines - 1)
+    if hi < lo:
+        return FilmPresence(True, 0.0)
+
+    band = min(max(float(band), 0.0), 1.0)
+    half = width * band / 2.0
+    c0 = min(max(int(round(width / 2.0 - half)), 0), width)
+    c1 = min(max(int(round(width / 2.0 + half)), c0 + 1), width)
+    step = max(1, int(step))
+    sample = arr[lo:hi + 1:step, c0:c1:step, :3]
+    if sample.size == 0:
+        return FilmPresence(True, 0.0)
+    saturated = (sample > saturation_code).all(axis=2)
+    share = float(saturated.mean())
+    return FilmPresence(share < empty_share, share)
 
 
 def crop_to_aperture(image, coverage: ApertureCoverage, *, dpi, pad_mm=0.0) -> np.ndarray:

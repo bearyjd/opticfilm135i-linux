@@ -427,6 +427,32 @@ and fails safe where it cannot decide. Confirming it on N3 — both
 edges, both profiles — is part of that milestone, not a precondition
 that blocks implementation.
 
+**Amendment — IR first on dual paths, then film presence (offline;
+production telemetry, 2026-09/10, 711 frames).** The rule above is kept
+as written. Two things were added after production use:
+
+- *IR first.* 9 of 711 frames failed with "no aperture found in profile",
+  8 of them on frame 1, all because film content (a black film end, a dark
+  picture next to an empty part of the opening) hid the edge in the visible
+  red channel; on every one still on disk the same detector run on the IR
+  overscan found the opening. On the dual (IR) paths coverage is therefore
+  measured on the IR channel first (`aperture_crop.measure_coverage_dual`),
+  and on the visible frame only if IR does not verify; the verdict names
+  its source (`ApertureCoverage.source`). The plain path is unchanged.
+- *Film presence.* Coverage checks the opening, not the film, so an empty
+  holder slot passes it. In the raw frame an empty opening reads above
+  60000 of 65535 in all three channels across its whole width, while film
+  (even unexposed base) never saturates blue through the orange mask.
+  `digitize` therefore measures the share of saturated pixels inside the
+  verified aperture (`aperture_crop.film_presence`; edge penumbra excluded)
+  and treats an opening with a share of 0.95 or more
+  (`aperture_crop.EMPTY_APERTURE_SHARE`) as empty: only the overscan frame
+  is written, and the strip stops after it unless `--no-stop-at-empty`. An
+  empty frame is not a coverage failure. A strip end inside the opening is
+  film and is written: the first production series (2026-10-20, ten
+  strips) had a leader frame 54 % open light over unexposed base, which a
+  0.5 threshold had classed as empty; an empty slot measures 0.99999.
+
 ## 6. Recommendation
 
 **A + C combined; B rejected; D parked.** Chosen by the owner

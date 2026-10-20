@@ -881,6 +881,40 @@ it looks:
   switched off on purpose.
 - **Design written 2026-09-28** (`docs/sane-batch-scanning-design.md`):
   design only, not implemented, no owner's go.
+- **Quantified on production telemetry 2026-10-20**
+  (`docs/production-telemetry-2026-10.md` §2.4, 652 frames, Python
+  `digitize`, dual 3600 with IR): a four-frame strip spends about 240 s,
+  of which 160 s is the sweep itself, 32 s calibration, 28 s park
+  returns (3.6 → 10.1 s, growing with the frame number) and 20 s
+  positioning. One sweep per strip removes about 70 s and three park
+  returns per strip, and it is the only way to get the 1.9 mm
+  inter-frame gaps (true film base) into the raw data. Still needs a
+  hardware A/B, the per-strip crop, and the owner's go.
+
+**Shading-measurement noise, per-pixel flat field (2026-10-20).**
+Thin negatives show a column pattern (one sensor pixel over the whole
+transport) that correlates only 0.2 to 0.45 between frames of one
+session, which a per-frame shading measurement that is itself noisy
+would produce (`docs/production-telemetry-2026-10.md` §2.6). The raw
+calibration data is now exported per frame (`<stem>.cal.npz`) so the
+hypothesis can be tested on production data without the scanner. If it
+holds, the fix is averaging more lines in the shading measurement: a
+wire change shared with the backend, hardware A/B required.
+
+**Non-strict poll floor and the benign status words (2026-10-20).**
+93 % of production frames time out one to seven non-strict polls on the
+three documented benign signatures, one second each (about 9 s per
+strip). A branch accepts the data-ready bit at those sites, shortens
+the floor and records settle times; it is not merged until one strip has
+been scanned with it (Test 100, `docs/test-log.md`).
+
+**~~Blue gain against the film base.~~ Parked 2026-10-20.** Suggested
+from the workflow side (blue carries about a quarter of red's code
+range through the orange mask). Not adopted: the measured cast is
+tone-dependent and gain does not change that, a film-dependent gain
+breaks the film-independent calibration (Test 60), and if blue is
+light-limited the lever is exposure, not gain.
+`docs/production-telemetry-2026-10.md` §5.
 
 **~~Shorten the cold start's opening wait.~~ DONE and PROVEN ON HARDWARE
 2026-09-13** (Test 78: eighteen of nineteen polls byte-for-byte

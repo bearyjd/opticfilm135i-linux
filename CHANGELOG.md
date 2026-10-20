@@ -6,7 +6,50 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
-Nothing yet.
+- Dual (IR) paths measure aperture coverage on the IR channel first and on
+  the visible frame only if IR does not verify
+  (`aperture_crop.measure_coverage_dual`, `ApertureCoverage.source`);
+  recorded as `coverage_source` in the manifest and `coverage.source` in
+  the diag sidecar (offline; production telemetry 2026-09/10, 711 frames).
+  A verified `digitize` frame whose margin exceeds 2.0 mm
+  (`aperture_crop.MAX_PLAUSIBLE_MARGIN_MM`; telemetry maximum 1.10 mm) is
+  flagged with `coverage_warning` (the opening found is shorter than the
+  holder's, a film end inside it), never failed.
+- `digitize` detects an empty aperture (`aperture_crop.film_presence`):
+  only the overscan files are written, the entry records
+  `film_present: false`, and the strip stops after an empty frame that
+  follows film (`skipped_frames`, `stop_reason`; `--no-stop-at-empty`
+  scans all) (offline; production telemetry 2026-09/10, 711 frames). An
+  opening is empty at 95 % open light (`EMPTY_APERTURE_SHARE`), not 50 %:
+  a strip end inside the opening is film and is written (first production
+  series 2026-10-20, ten strips: a leader frame measured 0.54).
+- The white measurement is guarded before the per-pixel gain table is
+  computed (`calibrate.guard_white_dips`, `WHITE_DIP_*` constants): a
+  narrow dip (≤ 40 columns, > 1.5 %) present in all three channels — a
+  dust speck in the calibration light path, which over-corrected into a
+  2–4 % bright line through 36 of 40 frames of the first production
+  series (2026-10-20) — is replaced by the running median; the sensor's
+  own single-channel dim pixels are never touched (validated on those 40
+  exports: all speck dips guarded, no sensor pixel; a guarded dip grows
+  over its soft shoulders, `WHITE_DIP_SHOULDER`). First hardware strip
+  with the guard: residual at a 9 % speck under 1 %, no dark line in the
+  image path (the speck is not in it). Diag `white_dips`;
+  `tools/cal_dips.py` lists dips and the host-side correction factor for
+  frames scanned before the guard. Python driver only; the SANE backend
+  computes its tables in C++ without the guard (follow-up).
+- Per-pixel calibration data is exported as `<stem>.cal.npz` next to the
+  diag sidecar (`Scanner.last_cal_data`; `--no-cal-data` on `scan` and
+  `digitize`) (offline; production telemetry 2026-09/10, 711 frames).
+- Console output can no longer abort a command: stdout/stderr are wrapped
+  so a closed pipe is swallowed instead of raising `BrokenPipeError`
+  mid-scan (offline; production telemetry 2026-09/10, 711 frames).
+- Docs: `docs/production-telemetry-2026-10.md` (what 193 strips / 711
+  frames of production use say about the driver: the four changes above,
+  the time budget behind whole-strip scanning, the per-frame calibration
+  vindicated, the shading-noise hypothesis, three items parked);
+  `docs/colour-rendering-analysis.md` §6 corrected (the band inside the
+  aperture edge is the edge's penumbra, not film base); ROADMAP candidates;
+  Test 100 planned (hardware check of the poll change on its own branch).
 
 ## v0.2.3 — 2026-10-16
 Submission revision v8 on the merge request: the SANE backend no longer takes a process lock, bench-only names are gone from the backend, and the `.desc` status is `:basic`. No change to anything sent to the scanner. See [docs/release-notes-v0.2.3.md](docs/release-notes-v0.2.3.md).

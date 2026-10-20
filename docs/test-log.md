@@ -6960,3 +6960,44 @@ and the Power button.
 
 **Provenance.** Log in the private analysis area, `watch-20261012/
 t99-buttons.log`.
+
+### Test 100: non-strict poll floor and the data-ready criterion on one production strip (PLANNED 2026-10-20, not run)
+
+**Purpose.** Hardware check of the poll change prepared from the
+production telemetry (`docs/production-telemetry-2026-10.md` §2.3): at
+the calibration status-word sites whose captured settled word carries
+the data-ready bit (`ad55`, `bd55`, wIndex 0x0122), a live word with that
+bit set is accepted (the backend's `PollDataReady` criterion,
+hardware-verified since Test 48); the non-strict poll floor is shortened
+from 1.0 s; and every non-strict poll's settle time is recorded in the
+diag sidecar. Telemetry: 93 % of 652 production frames timed out one to
+seven of these polls at exactly the 1.0 s floor, 1544 cases, never
+followed by a failure. What the telemetry cannot show is when the word
+would have settled, so the run measures that.
+
+**Precondition.** Driver on the poll branch; scanner in `0x22` after
+the load flow; one real strip, dual 3600 with IR, `--frames` as the
+strip has. Nothing else changed in the same run.
+
+**Run.** `of135i digitize` on the strip, as production does. Then read
+the four sidecars.
+
+**Acceptance (all must hold).**
+1. Every frame verified and written; eject normal; the owner reports
+   nothing unusual in the sound.
+2. `poll_timeouts` per frame at or below the production median (2), and
+   the recorded settle times show the accepted polls settling on the
+   first read or within a few reads, never at the new floor.
+3. Calibration codes within the production band (gain R 44–46, G
+   32–34, B 38–39; offset 266 ± 1) and `white_mean` within the band of
+   the previous session.
+4. Phase times: `cal_dark_a/b`, `cal_gain_check_a/b`, `cal_white` each
+   under 0.4 s on every frame; `position`, `scan`, `park` unchanged
+   against the production medians (1.80/3.77/5.93/8.09, 40.2,
+   3.59/5.75/7.90/10.06 s).
+
+**Stop rule.** Any strict-poll timeout, any `cr_mismatches` outside
+6–43, or any coverage failure ends the test; the branch is not merged
+and the sidecars go into the analysis area.
+
+**Result.** Not run.

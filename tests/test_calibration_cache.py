@@ -160,6 +160,29 @@ def test_dual_scan_clears_any_plain_cache():
     print("test_dual_scan_clears_any_plain_cache OK")
 
 
+def test_last_cal_data_fresh_then_cached():
+    import numpy as np
+    rec = _RecordingScanner()
+    rec.s._scan_plain(frame=1)
+    d = rec.s.last_cal_data
+    assert d is not None
+    assert set(d) == {"white_line", "dark_a", "dark_b", "shading_meas", "verify_meas",
+                      "shading_table", "shading_table2", "gain_codes", "offset_codes",
+                      "dpi", "dual"}, sorted(d)
+    assert d["white_line"].shape == (3762, 3) and d["white_line"].dtype == np.uint16
+    assert d["dark_a"].dtype == np.uint16 and d["dark_a"].shape[1] == 3
+    assert d["shading_meas"].shape == (128, 3762, 3) and d["shading_meas"].dtype == np.uint16
+    assert d["verify_meas"].shape == (128, 3762, 3)
+    assert d["shading_table"].dtype == np.uint8 and d["shading_table2"].dtype == np.uint8
+    assert d["gain_codes"].tolist() == [0x2E, 0x21, 0x29]
+    assert d["offset_codes"].tolist() == list(rec.s.last_diag["offset_codes"])
+    assert int(d["dpi"]) == 3600 and bool(d["dual"]) is False
+    rec.s._scan_plain(frame=2)                      # cache hit: nothing measured
+    assert rec.s.last_diag["calibration"] == "cached"
+    assert rec.s.last_cal_data is None
+    print("test_last_cal_data_fresh_then_cached OK")
+
+
 def test_cli_park_default_is_semantic():
     from of135i import cli
     parser = cli.build_parser()
@@ -179,6 +202,7 @@ def main():
         test_cache_key_mismatch_forces_fresh_calibration,
         test_exception_after_calibration_clears_cache,
         test_dual_scan_clears_any_plain_cache,
+        test_last_cal_data_fresh_then_cached,
         test_cli_park_default_is_semantic,
     ]
     for t in tests:

@@ -246,7 +246,10 @@ class _RecordingScanner:
         self.s._park = lambda *a, **k: None           # type: ignore[method-assign]
         # Zero white buffers would fail the lamp warmup; the gain codes
         # are irrelevant to the geometry under test.
-        self.s._gain_with_warmup = lambda *a, **k: (0x2e, 0x21, 0x29)  # type: ignore[method-assign]
+        def _gain(*a, **k):
+            self.s._last_white = np.full((3762, 3), 30000, dtype="<u2")
+            return (0x2e, 0x21, 0x29)
+        self.s._gain_with_warmup = _gain  # type: ignore[method-assign]
 
     def _buffers_for(self, phase):
         name = phase.name
