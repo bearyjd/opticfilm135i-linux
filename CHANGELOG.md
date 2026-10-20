@@ -4,7 +4,7 @@ Notable changes to the Plustek OpticFilm 135i Linux driver and its SANE
 backend port. Entries name the hardware evidence (docs/test-log.md) where
 one exists; "offline" means implemented and tested without the scanner.
 
-## Unreleased
+## v0.2.4 — 2026-10-20
 
 - Dual (IR) paths measure aperture coverage on the IR channel first and on
   the visible frame only if IR does not verify
