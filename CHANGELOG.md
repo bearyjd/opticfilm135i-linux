@@ -19,7 +19,10 @@ one exists; "offline" means implemented and tested without the scanner.
   only the overscan files are written, the entry records
   `film_present: false`, and the strip stops after an empty frame that
   follows film (`skipped_frames`, `stop_reason`; `--no-stop-at-empty`
-  scans all) (offline; production telemetry 2026-09/10, 711 frames).
+  scans all) (offline; production telemetry 2026-09/10, 711 frames). An
+  opening is empty at 95 % open light (`EMPTY_APERTURE_SHARE`), not 50 %:
+  a strip end inside the opening is film and is written (first production
+  series 2026-10-20, ten strips: a leader frame measured 0.54).
 - Per-pixel calibration data is exported as `<stem>.cal.npz` next to the
   diag sidecar (`Scanner.last_cal_data`; `--no-cal-data` on `scan` and
   `digitize`) (offline; production telemetry 2026-09/10, 711 frames).

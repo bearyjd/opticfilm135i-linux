@@ -413,6 +413,14 @@ def test_film_presence_empty_vs_film():
     mixed[100:100 + n_ap, :, 2] = 20000
     fp = film_presence(mixed, measure_coverage(mixed, dpi=DPI), dpi=DPI)
     assert fp.present and fp.saturated_share == 0.0, fp
+    # A strip end inside the opening: half open light, half film base.
+    # That is film (the frame is written); the share says how much was open.
+    partial = empty.copy()
+    partial[100 + n_ap // 2:100 + n_ap] = 40000
+    cov = measure_coverage(partial, dpi=DPI)
+    assert cov.verified
+    fp = film_presence(partial, cov, dpi=DPI)
+    assert fp.present and 0.4 < fp.saturated_share < 0.6, fp
     # Edges outside the inset are excluded: plastic rows never count.
     unlocated = ApertureCoverage(False, None, None, None, None, "x", 0.0)
     assert film_presence(film, unlocated, dpi=DPI).present

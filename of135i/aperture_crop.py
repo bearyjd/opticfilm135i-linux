@@ -282,9 +282,19 @@ class FilmPresence:
     saturated_share: float
 
 
+# Share of the sampled aperture that must be open light (saturated in all
+# three channels) before the opening counts as EMPTY. A strip end inside
+# the opening leaves part of it open and part under film: that frame is
+# film and is written (the first production series, 2026-10-20, had a
+# leader frame 54 % open light over unexposed base). Only an opening that
+# is practically all open light is empty (an empty holder slot measures
+# 0.99999).
+EMPTY_APERTURE_SHARE = 0.95
+
+
 def film_presence(image, coverage: ApertureCoverage, *, dpi, band=0.5,
-                  saturation_code=60000, empty_share=0.5, inset_mm=0.3,
-                  step=4) -> FilmPresence:
+                  saturation_code=60000, empty_share=EMPTY_APERTURE_SHARE,
+                  inset_mm=0.3, step=4) -> FilmPresence:
     """Is there film in the verified aperture, or only open light?
 
     Coverage checks the opening, not what is in it: an empty holder slot
@@ -296,7 +306,8 @@ def film_presence(image, coverage: ApertureCoverage, *, dpi, band=0.5,
     `band` of the width (same convention as :func:`along_strip_profile`),
     sampled every `step` rows and columns, this returns the share of
     pixels with all three channels > `saturation_code`; present is
-    ``share < empty_share``.
+    ``share < empty_share`` (default :data:`EMPTY_APERTURE_SHARE`, 0.95:
+    a partly covered opening, as on a strip end, is film).
 
     A coverage without located edges, or an aperture too short for the
     inset, cannot be judged: reported as present (share 0.0), never as

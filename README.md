@@ -461,13 +461,17 @@ when a margin exceeds 2.0 mm (production maximum 1.10 mm): the opening
 found is shorter than the holder's, as on a film end that is opaque to
 the measuring channel; the frame is still written. A verified frame is then
 checked for **film**: an empty holder slot passes coverage, because
-coverage checks the opening, not what is in it. An empty opening (more
-than half of the sampled pixels saturated in all three channels) gets only
-its `fN.overscan.tiff` (and `-ir.overscan.tiff`) — no `fN.tiff`, `-ir` or
-preview — and its entry records `film_present: false`, `saturated_share`,
-`coverage_verified: true` and `coverage_reason: "empty aperture"`; frames
-with film record `film_present: true` and `saturated_share`, and the
-sidecar gets a `film` block. An empty frame is not a coverage failure: it
+coverage checks the opening, not what is in it. An empty opening (at
+least 95 % of the sampled pixels saturated in all three channels;
+`aperture_crop.EMPTY_APERTURE_SHARE`) gets only its `fN.overscan.tiff`
+(and `-ir.overscan.tiff`) — no `fN.tiff`, `-ir` or preview — and its entry
+records `film_present: false`, `saturated_share`, `coverage_verified: true`
+and `coverage_reason: "empty aperture"`; frames with film record
+`film_present: true` and `saturated_share`, and the sidecar gets a `film`
+block. A strip end inside the opening — part open light, part film — is
+film: the frame is written and `saturated_share` says how much of the
+opening was open (an empty slot measures 0.99999; a leader frame on the
+first production series measured 0.54 over unexposed base). An empty frame is not a coverage failure: it
 never makes the roll fail and the exit code stays 0. After an empty frame
 that follows at least one frame with film in the same strip, the strip is
 taken to have ended: the remaining requested frames are skipped (no

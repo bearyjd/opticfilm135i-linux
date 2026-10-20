@@ -445,9 +445,13 @@ as written. Two things were added after production use:
   (even unexposed base) never saturates blue through the orange mask.
   `digitize` therefore measures the share of saturated pixels inside the
   verified aperture (`aperture_crop.film_presence`; edge penumbra excluded)
-  and treats an opening with a share of 0.5 or more as empty: only the
-  overscan frame is written, and the strip stops after it unless
-  `--no-stop-at-empty`. An empty frame is not a coverage failure.
+  and treats an opening with a share of 0.95 or more
+  (`aperture_crop.EMPTY_APERTURE_SHARE`) as empty: only the overscan frame
+  is written, and the strip stops after it unless `--no-stop-at-empty`. An
+  empty frame is not a coverage failure. A strip end inside the opening is
+  film and is written: the first production series (2026-10-20, ten
+  strips) had a leader frame 54 % open light over unexposed base, which a
+  0.5 threshold had classed as empty; an empty slot measures 0.99999.
 
 ## 6. Recommendation
 
