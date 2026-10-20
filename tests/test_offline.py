@@ -965,6 +965,58 @@ def test_digitize_plain_path_records_empty_aperture():
     print("test_digitize_plain_path_records_empty_aperture OK")
 
 
+# ------------------------------------------- calibration data export
+
+
+def _cal_sidecar_run(cal_data, **flags):
+    import argparse
+    import json
+    import os
+    from of135i import cli, diag
+
+    class _Sc:
+        last_diag = {"gain_codes": [1, 2, 3], "offset_codes": [4, 5, 6]}
+        last_cal_data = cal_data
+
+    args = argparse.Namespace(no_diag=False, frames="1", dpi=3600, ir=False,
+                              positive=False, rotate=0, no_clean=False, **flags)
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "f1.tiff")
+        cli._write_diag_sidecar(args, _Sc(), out, 1)
+        side = json.loads(Path(diag.sidecar_path(out)).read_text())
+        npz = diag.cal_data_path(out)
+        loaded = None
+        if os.path.exists(npz):
+            with np.load(npz) as z:
+                loaded = {k: z[k] for k in z.files}
+        return side, npz, loaded
+
+
+def test_cal_data_written_next_to_sidecar():
+    data = {"white_line": np.arange(12, dtype=np.uint16).reshape(4, 3),
+            "shading_table": np.arange(10, dtype=np.uint8),
+            "gain_codes": np.array([1, 2, 3], dtype=np.uint16),
+            "dpi": np.int64(3600), "dual": np.bool_(False)}
+    side, npz, loaded = _cal_sidecar_run(data, no_cal_data=False)
+    assert npz.endswith("f1.cal.npz") and side["cal_data"] == npz, side
+    assert loaded is not None and set(loaded) == set(data)
+    assert loaded["white_line"].dtype == np.uint16 and loaded["shading_table"].dtype == np.uint8
+    assert np.array_equal(loaded["white_line"], data["white_line"])
+    assert int(loaded["dpi"]) == 3600
+    print("test_cal_data_written_next_to_sidecar OK")
+
+
+def test_cal_data_flag_and_missing_data_write_nothing():
+    data = {"white_line": np.zeros((2, 3), dtype=np.uint16)}
+    side, npz, loaded = _cal_sidecar_run(data, no_cal_data=True)
+    assert loaded is None and side["cal_data"] is None, side
+    side, npz, loaded = _cal_sidecar_run(None, no_cal_data=False)   # cache hit
+    assert loaded is None and side["cal_data"] is None, side
+    side, npz, loaded = _cal_sidecar_run(data)                      # old args object
+    assert loaded is not None
+    print("test_cal_data_flag_and_missing_data_write_nothing OK")
+
+
 # ------------------------------------------------ SANE port (stage 2 tables)
 
 
@@ -1414,6 +1466,8 @@ def main() -> int:
         test_digitize_no_stop_at_empty_scans_all,
         test_digitize_ir_hidden_edge_verifies_via_ir,
         test_digitize_plain_path_records_empty_aperture,
+        test_cal_data_written_next_to_sidecar,
+        test_cal_data_flag_and_missing_data_write_nothing,
         test_sane_tables_generated_and_current,
         test_sane_tables_injections_land_on_value_bytes,
         test_holder_geometry_measures_a_synthetic_holder,

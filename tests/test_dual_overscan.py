@@ -145,6 +145,24 @@ class _RecordingDualScanner:
         return feedl, n_lines, n_desc, self.s.last_diag
 
 
+def test_dual_last_cal_data_has_both_table_pairs():
+    t = dual_tables(600)
+    rec = _RecordingDualScanner(t)
+    rec.run()
+    d = rec.s.last_cal_data
+    assert d is not None
+    assert {"white_line", "dark_a", "dark_b", "shading_meas", "verify_meas",
+            "shading_table_a", "shading_table_b", "shading_table2_a",
+            "shading_table2_b", "gain_codes", "offset_codes", "dpi", "dual"} == set(d), sorted(d)
+    assert "shading_table" not in d
+    for k in ("shading_table_a", "shading_table_b", "shading_table2_a", "shading_table2_b"):
+        assert d[k].dtype == np.uint8, k
+    assert d["shading_meas"].dtype == np.uint16 and d["shading_meas"].shape[1:] == (t.IMAGE_WIDTH, 3)
+    assert int(d["dpi"]) == 600 and bool(d["dual"]) is True
+    assert d["gain_codes"].tolist() == [0x2E, 0x21, 0x29]
+    print("test_dual_last_cal_data_has_both_table_pairs OK")
+
+
 def test_dual_wiring_default_is_the_overscan_geometry():
     """The production default (no lines=) commands the geometry FEEDL and
     wire count -- checked on the coarsest (600) and finest-grained
@@ -432,6 +450,7 @@ def main():
     tests = [
         test_dual_ledger_every_profile_and_frame,
         test_dual_geometry_refuses_bad_input,
+        test_dual_last_cal_data_has_both_table_pairs,
         test_dual_wiring_default_is_the_overscan_geometry,
         test_dual_wiring_explicit_lines_keeps_capture_grid,
         test_cli_dual_verified_writes_registered_pair,

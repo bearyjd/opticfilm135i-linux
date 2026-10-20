@@ -355,6 +355,12 @@ def sidecar_path(out: str) -> str:
     return str(Path(out).with_suffix(".diag.json"))
 
 
+def cal_data_path(out: str) -> str:
+    """Per-pixel calibration data file for an output image path:
+    foo.tiff -> foo.cal.npz (next to foo.diag.json)."""
+    return str(Path(out).with_suffix(".cal.npz"))
+
+
 # ------------------------------------------------ calibration buffer dump
 #
 # Test 28+ / dark_b-collapse investigation (docs/test-log.md Test 24-29):

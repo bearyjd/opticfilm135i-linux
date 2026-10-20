@@ -464,6 +464,13 @@ class Scanner:
         # None of this adds or changes any USB operation -- it only
         # observes values/timings the driver already computes.
         self.last_diag: dict | None = None
+        # Per-pixel calibration measurements of the LAST fresh calibration
+        # (numpy arrays, for the `<stem>.cal.npz` export; see cli
+        # _write_diag_sidecar). None when the last scan measured nothing
+        # new (calibration cache hit). Pure host-side bookkeeping: it
+        # keeps references to buffers already read, adds no USB traffic.
+        self.last_cal_data: dict | None = None
+        self._last_white: np.ndarray | None = None
         self._diag_phase_seconds: dict[str, float] = {}
         self._diag_poll_timeouts: int = 0
         self._diag_cr_mismatches: int = 0
@@ -1789,6 +1796,7 @@ class Scanner:
         def measure():
             white_raw = self._run_phase(cal_white_phase)[0]
             white = parse_white(white_raw)
+            self._last_white = white
             diag["attempts"] += 1
             diag["elapsed_s"] = time.monotonic() - t0
             diag["measurement_times_s"].append(round(diag["elapsed_s"], 2))
@@ -1924,6 +1932,13 @@ class Scanner:
                                        overscan_mm=overscan_mm)
             return self._scan_plain(frame=frame, overscan_mm=overscan_mm)
 
+    def _cal_white_line(self) -> np.ndarray:
+        """The last warm-up white-line measurement (N, 3) uint16, for the
+        calibration data export; empty if none was recorded."""
+        if self._last_white is None:
+            return np.zeros((0, 3), dtype=np.uint16)
+        return np.asarray(self._last_white, dtype=np.uint16)
+
     def _healthy_dark_b(self, dark_b):
         """Return a trustworthy dark_b and whether it was substituted.
 
@@ -1994,6 +2009,7 @@ class Scanner:
         # this path is always (3600, False) -- dual has its own
         # calibration and is never cached (_scan_dual).
         cal_key = (3600, False)
+        cal_data = None          # filled only by a fresh calibration below
         cache = self._cal_cache
         if not self.recalibrate and cache is not None and cache["key"] == cal_key:
             calibration = "cached"
@@ -2011,6 +2027,7 @@ class Scanner:
             self._calibration_rewrite(gain_r, gain_g, gain_b)
         else:
             calibration = "fresh"
+            self._last_white = None
             # ---- dark pair (offset bracket, gain=0) ---------------------
             dark_a_raw = self._run_phase(tables.CAL_DARK_A)[0]
             if self._cal_capture is not None:
@@ -2072,6 +2089,19 @@ class Scanner:
             dark_a_mean = [float(x) for x in dark_a.astype(np.float64).mean(axis=0)]
             dark_b_mean = [float(x) for x in dark_b.astype(np.float64).mean(axis=0)]
             warmup = self._diag_warmup or {}
+            cal_data = {
+                "white_line": self._cal_white_line(),
+                "dark_a": np.asarray(dark_a, dtype=np.uint16),
+                "dark_b": np.asarray(dark_b, dtype=np.uint16),
+                "shading_meas": np.asarray(shading_meas, dtype=np.uint16),
+                "verify_meas": np.asarray(verify_meas, dtype=np.uint16),
+                "shading_table": np.frombuffer(shading, dtype=np.uint8),
+                "shading_table2": np.frombuffer(shading2, dtype=np.uint8),
+                "gain_codes": np.array([gain_r, gain_g, gain_b], dtype=np.uint16),
+                "offset_codes": np.array([off_r, off_g, off_b], dtype=np.uint16),
+                "dpi": np.int64(3600),
+                "dual": np.bool_(False),
+            }
             shading_stats = _shading_stats(shading)
             shading2_stats = _shading_stats(shading2)
 
@@ -2159,6 +2189,7 @@ class Scanner:
             self._cal_cache = None
             raise
 
+        self.last_cal_data = cal_data
         self.last_diag = {
             "dpi": 3600,
             "frame": frame,
@@ -2273,6 +2304,7 @@ class Scanner:
         dark_a = np.frombuffer(dark_a_raw, dtype="<u2").reshape(-1, 3)
         dark_b = np.frombuffer(dark_b_raw, dtype="<u2").reshape(-1, 3)
         dark_b, dark_b_substituted = self._healthy_dark_b(dark_b)
+        self._last_white = None
 
         # ---- white line (gain=0) -> compute AFE gain -------------------
         # 2 raw lines (alternating): index 0 = IR, index 1 = visible --
@@ -2414,6 +2446,21 @@ class Scanner:
         self._park(t, ir=True)
 
         warmup = self._diag_warmup or {}
+        self.last_cal_data = {
+            "white_line": self._cal_white_line(),
+            "dark_a": np.asarray(dark_a, dtype=np.uint16),
+            "dark_b": np.asarray(dark_b, dtype=np.uint16),
+            "shading_meas": np.asarray(shading_meas, dtype=np.uint16),
+            "verify_meas": np.asarray(verify_meas, dtype=np.uint16),
+            "shading_table_a": np.frombuffer(shading_a, dtype=np.uint8),
+            "shading_table_b": np.frombuffer(shading_b, dtype=np.uint8),
+            "shading_table2_a": np.frombuffer(shading2_a, dtype=np.uint8),
+            "shading_table2_b": np.frombuffer(shading2_b, dtype=np.uint8),
+            "gain_codes": np.array([gain_r, gain_g, gain_b], dtype=np.uint16),
+            "offset_codes": np.array([off_r, off_g, off_b], dtype=np.uint16),
+            "dpi": np.int64(dpi),
+            "dual": np.bool_(True),
+        }
         self.last_diag = {
             "dpi": dpi,
             "frame": frame,

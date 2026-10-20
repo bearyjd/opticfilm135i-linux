@@ -792,6 +792,21 @@ def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
         "no_clean": args.no_clean,
         "overscan": getattr(args, "overscan", None),
     }
+    # Per-pixel calibration data (device.Scanner.last_cal_data): only a
+    # fresh calibration has any, and --no-cal-data skips it. Decided and
+    # written BEFORE the sidecar so the sidecar records the outcome.
+    cal_path = None
+    cal_data = getattr(scanner, "last_cal_data", None)
+    if cal_data is not None and not getattr(args, "no_cal_data", False):
+        import numpy as _np
+        try:
+            cal_path = diag.cal_data_path(out)
+            _np.savez_compressed(cal_path, **cal_data)
+            print(f"wrote {cal_path}")
+        except OSError as e:
+            log.warning("could not write the calibration data file: %s", e)
+            cal_path = None
+    sidecar["cal_data"] = cal_path
     path = diag.sidecar_path(out)
     diag.write_sidecar(path, sidecar)
     print(f"wrote {path}")
@@ -1342,6 +1357,11 @@ def build_parser() -> argparse.ArgumentParser:
              "overscan raw is kept and the exit status is non-zero")
     p_scan.add_argument("--no-diag", action="store_true",
         help="skip writing the <output>.diag.json calibration/timing sidecar")
+    p_scan.add_argument("--no-cal-data", action="store_true",
+        help="do not write the <output>.cal.npz per-pixel calibration data "
+             "(white line, dark/shading measurements, uploaded tables; a few "
+             "MB per frame; written only when the scan measured a fresh "
+             "calibration, and only with the .diag.json sidecar)")
     p_scan.add_argument("--warmup-budget", type=float, default=None, metavar="SECONDS",
                         help="total time to wait for the lamp after a cold start before "
                              "failing the scan (default: the driver's bounded default, 60 s)")
@@ -1463,6 +1483,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip IR-based dust/scratch removal on the visible image")
     p_dig.add_argument("--no-diag", action="store_true",
         help="skip writing per-frame .diag.json sidecars")
+    p_dig.add_argument("--no-cal-data", action="store_true",
+        help="do not write the per-frame .cal.npz per-pixel calibration data "
+             "(white line, dark/shading measurements, uploaded tables; a few "
+             "MB per frame; written only for frames that measured a fresh "
+             "calibration, and only with the .diag.json sidecars)")
     p_dig.add_argument("--park", choices=("verbatim", "semantic"), default="semantic",
         help="PARK implementation: semantic (default since 2026-09-17, "
              "3.7-3.8 s, hardware-confirmed via the SANE backend) or "
