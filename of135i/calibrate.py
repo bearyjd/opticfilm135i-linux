@@ -367,6 +367,8 @@ WHITE_DIP_WINDOW = 81          # running-median window (robust to <= 40 outliers
 WHITE_DIP_EDGE_MARGIN = 64     # columns kept clear of the lit/unlit edges
 WHITE_DIP_COMPANION_WIDTH = 5  # a companion dip in another channel is this wide
 WHITE_DIP_COMPANION_DISTANCE = 50   # ... and this close (columns between the runs)
+WHITE_DIP_SHOULDER = 8         # a guarded dip grows by up to this many columns
+                               # each side while still below min_depth/3
 
 
 class WhiteDip(NamedTuple):
@@ -403,6 +405,7 @@ def guard_white_dips(
     edge_margin: int = WHITE_DIP_EDGE_MARGIN,
     companion_width: int = WHITE_DIP_COMPANION_WIDTH,
     companion_distance: int = WHITE_DIP_COMPANION_DISTANCE,
+    shoulder: int = WHITE_DIP_SHOULDER,
 ) -> tuple[np.ndarray, list[WhiteDip]]:
     """Mean the white measurement over its lines and guard narrow dips.
 
@@ -420,6 +423,10 @@ def guard_white_dips(
     channels has a dip at least `companion_width` wide within
     `companion_distance` columns of it (an achromatic shadow); a dip in
     one channel alone is the sensor's own and is left to the gain table.
+    A guarded dip then grows by up to `shoulder` columns on each side
+    while those columns are still more than `min_depth / 3` below the
+    median (the shadow's soft edges; first hardware run of the guard
+    left +1.5-2 % at such shoulder columns).
     """
     arr = np.asarray(white_meas).astype(np.float64)
     if arr.ndim != 3 or arr.shape[2] != 3:
@@ -433,6 +440,7 @@ def guard_white_dips(
     # Pass 1: candidate runs per channel.
     candidates: list[list[tuple[int, int, float]]] = [[], [], []]
     medians = []
+    rels = []
     for c in range(3):
         col = w[:, c]
         med = _running_median(col, window)
@@ -444,6 +452,7 @@ def guard_white_dips(
         cs = np.concatenate([[0], np.cumsum(lit)])
         valid = (cs[hi] - cs[lo]) == (hi - lo)    # lit throughout the margin
         rel = (col - med) / np.maximum(med, 1.0)
+        rels.append(rel)
         flagged = np.flatnonzero(valid & (rel < -min_depth))
         for start, stop in _runs(flagged):
             if stop - start + 1 > max_width:
@@ -456,14 +465,23 @@ def guard_white_dips(
                 return True
         return False
 
-    # Pass 2: guard the achromatic ones.
+    # Pass 2: guard the achromatic ones, shoulders included.
     dips: list[WhiteDip] = []
     for c in range(3):
         others = [o for o in range(3) if o != c]
+        rel = rels[c] if len(rels) == 3 else None
         for start, stop, depth in candidates[c]:
-            if all(_near(start, stop, o) for o in others):
-                out[start:stop + 1, c] = medians[c][start:stop + 1]
-                dips.append(WhiteDip(c, start, stop, depth))
+            if not all(_near(start, stop, o) for o in others):
+                continue
+            if rel is not None:
+                soft = -min_depth / 3.0
+                for _ in range(shoulder):
+                    if start > 0 and rel[start - 1] < soft:
+                        start -= 1
+                    if stop < width - 1 and rel[stop + 1] < soft:
+                        stop += 1
+            out[start:stop + 1, c] = medians[c][start:stop + 1]
+            dips.append(WhiteDip(c, start, stop, depth))
     return out[None, :, :], dips
 
 

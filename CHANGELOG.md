@@ -30,7 +30,10 @@ one exists; "offline" means implemented and tested without the scanner.
   2–4 % bright line through 36 of 40 frames of the first production
   series (2026-10-20) — is replaced by the running median; the sensor's
   own single-channel dim pixels are never touched (validated on those 40
-  exports: all speck dips guarded, no sensor pixel). Diag `white_dips`;
+  exports: all speck dips guarded, no sensor pixel; a guarded dip grows
+  over its soft shoulders, `WHITE_DIP_SHOULDER`). First hardware strip
+  with the guard: residual at a 9 % speck under 1 %, no dark line in the
+  image path (the speck is not in it). Diag `white_dips`;
   `tools/cal_dips.py` lists dips and the host-side correction factor for
   frames scanned before the guard. Python driver only; the SANE backend
   computes its tables in C++ without the guard (follow-up).
