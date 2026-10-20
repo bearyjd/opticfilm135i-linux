@@ -4,7 +4,7 @@ Notable changes to the Plustek OpticFilm 135i Linux driver and its SANE
 backend port. Entries name the hardware evidence (docs/test-log.md) where
 one exists; "offline" means implemented and tested without the scanner.
 
-## Unreleased
+## v0.2.5 — 2026-10-20
 
 - Non-strict polls (production telemetry 2026-09/10, 652 frames;
   hardware-verified on one production strip, Test 100 PASS 2026-10-20:
