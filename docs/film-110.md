@@ -495,7 +495,7 @@ usual fields:
 | `placement_given` | true when `--placement` was passed |
 | `images` | one entry per numbered image: `number`, `aperture`, `whole`, `split` (`null`/`"trailing"`), `free_end_near`, `main`, `ir` (paths, `null` when not written), `size_mm` (`[along, lateral]` for whole images, else `null`), `replaced_free_end_copy`, and `refused` (only when nothing was written) |
 | `problems` | the refusal messages of this run |
-| `advice` | `{"other_placement": "B", "images": [2, 5]}`: the numbers split in this placement that no run has delivered yet, i.e. to be taken in the other placement; `images` is empty when nothing is missing |
+| `advice` | `{"other_placement": "B", "images": [2, 4]}`: the numbers the other placement is still needed for — split in this placement and not delivered by any run, or delivered in this run with the strip end free (§4, the other placement's supported copy replaces them); `images` is empty when nothing is missing |
 
 `per_frame` entries are as for 135 (they describe apertures).
 

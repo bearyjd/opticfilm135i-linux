@@ -165,7 +165,9 @@ def test_run_a_infers_placement_numbers_and_advises():
         assert imgs[4]["free_end_near"] is True and imgs[1]["free_end_near"] is False
         assert imgs[1]["size_mm"] and len(imgs[1]["size_mm"]) == 2
         assert imgs[2]["size_mm"] is None
-        assert rec["advice"] == {"other_placement": "B", "images": [2]}, rec["advice"]
+        # 2 is split by a bar; 4 was delivered with the strip end free (§4),
+        # so placement B is still needed for both.
+        assert rec["advice"] == {"other_placement": "B", "images": [2, 4]}, rec["advice"]
         names = _names(d)
         for n in (1, 3, 4):
             assert f"image{n}.tiff" in names and f"image{n}-ir.tiff" in names, names

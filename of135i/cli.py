@@ -1185,19 +1185,26 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path) -> None:
     """Write the 110 fields of a digitize roll record: the decided
     placement (null when no image decided it), whether it was given, one
     `images` entry per numbered image, the refusals, and `advice` -- the
-    numbers of images split in this placement that no run has delivered
-    yet, i.e. to be taken in the other placement."""
+    numbers the other placement is still needed for: images split in
+    this placement that no run has delivered yet, and images this run
+    delivered with the strip end free (the sag rule, docs/film-110.md
+    §4: the other placement's supported copy replaces them)."""
     record["film"] = "110"
     record["placement"] = state.placement
     record["placement_given"] = bool(state.placement_given)
     record["images"] = state.images
     record["problems"] = list(state.problems)
-    split = sorted({e["number"] for e in state.images
-                    if e.get("split") == "trailing" and not e.get("whole")
-                    and not (Path(rdir) / f"image{e['number']}.tiff").exists()})
+    missing: set = set()
+    for e in state.images:
+        n = e["number"]
+        if (e.get("split") == "trailing" and not e.get("whole")
+                and not (Path(rdir) / f"image{n}.tiff").exists()):
+            missing.add(n)          # split here: whole in the other placement
+        elif e.get("whole") and e.get("free_end_near") and e.get("main"):
+            missing.add(n)          # delivered, but with the strip end free
     other = None if state.placement is None else (
         "B" if state.placement == "A" else "A")
-    record["advice"] = {"other_placement": other, "images": split}
+    record["advice"] = {"other_placement": other, "images": sorted(missing)}
 
 
 def _film110_roll_guard(args: argparse.Namespace, roll: int, rdir: Path,
@@ -1500,9 +1507,10 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             adv = record["advice"]
             pl = state.placement or "undecided"
             if adv["images"]:
-                nxt = (f"Images {adv['images']} were split by a bar: re-seat "
-                       f"the strip for placement {adv['other_placement']} and "
-                       f"run 'of135i digitize --film 110 --roll {roll}' again.")
+                nxt = (f"Images {adv['images']} need the other placement "
+                       f"(split by a bar, or scanned with the strip end free): "
+                       f"re-seat the strip for placement {adv['other_placement']} "
+                       f"and run 'of135i digitize --film 110 --roll {roll}' again.")
             else:
                 nxt = (f"Nothing is left for the other placement. Next strip: "
                        f"roll {roll + 1}.")
