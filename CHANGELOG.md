@@ -6,8 +6,10 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
-- Non-strict polls (offline; production telemetry 2026-09/10, 652
-  frames; hardware check pending, Test 100): at the extended-status sites
+- Non-strict polls (production telemetry 2026-09/10, 652 frames;
+  hardware-verified on one production strip, Test 100 PASS 2026-10-20:
+  0 timeouts, every poll settled on the first read, about 9 s per strip
+  saved, nothing else changed): at the extended-status sites
   whose captured settled word has the data-ready bit set (`ad55`, `bd55`,
   `a955`), a live word with that bit set is accepted, the criterion the
   SANE backend has used at the same sites since Test 48. The non-strict

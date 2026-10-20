@@ -6961,7 +6961,7 @@ and the Power button.
 **Provenance.** Log in the private analysis area, `watch-20261012/
 t99-buttons.log`.
 
-### Test 100: non-strict poll floor and the data-ready criterion on one production strip (PLANNED 2026-10-20, not run)
+### Test 100: non-strict poll floor and the data-ready criterion on one production strip (2026-10-20, PASS)
 
 **Purpose.** Hardware check of the poll change prepared from the
 production telemetry (`docs/production-telemetry-2026-10.md` §2.3): at
@@ -7000,7 +7000,28 @@ the four sidecars.
 6–43, or any coverage failure ends the test; the branch is not merged
 and the sidecars go into the analysis area.
 
-**Result.** Not run.
+**Result: PASS (2026-10-20 evening).** One production strip (Kodak
+Gold 200, four frames, `of135i digitize --frames 1-4 --dpi 3600
+--no-clean` from the production app, next-strip load, warm scanner) on
+the branch rebased onto v0.2.4 (2940fea).
+1. 4/4 frames verified (IR) and written, margins 0.63–0.87 mm, eject
+   normal, nothing unusual reported.
+2. `poll_timeouts` 0 on every frame (production median 2). All 40
+   non-strict polls settled on the first read, 4 ms: per frame seven
+   accepted on the data-ready bit (`cd55` for `ad55`/`bd55`) and three
+   exact (`dc55`); `poll_settle_max_s` 0.004, none at the 0.3 s floor.
+3. Gain 44/33/39, offset 266–267, `white_mean` within the evening's
+   band (G 27401–27787).
+4. `cal_dark_a`/`cal_dark_b` 0.11 s, `cal_gain_check_a/b` 0.15/0.11 s,
+   `cal_white` 0.27 s on every frame (the old floor had made them 1.1 s
+   each when the word did not come); `cal_shading_measure/verify` 2.6/2.5 s
+   unchanged; position 1.80/3.76/5.93/8.09, scan 41.3/40.2/40.1/39.9,
+   park 3.68/5.85/7.99/10.15 s — the production medians. Frame totals
+   52.9/55.9/60.1/64.3 s against 54–66 s before: about 9 s per strip
+   saved, as the telemetry predicted. No strict-poll timeout,
+   `cr_mismatches` 20–39, no coverage failure, no `white_dips`.
+The owner then continued the roll on the same branch (about nine
+strips) without waiting; they are not part of this test.
 
 ### Test 101: first production series on the production-feedback code — ten strips, the calibration-path speck, the white-dip guard (2026-10-20)
 
