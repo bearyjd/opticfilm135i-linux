@@ -98,6 +98,13 @@ single USB operation the driver would otherwise perform:
   `coverage_warning` when a margin exceeds
   `aperture_crop.MAX_PLAUSIBLE_MARGIN_MM`; the roll record
   adds `skipped_frames`/`stop_reason` when a strip is stopped early.
+  `digitize --film 110` adds to the roll record `film` (`"110"`),
+  `placement` (`"A"`/`"B"`/`null`), `placement_given`, `images` (one entry
+  per numbered image: `number`, `aperture`, `whole`, `split`,
+  `free_end_near`, `main`, `ir`, `size_mm`, `replaced_free_end_copy`,
+  `refused`), `problems` and `advice` (`other_placement`, `images` still to
+  be taken there); a 110 roll takes two records, one per placement
+  (`docs/film-110.md` §11).
 
 ## Open M2 items
 

@@ -249,7 +249,12 @@ should know about:
   images inside each verified aperture from the film's own perforations
   and writes one cropped product per whole image, numbered by position
   on the strip so the same photograph has the same number in both
-  placements; the 600 dpi survey prints which images are whole and which
+  placements; `--placement` is optional, since the data says which
+  placement the strip is in (it is inferred from the first image, and an
+  image midway between the two is refused until you give it).
+  `digitize --film 110` runs the two placements as two runs into one roll
+  directory and writes one `image<N>.tiff` per photograph (implemented
+  offline, hardware check pending); the 600 dpi survey prints which images are whole and which
   need the other placement. Built and checked offline against one
   strip's saved scans (Test 86, 22 apertures, all verdicts right; a
   review then found and fixed a crop that cut up to 0.4 mm of picture,
@@ -450,6 +455,10 @@ does not verify gets **no** `fN.tiff` — the roll is recorded failed with
 the reason in the manifest, and is re-run whole. `--positive` writes a **separate** `fN-preview.tiff` and
 leaves the negative untouched; `--roll N` targets a specific roll,
 `--no-ir` drops the IR output (non-3600 profiles still capture dual-light).
+`--film 110` (with optional `--placement A|B`) digitises a 110 strip as a
+two-run roll: run once per placement into the same roll (`--roll N` for the
+second run); frame files are `a-f1.tiff`/`b-f1.tiff` and each photograph is
+written once as `image<N>.tiff` (`docs/film-110.md` §11).
 Resume is **between strips**: the roll number advances past the highest
 recorded or on-disk roll, an existing roll is not overwritten without
 `--force` (which first clears that roll's previous `f*.tiff`/`.diag.json`

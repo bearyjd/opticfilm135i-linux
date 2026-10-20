@@ -872,3 +872,32 @@ def image_number(aperture: int, line0: float, dpi: float, placement: str,
     n = round(k) + 1
     residual = (k - round(k)) * film.pitch_mm
     return n, residual
+
+
+# The two placements' phases are half a film pitch (12.75 mm) apart, so a
+# strip seated by the visual rule of docs/film-110.md §3 lies within a few
+# mm of exactly one of them. An image whose position is farther than this
+# from BOTH phases is midway between them (the farthest possible is
+# pitch/4 = 6.4 mm from each) and the data cannot say which placement the
+# operator meant. 4.0 mm sits inside the +/-6 mm rounding tolerance used
+# for numbering, so an inferred placement never trips the phase check.
+PLACEMENT_INFER_TOLERANCE_MM = 4.0
+
+
+def infer_placement(aperture: int, line0: float, dpi: float,
+                    film: Film = FILM_110, holder=STRIP) -> tuple:
+    """Which placement ("A" or "B") a strip is in, from one image's
+    position alone: the placement whose phase grid the image lies closer
+    to, and that signed residual in mm. (None, residual) when even the
+    closer residual exceeds PLACEMENT_INFER_TOLERANCE_MM -- the image is
+    midway between the two phases and the operator must say. Pure."""
+    best = None
+    for placement in ("A", "B"):
+        _n, residual = image_number(aperture, line0, dpi, placement,
+                                    film=film, holder=holder)
+        if best is None or abs(residual) < abs(best[1]):
+            best = (placement, residual)
+    placement, residual = best
+    if abs(residual) > PLACEMENT_INFER_TOLERANCE_MM:
+        return None, residual
+    return placement, residual

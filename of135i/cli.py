@@ -251,15 +251,16 @@ def _frame_output(out: str, frame: int) -> str:
 
 
 def _validate_film110_args(args: argparse.Namespace) -> "str | None":
-    """--film 110 and --placement must be given together: images are
-    numbered by their position on the strip (of135i.film110.image_number),
-    which needs to know which of the two placements (docs/film-110.md §3)
-    the strip is in. Checked before any device I/O, like the neighbouring
+    """--placement only applies with --film 110. With --film 110 it is
+    optional: images are numbered by their position on the strip
+    (of135i.film110.image_number), which needs the placement
+    (docs/film-110.md §3), and when it is not given it is INFERRED from the
+    first numbered image's position (of135i.film110.infer_placement); an
+    image midway between the two phases is refused with a request to give
+    it. Checked before any device I/O, like the neighbouring
     --dpi/--overscan checks."""
     film = getattr(args, "film", "135")
     placement = getattr(args, "placement", None)
-    if film == "110" and placement is None:
-        return "--film 110 needs --placement A or B (docs/film-110.md §3)"
     if film != "110" and placement is not None:
         return "--placement only applies with --film 110"
     return None
@@ -353,7 +354,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         incomplete: list[int] = []
         # --film 110: one running counter/state object for the WHOLE
         # command (shared across every aperture scanned), not per frame.
-        film110_state = Film110State() if getattr(args, "film", "135") == "110" else None
+        film110_state = (Film110State(getattr(args, "placement", None))
+                         if getattr(args, "film", "135") == "110" else None)
         for frame in frames:
             scanner.initialize(ir=dual, dpi=args.dpi)
             out = _frame_output(args.output, frame) if multi else args.output
@@ -388,6 +390,12 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                   f"and the .overscan raw file(s); no registered product was "
                   f"written for them", file=sys.stderr)
             return 4
+        if film110_state is not None:
+            if film110_state.placement is None:
+                print("110: placement undecided (no numbered image found)")
+            else:
+                print(f"110: placement {film110_state.placement} "
+                      f"({'given' if film110_state.placement_given else 'inferred'})")
         if film110_state is not None and film110_state.problems:
             # A refused overwrite or an image off the chosen placement's
             # phase grid: the aperture/overscan products above are fine,
@@ -436,18 +444,31 @@ def _orient_pair(args: argparse.Namespace, vis, irr):
 
 
 class Film110State:
-    """Per-scan-command state for --film 110. Images are numbered by their
-    position on the strip (of135i.film110.image_number, docs/film-110.md
-    §3), not by a running counter, so the same photograph gets the same
-    number whether it was scanned in placement A or B -- there is
-    therefore nothing to carry between apertures except the refusals:
-    `problems` collects every 110 product this command declined to write
-    (an off-phase image, or a file that already exists), and `_cmd_scan`
-    turns a non-empty list into a failing exit code once the whole
-    command has finished."""
+    """Per-command state for --film 110 (scan and digitize). Images are
+    numbered by their position on the strip (of135i.film110.image_number,
+    docs/film-110.md §3), not by a running counter, so the same photograph
+    gets the same number whether it was scanned in placement A or B.
 
-    def __init__(self):
+    `placement` is the command's decided placement: given with
+    --placement, otherwise None until the first numbered image decides it
+    (of135i.film110.infer_placement); `placement_given` says which.
+    `problems` collects every 110 product this command declined to write
+    (an off-phase or ambiguous image, or a file that already exists), and
+    `_cmd_scan` turns a non-empty list into a failing exit code once the
+    whole command has finished. `images` has one entry per numbered image
+    (digitize writes it to the manifest). `forbidden` is a set of
+    placements ("A"/"B") that must not be decided because the roll
+    already holds output for them (digitize); deciding one sets `aborted`
+    and writes nothing."""
+
+    def __init__(self, placement: "str | None" = None):
+        self.placement = placement
+        self.placement_given = placement is not None
+        self.announced = False
         self.problems: list = []
+        self.images: list = []
+        self.forbidden: set = set()
+        self.aborted: "str | None" = None
 
 
 def _film110_image_path(out: str, n: int, ir: bool = False) -> str:
@@ -459,34 +480,21 @@ def _film110_image_path(out: str, n: int, ir: bool = False) -> str:
     return str(p.with_name(f"{p.stem}{suffix}"))
 
 
-def _film110_hook(args: argparse.Namespace, state: "Film110State | None",
-                  aperture: int, out: str, vis_crop, ir_crop) -> None:
-    """--film 110: detect 110 images inside one aperture-registered crop
-    and write a product per WHOLE one, numbered by strip position
-    (of135i.film110.image_number, docs/film-110.md §3) so the same
-    photograph gets the same number whether it was scanned in placement A
-    or B. Called from both `_finish_plain_scan` and `_finish_dual_scan`,
-    on the SAME aperture-registered arrays those write their own product
-    from (before orientation -- the strip runs along axis 0 here), so the
-    plain and dual paths cannot drift apart. A no-op when --film is not
-    "110" (state is None in that case) or when coverage did not verify
-    (the caller only invokes this once it has).
-
-    `args.placement` ("A" or "B") is required whenever `state` is not
-    None -- `_validate_film110_args` refuses the command before this is
-    ever called otherwise. An image that does not land on that
-    placement's phase grid, or whose product file already exists, writes
-    nothing and is recorded in `state.problems`; `_cmd_scan` turns a
-    non-empty list into a failing exit code once the whole command has
-    finished.
-
-    `ir_crop` is None on the plain path and when --ir was not given on
-    the dual path -- the 110 IR sidecar is then simply not written,
-    matching the aperture product's own --ir behaviour.
-    """
-    if state is None:
-        return
+def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
+                              aperture: int, vis_crop, ir_crop, emit) -> None:
+    """The 110 detection + numbering + cropping shared by `scan` and
+    `digitize` (one detector call per aperture, one implementation of
+    placement inference, numbering and the phase check). `emit(n, fr,
+    crops)` is the caller's writer, called for every WHOLE, correctly
+    placed image: `crops()` returns the padded (visible, IR-or-None)
+    crops in the aperture's own, un-oriented axes; `emit` returns a dict
+    {"main", "ir", "replaced_free_end_copy", "refused", "message"} --
+    `refused` set means nothing was written for the image."""
     from . import film110, holder as _holder
+
+    if state.placement is None and getattr(args, "placement", None):
+        state.placement = args.placement
+        state.placement_given = True
 
     find = film110.detect(vis_crop, dpi=args.dpi, film=_holder.FILM_110)
     if find.empty:
@@ -496,6 +504,7 @@ def _film110_hook(args: argparse.Namespace, state: "Film110State | None",
         print(f"110: aperture {aperture} — {find.reason or 'no images predicted'}")
         return
 
+    px_per_mm = args.dpi / film110.MM_PER_INCH
     parts = []
     for fr in find.frames:
         if fr.split == "leading":
@@ -506,56 +515,85 @@ def _film110_hook(args: argparse.Namespace, state: "Film110State | None",
                          "split image (already counted)")
             continue
 
-        n, residual = film110.image_number(aperture, fr.line0, args.dpi,
-                                           args.placement)
-        if (abs(residual) > film110.PLACEMENT_PHASE_TOLERANCE_MM
-                or n < 1):
-            pos_mm = fr.line0 / (args.dpi / film110.MM_PER_INCH)
-            msg = (f"image at {pos_mm:.1f} mm is not at placement "
-                  f"{args.placement}'s phase (off by {residual:+.1f} mm) "
-                  f"-> check the placement; no 110 product written")
-            parts.append(msg)
-            state.problems.append(msg)
-            continue
-
-        if fr.whole:
-            vis_path = _film110_image_path(out, n)
-            if Path(vis_path).exists():
-                msg = (f"{vis_path} exists -> not overwritten (use one -o "
-                      f"stem per placement, docs/film-110.md §7)")
+        pos_mm = fr.line0 / px_per_mm
+        note = ""
+        if state.placement is None:
+            inferred, _res = film110.infer_placement(aperture, fr.line0, args.dpi)
+            if inferred is None:
+                _na, res_a = film110.image_number(aperture, fr.line0, args.dpi, "A")
+                _nb, res_b = film110.image_number(aperture, fr.line0, args.dpi, "B")
+                msg = (f"image at {pos_mm:.1f} mm lies between the two "
+                       f"placements' phases (A off by {res_a:+.1f} mm, B off "
+                       f"by {res_b:+.1f} mm) -> give --placement A or B; no "
+                       f"110 product written")
                 parts.append(msg)
                 state.problems.append(msg)
                 continue
-            # Grown by PRODUCT_PAD_MM: a safety margin of dark printed
-            # border around an edge that lies within 0.06 mm of the
-            # independently measured foot (docs/film-110.md §9.1) -- not a
-            # correction for a biased edge, which is what it was papering
-            # over before the 2026-09-20 fix.
-            pad = film110.PRODUCT_PAD_MM
-            vis_img = film110.crop(vis_crop, fr, dpi=args.dpi, pad_mm=pad)
-            ir_img = (film110.crop(ir_crop, fr, dpi=args.dpi, pad_mm=pad)
-                      if ir_crop is not None else None)
-            vis_img, ir_img = _orient_pair(args, vis_img, ir_img)
-            image.write_tiff16(vis_img, vis_path,
-                               icc=image.srgb_icc() if args.positive else None,
-                               dpi=_axis_dpi(args, args.positive))
-            print(f"wrote {vis_path} ({vis_img.shape[1]}x{vis_img.shape[0]}, "
-                  f"16-bit RGB, 110 image {n})")
-            if ir_img is not None:
-                import numpy as _np
-                ir_path = _film110_image_path(out, n, ir=True)
-                image.write_tiff16(_np.stack([ir_img, ir_img, ir_img], axis=-1),
-                                   ir_path, dpi=_axis_dpi(args, args.positive))
-                print(f"wrote {ir_path} ({ir_img.shape[1]}x{ir_img.shape[0]}, "
-                      f"16-bit, 110 image {n} IR channel)")
-            parts.append(f"image {n} whole ({fr.size_mm[0]:.1f} x {fr.size_mm[1]:.1f} mm)")
+            if inferred in state.forbidden:
+                msg = (f"image at {pos_mm:.1f} mm reads as placement "
+                       f"{inferred}, which this roll already holds output "
+                       f"for -> stopped; no 110 product written")
+                parts.append(msg)
+                state.problems.append(msg)
+                state.aborted = msg
+                break
+            state.placement = inferred
+        if not state.announced:
+            how = "given" if state.placement_given else "inferred"
+            note = f"placement {state.placement} ({how}); "
+            state.announced = True
+
+        n, residual = film110.image_number(aperture, fr.line0, args.dpi,
+                                           state.placement)
+        if (abs(residual) > film110.PLACEMENT_PHASE_TOLERANCE_MM
+                or n < 1):
+            msg = (f"image at {pos_mm:.1f} mm is not at placement "
+                   f"{state.placement}'s phase (off by {residual:+.1f} mm) "
+                   f"-> check the placement; no 110 product written")
+            parts.append(note + msg)
+            state.problems.append(msg)
+            continue
+
+        entry = {"number": n, "aperture": aperture, "whole": bool(fr.whole),
+                 "split": fr.split, "free_end_near": bool(fr.free_end_near),
+                 "main": None, "ir": None,
+                 "size_mm": ([round(float(fr.size_mm[0]), 2),
+                              round(float(fr.size_mm[1]), 2)]
+                             if fr.whole else None),
+                 "replaced_free_end_copy": False}
+        state.images.append(entry)
+
+        if fr.whole:
+            def crops(fr=fr):
+                # Grown by PRODUCT_PAD_MM: a safety margin of dark printed
+                # border around an edge that lies within 0.06 mm of the
+                # independently measured foot (docs/film-110.md §9.1) --
+                # not a correction for a biased edge.
+                pad = film110.PRODUCT_PAD_MM
+                v = film110.crop(vis_crop, fr, dpi=args.dpi, pad_mm=pad)
+                i = (film110.crop(ir_crop, fr, dpi=args.dpi, pad_mm=pad)
+                     if ir_crop is not None else None)
+                return v, i
+
+            res = emit(n, fr, crops)
+            entry["main"] = res.get("main")
+            entry["ir"] = res.get("ir")
+            entry["replaced_free_end_copy"] = bool(res.get("replaced_free_end_copy"))
+            if res.get("refused"):
+                entry["refused"] = res["refused"]
+                parts.append(note + res["refused"])
+                state.problems.append(res["refused"])
+                continue
+            parts.append(note + res.get("message",
+                         f"image {n} whole ({fr.size_mm[0]:.1f} x "
+                         f"{fr.size_mm[1]:.1f} mm)"))
         else:
             # The only other split value reaching here is "trailing" (a
             # leading split was handled above): the tail of this image
             # runs under the next aperture's bar.
-            other = "B" if args.placement == "A" else "A"
-            parts.append(f"image {n} split by the trailing bar -> take it "
-                         f"in placement {other}")
+            other = "B" if state.placement == "A" else "A"
+            parts.append(note + f"image {n} split by the trailing bar -> "
+                         f"take it in placement {other}")
         if fr.free_end_near:
             parts[-1] += " [free strip end nearby: sharpness untrusted]"
 
@@ -563,6 +601,57 @@ def _film110_hook(args: argparse.Namespace, state: "Film110State | None",
     if find.leading_continuation:
         print(f"110: aperture {aperture} — leading lines continue a split "
               f"image from the previous aperture")
+
+
+def _film110_hook(args: argparse.Namespace, state: "Film110State | None",
+                  aperture: int, out: str, vis_crop, ir_crop) -> None:
+    """`scan --film 110`: detect 110 images inside one aperture-registered
+    crop and write `<stem>-image<N>.tiff` per WHOLE one, numbered by strip
+    position so the same photograph gets the same number whether it was
+    scanned in placement A or B. Called from both `_finish_plain_scan` and
+    `_finish_dual_scan`, on the SAME aperture-registered arrays those
+    write their own product from (before orientation -- the strip runs
+    along axis 0 here), so the plain and dual paths cannot drift apart.
+    A no-op when --film is not "110" (state is None in that case) or when
+    coverage did not verify (the caller only invokes this once it has).
+
+    The placement is `args.placement` when given, otherwise inferred from
+    the first numbered image (see `_film110_process_aperture`). An image
+    that does not land on the placement's phase grid, is ambiguous, or
+    whose product file already exists, writes nothing and is recorded in
+    `state.problems`; `_cmd_scan` turns a non-empty list into a failing
+    exit code once the whole command has finished.
+
+    `ir_crop` is None on the plain path and when --ir was not given on
+    the dual path -- the 110 IR sidecar is then simply not written,
+    matching the aperture product's own --ir behaviour.
+    """
+    if state is None:
+        return
+
+    def emit(n, fr, crops):
+        vis_path = _film110_image_path(out, n)
+        if Path(vis_path).exists():
+            return {"refused": f"{vis_path} exists -> not overwritten (use "
+                               f"one -o stem per placement, docs/film-110.md §7)"}
+        vis_img, ir_img = crops()
+        vis_img, ir_img = _orient_pair(args, vis_img, ir_img)
+        image.write_tiff16(vis_img, vis_path,
+                           icc=image.srgb_icc() if args.positive else None,
+                           dpi=_axis_dpi(args, args.positive))
+        print(f"wrote {vis_path} ({vis_img.shape[1]}x{vis_img.shape[0]}, "
+              f"16-bit RGB, 110 image {n})")
+        ir_path = None
+        if ir_img is not None:
+            import numpy as _np
+            ir_path = _film110_image_path(out, n, ir=True)
+            image.write_tiff16(_np.stack([ir_img, ir_img, ir_img], axis=-1),
+                               ir_path, dpi=_axis_dpi(args, args.positive))
+            print(f"wrote {ir_path} ({ir_img.shape[1]}x{ir_img.shape[0]}, "
+                  f"16-bit, 110 image {n} IR channel)")
+        return {"main": vis_path, "ir": ir_path}
+
+    _film110_process_aperture(args, state, aperture, vis_crop, ir_crop, emit)
 
 
 def _overscan_raw_path(out: str) -> str:
@@ -841,7 +930,8 @@ def _cmd_load(args: argparse.Namespace) -> int:
 
 
 def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
-                           out: str, dual: bool, progress: dict | None = None):
+                           out: str, dual: bool, progress: dict | None = None,
+                           film110=None):
     """digitize's per-frame writer. The MAIN image (`out`, fN.tiff) is
     always the raw NEGATIVE -- never inverted -- so it is the archival
     product. With --positive a SEPARATE preview (fN-preview.tiff, positive,
@@ -866,7 +956,14 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
 
     `progress`, if given, is filled in as each file lands ("main", "ir",
     "preview"), so a failure part-way through a frame leaves a record of
-    what was actually written."""
+    what was actually written.
+
+    `film110`, if given (digitize --film 110), is called as
+    film110(visible, ir_or_None) with the aperture-registered crops -- the
+    same arrays the main negative is written from, before rotation or the
+    preview -- and only for a frame whose coverage verified and whose
+    aperture holds film. It runs the shared 110 detector/numbering code
+    (`_film110_process_aperture`) with digitize's own writer."""
     import numpy as _np
 
     def _note(key: str, value) -> None:
@@ -948,6 +1045,8 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
             return None, None, None, bool(args.ir and not args.no_clean), coverage
         visible = aperture_crop.crop_to_aperture(visible, coverage, dpi=args.dpi)
         ir = aperture_crop.crop_to_aperture(ir, coverage, dpi=args.dpi)
+        if film110 is not None:
+            film110(visible, ir)
     else:
         full = image.align_channels(image.assemble(raw, width), dpi=args.dpi)
         coverage = aperture_crop.measure_coverage(full, dpi=args.dpi)
@@ -977,6 +1076,8 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         visible = aperture_crop.crop_to_aperture(full, coverage, dpi=args.dpi)
         del full
         ir = None
+        if film110 is not None:
+            film110(visible, None)
 
     # Dust removal already ran in the dual branch above (before the
     # coverage measurement, on the uncropped grid).
@@ -1025,6 +1126,121 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
     return out, ir_file, preview_file, dust_cleaned, coverage
 
 
+def _film110_digitize_emit(args: argparse.Namespace, state: Film110State,
+                           roll: int):
+    """The photograph writer `digitize --film 110` hands to
+    `_film110_process_aperture`: <roll_dir>/image<N>.tiff (+ image<N>-ir.tiff
+    with --ir), N = strip position, oriented like the frame's main negative
+    (rotated if asked, never inverted or mirrored). An existing image<N>.tiff
+    is not overwritten, except by the sag rule (docs/film-110.md §4): when
+    the manifest (or this run) shows the existing copy was delivered with
+    `free_end_near` and the new one is not, the supported copy replaces it
+    (`replaced_free_end_copy`)."""
+    from . import digitize
+    import numpy as _np
+
+    def emit(n, fr, crops):
+        vis_path = digitize.film110_image_path(args.out, args.prefix, roll, n)
+        ir_path = digitize.film110_image_path(args.out, args.prefix, roll, n, ir=True)
+        replaced = False
+        if vis_path.exists():
+            # state.images[-1] is the entry being written right now.
+            records = digitize.roll_records(args.out, roll, args.prefix)
+            records.append({"images": state.images[:-1]})
+            prev = digitize.delivered_image(records, roll, args.prefix, n)
+            if (prev is not None and prev.get("free_end_near")
+                    and not fr.free_end_near):
+                replaced = True
+            else:
+                return {"refused": f"{vis_path.name} exists -> kept, not "
+                                   f"overwritten"}
+        vis_img, ir_img = crops()
+        if args.rotate:
+            k = args.rotate // 90
+            vis_img = _np.ascontiguousarray(_np.rot90(vis_img, k=k))
+            if ir_img is not None:
+                ir_img = _np.ascontiguousarray(_np.rot90(ir_img, k=k))
+        _write_image(vis_img, str(vis_path), positive=False,
+                     dpi=_axis_dpi(args, False))
+        print(f"wrote {vis_path} ({vis_img.shape[1]}x{vis_img.shape[0]}, "
+              f"16-bit RGB negative, 110 image {n}"
+              f"{', replaced the free-end copy' if replaced else ''})")
+        ir_out = None
+        if ir_img is not None:
+            image.write_tiff16(_np.stack([ir_img, ir_img, ir_img], axis=-1),
+                               str(ir_path), dpi=_axis_dpi(args, False))
+            ir_out = str(ir_path)
+            print(f"wrote {ir_path} ({ir_img.shape[1]}x{ir_img.shape[0]}, "
+                  f"16-bit, 110 image {n} IR channel)")
+        return {"main": str(vis_path), "ir": ir_out,
+                "replaced_free_end_copy": replaced,
+                "message": f"image {n} whole ({fr.size_mm[0]:.1f} x "
+                           f"{fr.size_mm[1]:.1f} mm)"
+                           f"{' [replaced the free-end copy]' if replaced else ''}"}
+
+    return emit
+
+
+def _film110_fill_record(record: dict, state: Film110State, rdir: Path) -> None:
+    """Write the 110 fields of a digitize roll record: the decided
+    placement (null when no image decided it), whether it was given, one
+    `images` entry per numbered image, the refusals, and `advice` -- the
+    numbers the other placement is still needed for: images split in
+    this placement that no run has delivered yet, and images this run
+    delivered with the strip end free (the sag rule, docs/film-110.md
+    §4: the other placement's supported copy replaces them)."""
+    record["film"] = "110"
+    record["placement"] = state.placement
+    record["placement_given"] = bool(state.placement_given)
+    record["images"] = state.images
+    record["problems"] = list(state.problems)
+    missing: set = set()
+    for e in state.images:
+        n = e["number"]
+        if (e.get("split") == "trailing" and not e.get("whole")
+                and not (Path(rdir) / f"image{n}.tiff").exists()):
+            missing.add(n)          # split here: whole in the other placement
+        elif e.get("whole") and e.get("free_end_near") and e.get("main"):
+            missing.add(n)          # delivered, but with the strip end free
+    other = None if state.placement is None else (
+        "B" if state.placement == "A" else "A")
+    record["advice"] = {"other_placement": other, "images": sorted(missing)}
+
+
+def _film110_roll_guard(args: argparse.Namespace, roll: int, rdir: Path,
+                        state: Film110State) -> "str | None":
+    """Before any hardware: may this 110 run write into `rdir`? None = yes
+    (and `state.forbidden` is filled with the placements the roll already
+    holds); otherwise the refusal message. A roll takes two runs, one per
+    placement (docs/film-110.md §11): the second is accepted without
+    --force when the directory holds only the OTHER placement's files (or
+    provisional x- files) and the roll's last manifest record is a 110 run.
+    The same placement twice is an operator error and is refused."""
+    from . import digitize
+    if digitize.roll_is_done(args.out, roll, args.prefix):
+        return (f"roll {roll} is recorded done (nothing is left for the other "
+                f"placement); use --roll for a new strip, or --force to redo it")
+    if not digitize.roll_dir_has_output(args.out, args.prefix, roll):
+        return None
+    recs = digitize.roll_records(args.out, roll, args.prefix)
+    if not recs or recs[-1].get("film") != "110":
+        return (f"roll {roll} already has output in {rdir} that is not a "
+                f"recorded 110 run; use --roll for a different one, or "
+                f"--force to redo it")
+    tags = digitize.film110_placements_on_disk(rdir)
+    have = sorted(t.upper() for t in tags if t in ("a", "b"))
+    given = getattr(args, "placement", None)
+    if given and given.lower() in tags:
+        return (f"roll {roll} already has placement {given} output in {rdir}; "
+                f"this run is placement {given} again. Re-seat the strip for "
+                f"the other placement, or use --force to redo the roll")
+    if len(have) == 2:
+        return (f"roll {roll} already has output for both placements in "
+                f"{rdir}; use --roll for a new strip, or --force to redo it")
+    state.forbidden = set(have)
+    return None
+
+
 def _cmd_digitize(args: argparse.Namespace) -> int:
     """Bulk-digitise one film strip into a resumable staging tree
     (of135i.digitize): pick the roll number, load the magazine, scan
@@ -1047,6 +1263,12 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    err = _validate_film110_args(args)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    film110 = getattr(args, "film", "135") == "110"
+    state = Film110State(getattr(args, "placement", None)) if film110 else None
 
     roll = args.roll if args.roll is not None else digitize.next_roll(args.out, args.prefix)
     rdir = digitize.roll_dir(args.out, args.prefix, roll)
@@ -1055,8 +1277,15 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     # scan on disk (checked directly, not just via the manifest, so a crash
     # between scanning and recording is caught) or is recorded done, unless
     # --force.
-    if not args.force and (digitize.roll_dir_has_output(args.out, args.prefix, roll)
-                           or digitize.roll_is_done(args.out, roll, args.prefix)):
+    if film110:
+        # A 110 roll takes two runs (one per placement); the guard knows it.
+        if not args.force:
+            msg = _film110_roll_guard(args, roll, rdir, state)
+            if msg is not None:
+                print(f"error: {msg}.", file=sys.stderr)
+                return 2
+    elif not args.force and (digitize.roll_dir_has_output(args.out, args.prefix, roll)
+                             or digitize.roll_is_done(args.out, roll, args.prefix)):
         print(f"error: roll {roll} already has output in {rdir} (or is recorded "
               f"done); use --roll for a different one, or --force to redo it.",
               file=sys.stderr)
@@ -1068,6 +1297,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     # beside a new negative scanned without --positive). Done before hardware.
     if args.force:
         removed = digitize.clear_roll_outputs(args.out, args.prefix, roll)
+        if film110:
+            removed += digitize.clear_film110_outputs(args.out, args.prefix, roll)
         if removed:
             print(f"--force: removed {len(removed)} existing file(s) in {rdir} "
                   f"before re-scanning")
@@ -1080,11 +1311,15 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                     "positive": args.positive, "ir": args.ir,
                     "frames": dig_frames,
                     "no_clean": args.no_clean, "rotate": args.rotate}
+    if film110:
+        _film110_fill_record(record, state, rdir)
 
     def record_failed(stage: str, **extra) -> None:
         """Record this roll as failed, tolerating a manifest write that
         itself fails -- never let that mask the original error."""
         try:
+            if film110:
+                _film110_fill_record(record, state, rdir)
             record.update(status="failed", stage=stage,
                           finished_utc=datetime.now(timezone.utc).isoformat(),
                           **extra)
@@ -1123,9 +1358,19 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             return 1
         incomplete: list[int] = []
         seen_film = False
+        pending: list = []          # (frame, entry) written under the x- stem
+        emit110 = _film110_digitize_emit(args, state, roll) if film110 else None
+
+        def stem_tag() -> str:
+            return state.placement.lower() if state.placement else "x"
+
         for idx, frame in enumerate(dig_frames):
             scanner.initialize(ir=dual, dpi=args.dpi)
-            out = str(digitize.frame_path(args.out, args.prefix, roll, frame))
+            if film110:
+                out = str(digitize.frame_path_110(args.out, args.prefix, roll,
+                                                  stem_tag(), frame))
+            else:
+                out = str(digitize.frame_path(args.out, args.prefix, roll, frame))
             log.info("scanning frame %d @ %d dpi%s", frame, args.dpi,
                      " (dual-light pass)" if dual else "")
             # The frame is recorded BEFORE its writes and filled in as each
@@ -1141,9 +1386,35 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             else:
                 raw, width = scanner.scan(frame=frame)
             entry["stage"] = "write"
-            main, irf, prev, cleaned, cov = _finish_digitize_frame(
-                args, raw, width, out, dual, progress=entry)
+            if film110:
+                def hook(vis, irr, frame=frame):
+                    _film110_process_aperture(
+                        args, state, frame, vis, irr if args.ir else None,
+                        emit110)
+                main, irf, prev, cleaned, cov = _finish_digitize_frame(
+                    args, raw, width, out, dual, progress=entry, film110=hook)
+            else:
+                main, irf, prev, cleaned, cov = _finish_digitize_frame(
+                    args, raw, width, out, dual, progress=entry)
             entry.update(main=main, ir=irf, preview=prev, dust_cleaned=cleaned)
+            if film110:
+                # Provisional stem: frames written before the placement was
+                # known are renamed, in this one place, as soon as it is
+                # (this frame's own detection may have just decided it).
+                if out.rsplit("/", 1)[-1].startswith("x-"):
+                    pending.append((frame, entry))
+                if state.placement and not state.aborted and pending:
+                    new_tag = state.placement.lower()
+                    for pframe, pentry in pending:
+                        moved = dict(digitize.rename_film110_frame(
+                            digitize.roll_dir(args.out, args.prefix, roll),
+                            pframe, "x", new_tag))
+                        for k, v in list(pentry.items()):
+                            if isinstance(v, str) and v in moved:
+                                pentry[k] = moved[v]
+                    pending.clear()
+                    out = str(digitize.frame_path_110(args.out, args.prefix,
+                                                      roll, new_tag, frame))
             film = None
             if cov is not None:
                 entry["coverage_verified"] = bool(cov.verified)
@@ -1170,6 +1441,9 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                          gain_codes=d.get("gain_codes"),
                          offset_codes=d.get("offset_codes"),
                          dark_b_substituted=d.get("dark_b_substituted"))
+            if film110 and state.aborted:
+                print(f"stopping: {state.aborted}", file=sys.stderr)
+                break
             if film is not None:
                 if film["present"]:
                     seen_film = True
@@ -1186,6 +1460,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                     break
         scanner.eject()
         print("ejected")
+        if film110 and state.aborted:
+            return 5
         if incomplete:
             # Fail closed on image integrity, exactly as `scan` does: a
             # coverage failure is not a complete frame. The roll is
@@ -1211,6 +1487,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                   per_frame=per_frame,
                   status="ok" if rc == 0 else "failed",
                   stage=None if rc == 0 else "scan")
+    if film110:
+        _film110_fill_record(record, state, rdir)
     # The images are already on disk; a manifest write that fails here must
     # not turn a successful scan into a crash. Warn loudly instead -- the
     # disk-based overwrite guard still protects the roll on the next run.
@@ -1225,9 +1503,29 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     if rc == 0:
         subs = [pf["frame"] for pf in per_frame if pf.get("dark_b_substituted")]
         note = f" (dark_b substituted on frame(s) {subs})" if subs else ""
-        print(f"roll {roll} done: {len(per_frame)} frames -> {rdir}{note}. "
-              f"Next: insert the next strip and run 'of135i digitize' again "
-              f"(roll {roll + 1}).")
+        if film110:
+            adv = record["advice"]
+            pl = state.placement or "undecided"
+            if adv["images"]:
+                nxt = (f"Images {adv['images']} need the other placement "
+                       f"(split by a bar, or scanned with the strip end free): "
+                       f"re-seat the strip for placement {adv['other_placement']} "
+                       f"and run 'of135i digitize --film 110 --roll {roll}' again.")
+            else:
+                nxt = (f"Nothing is left for the other placement. Next strip: "
+                       f"roll {roll + 1}.")
+            print(f"roll {roll} done (110, placement {pl}): {len(per_frame)} "
+                  f"frames, {sum(1 for e in state.images if e['main'])} "
+                  f"photograph(s) -> {rdir}{note}. {nxt}")
+        else:
+            print(f"roll {roll} done: {len(per_frame)} frames -> {rdir}{note}. "
+                  f"Next: insert the next strip and run 'of135i digitize' again "
+                  f"(roll {roll + 1}).")
+    elif rc == 5 and film110:
+        print(f"roll {roll} STOPPED: {state.aborted}. The strip was ejected; "
+              f"nothing was overwritten (this run's frame files keep the "
+              f"x- stem). Re-seat for the other placement, or --force.",
+              file=sys.stderr)
     elif rc == 4:
         # Coverage failure: the pass and eject completed normally -- the
         # transport needs no recovery, the roll just is not complete.
@@ -1405,9 +1703,12 @@ def build_parser() -> argparse.ArgumentParser:
              "still written exactly as today. docs/film-110.md")
     p_scan.add_argument("--placement", choices=("A", "B"), default=None,
         help="which of the two 110 placements the strip is in "
-             "(docs/film-110.md §3); required with --film 110: images are "
-             "numbered by their position on the strip, so the same "
-             "photograph gets the same number in both placements")
+             "(docs/film-110.md §3). Optional with --film 110: when "
+             "omitted it is inferred from the first image's position "
+             "(an image midway between the two phases is refused with a "
+             "request to give it); given, it overrides the inference. "
+             "Images are numbered by their position on the strip, so the "
+             "same photograph gets the same number in both placements")
     p_scan.add_argument("-o", "--output", required=True, help="output file path (.tiff or .pnm)")
     p_scan.set_defaults(func=_cmd_scan)
 
@@ -1470,7 +1771,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_dig.add_argument("--force", action="store_true",
         help="scan even if this roll already has files on disk or is "
              "recorded done; clears the roll's previous f*.tiff/.diag.json "
-             "first so the dir is not a mix of two runs")
+             "first so the dir is not a mix of two runs (--film 110: "
+             "both placements' files and the image<N> photographs)")
     p_dig.add_argument("--frames", default="1-4", metavar="SPEC",
         help=f"which frames of the strip to scan, e.g. 1-4 (default), "
              f"1-6 for a full-length strip, or 1,3-4. The holder holds "
@@ -1486,6 +1788,18 @@ def build_parser() -> argparse.ArgumentParser:
              "negative (default off)")
     p_dig.add_argument("--rotate", type=int, default=0, choices=(0, 90, 180, 270),
         help="rotate output counter-clockwise (degrees; default 0)")
+    p_dig.add_argument("--film", choices=("135", "110"), default="135",
+        help="film format in the strip holder (default 135). 110 (Pocket "
+             "Instamatic): a strip takes TWO runs, one per placement "
+             "(docs/film-110.md §3), both into the same roll directory "
+             "(--roll N for the second). Frame files get the placement as a "
+             "prefix (a-f1.tiff, b-f1.tiff) and every whole photograph is "
+             "written once as image<N>.tiff (N = position on the strip), "
+             "never overwritten except a free-end copy by the supported one")
+    p_dig.add_argument("--placement", choices=("A", "B"), default=None,
+        help="which 110 placement this run is (docs/film-110.md §3). "
+             "Optional with --film 110: inferred from the first image's "
+             "position; given, it overrides the inference")
     p_dig.add_argument("--no-ir", dest="ir", action="store_false",
         help="skip the IR pass and dust removal (non-3600 profiles still "
              "run a dual-light capture; only the IR output is dropped)")

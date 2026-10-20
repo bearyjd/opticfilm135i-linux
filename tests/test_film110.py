@@ -702,9 +702,10 @@ def test_cli_hook_same_photo_same_number_across_placements():
 def test_validate_film110_args():
     parser = cli.build_parser()
 
+    # --placement is optional with --film 110 now (inferred).
     args = parser.parse_args(["scan", "--film", "110", "-o", "x.tiff"])
     err = cli._validate_film110_args(args)
-    assert err is not None and "--placement" in err, err
+    assert err is None, err
 
     args = parser.parse_args(["scan", "--placement", "A", "-o", "x.tiff"])
     err = cli._validate_film110_args(args)
@@ -718,6 +719,110 @@ def test_validate_film110_args():
     err = cli._validate_film110_args(args)
     assert err is None, err
     print("test_validate_film110_args OK")
+
+
+def _one_image_aperture(local_mm, dpi=600, seed=5):
+    """Aperture 1 with a single whole image starting `local_mm` in."""
+    lead, ilen = FILM_110.perforation_lead_mm, FILM_110.image_mm[0]
+    col0 = 2.0 + FILM_110.image_lateral_offset_mm
+    col1 = col0 + FILM_110.image_mm[1]
+    hole = (local_mm - lead - 1.5, local_mm - lead)
+    vis, _, _, _ = _build_fixture(
+        dpi, holes_mm=[hole], images_mm=[(local_mm, local_mm + ilen, col0, col1)],
+        seed=seed)
+    return vis
+
+
+def test_infer_placement_on_the_documented_phases():
+    """infer_placement on the measured phases of docs/film-110.md §3/§5
+    (A 3.5 mm: measured 3.53/3.58; B 16.25 mm: measured 15.73) and the
+    midway case (~9.9 mm: 6.4 mm from each phase -> None)."""
+    for dpi in DPIS:
+        ppm = _px_per_mm(dpi)
+        for aperture, pos, want in [(1, 3.53, "A"), (1, 3.58, "A"),
+                                    (1, 15.73, "B"), (1, 16.25, "B"),
+                                    (2, 16.17, "A"), (2, 3.26, "B"),
+                                    (3, 3.70, "A"), (3, 16.32, "B"),
+                                    (1, 1.0, "A"), (1, 18.0, "B")]:
+            got, res = film110.infer_placement(aperture, pos * ppm, dpi)
+            assert got == want, (dpi, aperture, pos, got, res)
+            assert abs(res) <= film110.PLACEMENT_INFER_TOLERANCE_MM, res
+        got, res = film110.infer_placement(1, 9.9 * ppm, dpi)
+        assert got is None and abs(res) > film110.PLACEMENT_INFER_TOLERANCE_MM, (got, res)
+    assert film110.PLACEMENT_INFER_TOLERANCE_MM == 4.0
+    print("test_infer_placement_on_the_documented_phases OK")
+
+
+def test_cli_hook_infers_a_and_b():
+    """No --placement: the first numbered image decides, and says so."""
+    import contextlib
+    import io
+    dpi = 600
+    for local, want, number in ((film110.PLACEMENT_A_PHASE_MM, "A", 1),
+                                (film110.placement_phase_mm("B"), "B", 1)):
+        vis = _one_image_aperture(local, dpi)
+        with tempfile.TemporaryDirectory() as d:
+            out = str(Path(d) / "f.tiff")
+            args = _hook_args(dpi=dpi, placement=None)
+            state = cli.Film110State()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cli._film110_hook(args, state, 1, out, vis, None)
+            assert state.placement == want and not state.placement_given, state.placement
+            assert Path(cli._film110_image_path(out, number)).exists()
+            assert state.problems == [], state.problems
+            assert f"placement {want} (inferred)" in buf.getvalue(), buf.getvalue()
+            assert [e["number"] for e in state.images] == [number], state.images
+    # Given placement is reported as given.
+    vis = _one_image_aperture(film110.PLACEMENT_A_PHASE_MM, dpi)
+    with tempfile.TemporaryDirectory() as d:
+        out = str(Path(d) / "f.tiff")
+        buf = io.StringIO()
+        state = cli.Film110State()
+        with contextlib.redirect_stdout(buf):
+            cli._film110_hook(_hook_args(dpi=dpi, placement="A"), state, 1, out, vis, None)
+        assert "placement A (given)" in buf.getvalue(), buf.getvalue()
+        assert state.placement_given
+    print("test_cli_hook_infers_a_and_b OK")
+
+
+def test_cli_hook_refuses_the_ambiguous_position_then_decides_later():
+    """An image midway between the phases cannot be inferred: problem
+    recorded, nothing written, placement still undecided -- a later image
+    on a clear phase then decides."""
+    dpi = 600
+    mid = _one_image_aperture(9.9, dpi)
+    with tempfile.TemporaryDirectory() as d:
+        out = str(Path(d) / "f.tiff")
+        args = _hook_args(dpi=dpi, placement=None)
+        state = cli.Film110State()
+        cli._film110_hook(args, state, 1, out, mid, None)
+        assert list(Path(d).iterdir()) == []
+        assert state.placement is None
+        assert len(state.problems) == 1, state.problems
+        assert "between the two placements" in state.problems[0], state.problems
+        assert "--placement A or B" in state.problems[0], state.problems
+        clear = _one_image_aperture(film110.placement_phase_mm("B"), dpi)
+        cli._film110_hook(args, state, 1, out, clear, None)
+        assert state.placement == "B", state.placement
+        assert Path(cli._film110_image_path(out, 1)).exists()
+    print("test_cli_hook_refuses_the_ambiguous_position_then_decides_later OK")
+
+
+def test_explicit_placement_overrides_inference():
+    """--placement B on an image that reads as A (phase 3.5 mm): the
+    explicit flag wins -- the image is not inferred away, it is refused
+    as off the given placement's phase, exactly as before."""
+    dpi = 600
+    vis = _one_image_aperture(film110.PLACEMENT_A_PHASE_MM, dpi)
+    with tempfile.TemporaryDirectory() as d:
+        out = str(Path(d) / "f.tiff")
+        state = cli.Film110State()
+        cli._film110_hook(_hook_args(dpi=dpi, placement="B"), state, 1, out, vis, None)
+        assert state.placement == "B" and state.placement_given
+        assert list(Path(d).iterdir()) == []
+        assert len(state.problems) == 1 and "phase" in state.problems[0], state.problems
+    print("test_explicit_placement_overrides_inference OK")
 
 
 def test_cli_hook_is_noop_for_film_135():
@@ -760,6 +865,10 @@ def main() -> int:
         test_cli_hook_refuses_to_overwrite,
         test_cli_hook_refuses_wrong_placement_phase,
         test_cli_hook_same_photo_same_number_across_placements,
+        test_infer_placement_on_the_documented_phases,
+        test_cli_hook_infers_a_and_b,
+        test_cli_hook_refuses_the_ambiguous_position_then_decides_later,
+        test_explicit_placement_overrides_inference,
         test_cli_hook_is_noop_for_film_135,
         test_cli_scan_parser_defaults_to_135,
         test_validate_film110_args,
