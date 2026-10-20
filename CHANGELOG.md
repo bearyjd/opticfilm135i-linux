@@ -6,6 +6,15 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- `digitize --film 110 --strips 2` (offline; hardware check pending, Test
+  103): two 110 strips of up to four images in one load, strip 1 against the
+  holder's left end (apertures 1-3), strip 2 against its right end (4-6),
+  written as two rolls N and N+1 (own directory, products, manifest record;
+  record fields `strips`, `slot`, `companion_roll`, `placement_source`,
+  `film_found`). Slot 1 numbers like a lone strip; slot 2 is anchored by its
+  first detected image (`film110.image_number_anchored`). The empty-aperture
+  stop rule is per slot, the guard covers both rolls, either rail works for
+  either strip. `--strips 1` (default) is unchanged.
 - `digitize --film 110` (offline; hardware check pending, Test 102): a 110
   strip is digitised as a two-run roll — one run per placement into the same
   roll directory. Frame files carry the placement (`a-f1.tiff`, `b-f1.tiff`;

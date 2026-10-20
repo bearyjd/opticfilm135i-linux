@@ -459,6 +459,10 @@ leaves the negative untouched; `--roll N` targets a specific roll,
 two-run roll: run once per placement into the same roll (`--roll N` for the
 second run); frame files are `a-f1.tiff`/`b-f1.tiff` and each photograph is
 written once as `image<N>.tiff` (`docs/film-110.md` §11).
+`--strips 2` carries two strips of up to four images in one load (strip 1
+against the holder's left end, strip 2 against its right end) and writes them
+as two rolls, N and N+1 — offline-tested, hardware check pending
+(`docs/film-110.md` §12).
 Resume is **between strips**: the roll number advances past the highest
 recorded or on-disk roll, an existing roll is not overwritten without
 `--force` (which first clears that roll's previous `f*.tiff`/`.diag.json`

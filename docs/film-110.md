@@ -176,6 +176,10 @@ of135i scan --frames <whole-image-apertures> --dpi 3600 --ir --film 110 --placem
 of135i scan --frames <whole-image-apertures> --dpi 3600 --ir --film 110 --placement B --eject -o b.tiff
 ```
 
+Two strips in one load (§12): `of135i digitize --out ~/scans/boxA --film 110
+--strips 2` (second run: add `--roll N`) writes roll N for apertures 1–3 and
+roll N+1 for apertures 4–6. `scan` always handles one strip.
+
 `--placement` is optional with `--film 110` (inferred from the first image,
 §5) and refused without it. The products are then `a-image1.tiff`, `a-image3.tiff`, `a-image4.tiff`,
 `b-image2.tiff`, `b-image4.tiff`, … — the number is the photograph (§5),
@@ -218,6 +222,10 @@ of135i digitize --out ~/scans/boxA --film 110            # placement A
 # re-seat the strip (§3, placement B), then, same roll:
 of135i digitize --out ~/scans/boxA --film 110 --roll 1   # placement B
 ```
+
+With `--strips 2` (§12) the same files are written per roll: roll N holds
+slot 1's `a-f1…a-f3` / `b-f1…b-f3` and `image<K>.tiff`, roll N+1 holds slot 2's
+`a-f4…a-f6` / `b-f4…b-f6` and its own `image<K>.tiff`, K counted per strip.
 
 ## 8. How the detector reads an aperture
 
@@ -434,6 +442,11 @@ are kept beside them as evidence.
   the *other* phase is inferred as that placement — the numbering is then
   consistent with where the strip actually is, which is what matters, but
   the advice "take it in the other placement" refers to the inferred one.
+- **Two strips per load (§12) is offline-tested only on synthetic
+  fixtures** (Test 103 pending): at most four images per strip, slot 2's
+  numbering follows its first detected image, an aperture holding pieces of
+  both strips on opposite lateral sides is not readable by the detector, and
+  an image can be split by a bar in both placements of slot 2.
 - **`digitize --film 110` is offline-tested only** (synthetic apertures
   through the real command with a fake scanner); the hardware check is
   Test 102 (§11). Its limits: no mid-run resume, a failed run of one
@@ -493,7 +506,7 @@ usual fields:
 | `film` | `"110"` |
 | `placement` | `"A"`, `"B"` or `null` (nothing decided it) |
 | `placement_given` | true when `--placement` was passed |
-| `images` | one entry per numbered image: `number`, `aperture`, `whole`, `split` (`null`/`"trailing"`), `free_end_near`, `main`, `ir` (paths, `null` when not written), `size_mm` (`[along, lateral]` for whole images, else `null`), `replaced_free_end_copy`, and `refused` (only when nothing was written) |
+| `images` | one entry per numbered image: `number`, `aperture`, `whole`, `split` (`null`/`"trailing"`; `"leading"` only for a two-strip slot 2's first image, §12), `free_end_near`, `main`, `ir` (paths, `null` when not written), `size_mm` (`[along, lateral]` for whole images, else `null`), `replaced_free_end_copy`, and `refused` (only when nothing was written) |
 | `problems` | the refusal messages of this run |
 | `advice` | `{"other_placement": "B", "images": [2, 4]}`: the numbers the other placement is still needed for — split in this placement and not delivered by any run, or delivered in this run with the strip end free (§4, the other placement's supported copy replaces them); `images` is empty when nothing is missing |
 
@@ -519,3 +532,132 @@ in both, `image<N>.tiff` for every photograph exactly once, the free-end
 copy of the last image replaced by the B copy, `advice` right after run A
 and empty after run B, `film110_check.py --edge-check` clean on the
 products.
+
+## 12. Two strips per load — `digitize --film 110 --strips 2`
+
+*Implemented offline 2026-10-21; hardware check pending (Test 103). No
+real two-strip scan exists yet — every statement below is about synthetic
+fixtures (`tests/test_film110_digitize.py`), and the first real load is
+expected to find the rest.*
+
+The strip holder has six apertures (pitch 37.947 mm, opening 36 mm); two
+110 strips of up to four images each (about 102 mm plus leader) fit at
+once, so one load, one calibration and one eject can carry both.
+
+**The operator's rule.**
+
+- **Placement A:** strip 1 pushed against the holder's LEFT end (its image
+  1 at aperture 1's left edge — exactly §3's placement A); strip 2 pushed
+  against the holder's RIGHT end (its last image ends at aperture 6's right
+  edge; its start then lies somewhere in aperture 4, depending on its
+  length and leader).
+- **Placement B:** both strips moved half a film pitch (12.75 mm) towards
+  the middle, strip 1 to the right and strip 2 to the left, by eye.
+
+**Slots.** Strip 1 occupies apertures 1–3 (*slot 1*), strip 2 apertures 4–6
+(*slot 2*): `film110.SLOT_APERTURES = 3`, `film110.slot_of(aperture, strips)`.
+A strip of more than four images does not fit beside another one; use
+`--strips 1` for it. For a load with only one strip also use `--strips 1`
+(a slot that finds no film at all is still recorded, below).
+
+**Numbering.**
+
+- *Slot 1* numbers exactly as a lone strip (§5): phase from the holder's
+  left end, the placement inferred from its first numbered image (or given
+  with `--placement`).
+- *Slot 2* is anchored by the data, not by a fixed phase, because its
+  position depends on the strip's length and leader. Its first numbered
+  image — the lowest position in the slot — is the strip's image 1, and
+  every later image is numbered by its distance from that one in film
+  pitches (`film110.image_number_anchored`: `round(distance / 25.5) + 1`).
+  A *leading* split in the slot's first aperture (an image that started
+  under the bar before aperture 4) is not "already counted" there — it is
+  image 1, recorded with `whole: false, split: "leading"` and no product;
+  the other placement delivers it. Slot 2 has no placement inference of
+  its own: its frame files and record carry the run's placement label, and
+  `placement_source` says where that came from (`"given"`, `"slot 1
+  inferred"`, or `"run order"`). Consequence: if the detector misses the
+  strip's real first image in one placement, the numbering of that run is
+  shifted by one against the other placement's — the eyes of Test 103 must
+  check that the same photograph has the same number in both runs.
+- *Run order.* When slot 1 numbered nothing and `--placement` is not given
+  (slot 1 empty), the run is labelled by the manifest: `"A"` when roll N has
+  no 110 record yet, else `"B"` (`placement_source: "run order"`).
+
+**Two rolls per run.** Roll N holds slot 1, roll N+1 slot 2 (`N` = `--roll`
+or the next free number), each with its own directory, its own frame files
+(the HOLDER aperture number stays in the name: roll N+1 has `a-f4.tiff`,
+`a-f5.tiff`, `a-f6.tiff`), its own `image<K>.tiff` products (K counted per
+strip) and its own manifest record: `frames` = that slot's apertures, plus
+`strips: 2`, `slot`, `companion_roll`, `placement_source`, `film_found`
+(docs/driver-design.md). The second run is `digitize --film 110 --strips 2 --roll
+N` and fills both rolls' other placement. `--frames` defaults to `1-6`; a
+given `--frames` must contain at least one aperture of each slot, else exit
+2 before any hardware. The guard is applied to BOTH rolls before hardware
+(a roll with records must be half of a two-strip pair with the other as its
+companion; the same-placement-twice and finished-roll refusals of §11 apply
+to each); `--force` clears both rolls.
+
+A slot that finds no film at all still gets its record — `status: "ok"`,
+`images: []`, the placement as labelled, `film_found: false` — and counts
+as done, so its roll number is not reused. The other placement's run may
+still add to such a roll (the guard tolerates it). One-strip loads should
+use `--strips 1`, which leaves no empty roll behind.
+
+**Empty apertures.** The stop rule of §11 is per slot: an empty aperture
+after film in slot 1 skips the rest of slot 1's apertures but never stops
+the run (slot 2 may hold film); in slot 2 it skips the rest of slot 2
+(`skipped_frames`/`stop_reason` on that roll's record). Empty apertures
+before a slot's first film never stop anything. `--no-stop-at-empty` scans
+everything. `scan` is unchanged — it scans one strip.
+
+**Where the strips meet (what the code does about it).** Strip 1's last
+bar and strip 2's first image can fall in the same two apertures:
+
+- In slot 1's last aperture (3), a *trailing* split — an image running
+  under the bar towards slot 2 — is the next strip's leading image: a
+  strip of up to four images ends before that bar in either placement. It
+  is reported ("the next strip's leading image, counted there"), never
+  numbered in slot 1, never decides the placement, and is not a problem.
+  The detector also predicts an image *before* the next strip's first hole,
+  where only strip 1's trailing leader or the gap lies; it is recognised
+  by sharing that hole with the split and dropped (reported).
+- In slot 2's first aperture (4), the same first-hole prediction can put a
+  ghost image before the strip's film begins. An image predicted more than
+  `film110.FILM_START_TOLERANCE_MM` (1.0 mm) before a free film start
+  (`ApertureFind.film_line_start`) is dropped; otherwise it would become the
+  anchor and shift every number of the strip by one.
+- Not handled, because the detector cannot tell (and the spec forbids
+  hacking around it): an aperture that holds pieces of BOTH strips lying on
+  opposite lateral sides — a strip 1 leader against the lower rail and a
+  strip 2 start against the upper one in the same aperture. The detector
+  reads one film band per aperture and reports "no perforation found" or
+  nothing for such an aperture; nothing is lost that was needed in the
+  fixtures (the images of both strips lie in other apertures or are delivered
+  by the other placement), but that is not guaranteed in general. A
+  ghost-before-first-hole *inside* aperture 4 that is not before a free film
+  start (the film continues from aperture 3) is geometrically
+  indistinguishable from a real leading split of image 1.
+- A strip's images that are split in BOTH placements stay undelivered: slot
+  1's phase is fixed by the holder, so §3's guarantee (every image whole in
+  A or B) holds there; slot 2's phase depends on the strip's length and
+  leader, and with an unlucky phase (the fixtures have one) an image is cut
+  by a bar in both. It stays on the roll's `advice`; the roll still counts
+  as done once both placements have an `ok` record.
+
+**Either rail.** The strips may lie against either rail, and the two may
+differ: nothing in the slot logic, numbering, cropping or products assumes
+which one. The detector handles a film band on either lateral side of the
+aperture (`test_perforated_edge_on_high_side`) and both hole orientations
+(`test_reversed_orientation_hole_after_image`); the fixtures of the
+two-strip suite run all four combinations (`lo/hi`, `hi/lo`, `lo/lo`,
+`hi/hi`) and require identical numbering. It works as long as the perforated
+edge faces the opening; with the perforations hidden under a rail the
+detector reports "perforations hidden" (§10) and no 110 products are
+written for that aperture.
+
+**Limits.** At most four images per strip; offline-tested only; no real
+data; the hardware check is Test 103 — a two-strip load through both
+placements, eyes on: the same photograph has the same number in A and B for
+both strips, no ghost image in apertures 3 and 4, no image shifted by the
+anchor, `film110_check.py --edge-check` clean on the products.
