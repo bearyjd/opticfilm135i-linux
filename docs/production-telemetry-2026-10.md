@@ -51,6 +51,15 @@ The 647 verified frames on disk are the regression set: on verified
 frames the IR edge and the visible edge are expected to agree to within
 a line or two (checked on a random sample, see §4).
 
+One case where the IR rule verifies what the visible rule refused: on the
+film-end frame above (IR margins 2.54/0.87 mm) the first 1.8 mm of the
+opening is opaque in IR too, so IR finds an opening 34.2 mm long and
+verifies it. The edges are real, but the crop would be short. A verified
+frame whose margin exceeds 2.0 mm (telemetry maximum 1.10 mm,
+`aperture_crop.MAX_PLAUSIBLE_MARGIN_MM`) is therefore flagged with
+`coverage_warning` in the manifest entry and on stderr, never failed:
+the workflow's own sibling-length check decides what to do with it.
+
 ### 2.2 Coverage says "the opening is in the picture", not "there is film in it"
 
 Observed by the workflow on 2026-10-18: a strip of two frames scanned as

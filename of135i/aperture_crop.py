@@ -212,6 +212,37 @@ def measure_coverage(image, *, dpi, min_margin_mm=0.15, channel="red") -> Apertu
     )
 
 
+#: Largest overscan margin a verified frame is expected to show. The
+#: window is the aperture plus the overscan on each side (0.75 mm default,
+#: docs/holder-position-design.md section 4, ±0.5 mm load variation), and
+#: production telemetry over 647 verified frames measured 0.43 to 1.10 mm
+#: (docs/production-telemetry-2026-10.md section 3). A margin well above
+#: that means the opening found is SHORTER than the holder's: the strip's
+#: end lying inside the aperture and opaque to the measuring channel
+#: (seen once, IR, leading margin 2.54 mm on a film end). The verdict is
+#: not changed by this -- the edges found are real -- but the frame is
+#: flagged so a workflow can check the crop against its siblings.
+MAX_PLAUSIBLE_MARGIN_MM = 2.0
+
+
+def margin_warning(coverage: ApertureCoverage,
+                   max_margin_mm: float = MAX_PLAUSIBLE_MARGIN_MM) -> str | None:
+    """A one-line warning when a verified coverage's margin exceeds
+    `max_margin_mm` (see MAX_PLAUSIBLE_MARGIN_MM), else None."""
+    if not coverage.verified:
+        return None
+    wide = []
+    if coverage.leading_margin_mm is not None and coverage.leading_margin_mm > max_margin_mm:
+        wide.append(f"leading {coverage.leading_margin_mm:.2f} mm")
+    if coverage.trailing_margin_mm is not None and coverage.trailing_margin_mm > max_margin_mm:
+        wide.append(f"trailing {coverage.trailing_margin_mm:.2f} mm")
+    if not wide:
+        return None
+    return (f"margin above {max_margin_mm:.1f} mm ({', '.join(wide)}): the opening "
+            f"found is shorter than the holder's aperture, the strip's end may lie "
+            f"inside it; check the crop against the strip's other frames")
+
+
 def measure_coverage_dual(visible, ir, *, dpi, min_margin_mm=0.15) -> ApertureCoverage:
     """Coverage for a dual-light (IR) pass: IR first, then visible.
 

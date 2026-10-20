@@ -91,7 +91,9 @@ single USB operation the driver would otherwise perform:
   `<output>.cal.npz` file holding the frame's per-pixel calibration
   measurements (`Scanner.last_cal_data`; `null` on a calibration-cache
   hit or with `--no-cal-data`). `digitize`'s manifest entries add
-  `coverage_source`, `film_present`, `saturated_share`; the roll record
+  `coverage_source`, `film_present`, `saturated_share`, and
+  `coverage_warning` when a margin exceeds
+  `aperture_crop.MAX_PLAUSIBLE_MARGIN_MM`; the roll record
   adds `skipped_frames`/`stop_reason` when a strip is stopped early.
 
 ## Open M2 items

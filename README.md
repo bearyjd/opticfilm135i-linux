@@ -456,7 +456,10 @@ On the dual (IR) paths the aperture is located on the IR channel first —
 it is blind to the picture, so film content cannot hide the edge — and on
 the visible frame only if IR does not verify. Each per-frame manifest
 entry records `coverage_source` (`"ir"` or `"visible"`; the diag sidecar's
-`coverage` block carries the same `source`). A verified frame is then
+`coverage` block carries the same `source`), and a `coverage_warning`
+when a margin exceeds 2.0 mm (production maximum 1.10 mm): the opening
+found is shorter than the holder's, as on a film end that is opaque to
+the measuring channel; the frame is still written. A verified frame is then
 checked for **film**: an empty holder slot passes coverage, because
 coverage checks the opening, not what is in it. An empty opening (more
 than half of the sampled pixels saturated in all three channels) gets only

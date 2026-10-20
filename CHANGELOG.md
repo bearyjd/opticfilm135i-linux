@@ -11,6 +11,10 @@ one exists; "offline" means implemented and tested without the scanner.
   (`aperture_crop.measure_coverage_dual`, `ApertureCoverage.source`);
   recorded as `coverage_source` in the manifest and `coverage.source` in
   the diag sidecar (offline; production telemetry 2026-09/10, 711 frames).
+  A verified `digitize` frame whose margin exceeds 2.0 mm
+  (`aperture_crop.MAX_PLAUSIBLE_MARGIN_MM`; telemetry maximum 1.10 mm) is
+  flagged with `coverage_warning` (the opening found is shorter than the
+  holder's, a film end inside it), never failed.
 - `digitize` detects an empty aperture (`aperture_crop.film_presence`):
   only the overscan files are written, the entry records
   `film_present: false`, and the strip stops after an empty frame that

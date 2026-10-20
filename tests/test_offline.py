@@ -887,6 +887,18 @@ def _run_digitize(kinds, frames="1-4", stdout=None, **flags):
         return rc, rec, files, scans, getattr(buf, "getvalue", lambda: "")(), sidecars
 
 
+def test_digitize_wide_margin_is_flagged_not_failed():
+    """The synthetic frame has 4 mm / 6 mm margins (window 40 mm, opening
+    4-34 mm): far above MAX_PLAUSIBLE_MARGIN_MM, so the entry carries a
+    `coverage_warning` while the frame still verifies and is written."""
+    rc, rec, files, scans, out, sc = _run_digitize({1: "film"}, frames="1")
+    assert rc == 0 and rec["status"] == "ok", rec
+    e1 = rec["per_frame"][0]
+    assert e1["coverage_verified"] is True and e1["main"], e1
+    assert "margin above" in e1["coverage_warning"], e1
+    print("test_digitize_wide_margin_is_flagged_not_failed OK")
+
+
 def test_digitize_empty_slot_stops_strip_after_film():
     kinds = {1: "film", 2: "film", 3: "empty", 4: "film"}
     rc, rec, files, scans, out, sc = _run_digitize(kinds)
@@ -1573,6 +1585,7 @@ def main() -> int:
         test_digitize_no_stop_at_empty_scans_all,
         test_digitize_ir_hidden_edge_verifies_via_ir,
         test_digitize_plain_path_records_empty_aperture,
+        test_digitize_wide_margin_is_flagged_not_failed,
         test_cal_data_written_next_to_sidecar,
         test_cal_data_flag_and_missing_data_write_nothing,
         test_resilient_stream_swallows_broken_pipe,

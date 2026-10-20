@@ -28,7 +28,8 @@ import numpy as np
 
 from of135i import aperture
 from of135i.aperture_crop import (ApertureCoverage, along_strip_profile, crop_to_aperture, measure_coverage,
-                                  measure_coverage_dual, film_presence)
+                                  measure_coverage_dual, film_presence, margin_warning,
+                                  MAX_PLAUSIBLE_MARGIN_MM)
 
 DPI = 600
 LINES_PER_MM = DPI / 25.4
@@ -70,6 +71,30 @@ def test_measure_coverage_clean_aperture_is_verified():
     assert coverage.leading_margin_mm > 0.15
     assert coverage.trailing_margin_mm > 0.15
     print("test_measure_coverage_clean_aperture_is_verified OK")
+
+
+def test_margin_warning_flags_a_shortened_opening_without_failing():
+    """A verified frame whose margin is far above the overscan the window
+    was sized for (telemetry max 1.10 mm) means the opening found is
+    shorter than the holder's -- a film end opaque to the measuring
+    channel. It is flagged, never turned into a coverage failure."""
+    plastic, lit = 800.0, 40000.0
+    n_ap = _aperture_lines()
+    wide = int(round(3.0 * LINES_PER_MM))       # 3 mm, above the 2 mm bound
+    ok = int(round(0.8 * LINES_PER_MM))         # 0.8 mm, a normal margin
+
+    cov = measure_coverage(_line_image([plastic] * wide + [lit] * n_ap + [plastic] * ok), dpi=DPI)
+    assert cov.verified
+    w = margin_warning(cov)
+    assert w and "leading" in w and "trailing" not in w, w
+    assert f"{MAX_PLAUSIBLE_MARGIN_MM:.1f} mm" in w
+
+    cov = measure_coverage(_line_image([plastic] * ok + [lit] * n_ap + [plastic] * ok), dpi=DPI)
+    assert cov.verified and margin_warning(cov) is None
+
+    cov = measure_coverage(_line_image([plastic] * 400), dpi=DPI)
+    assert not cov.verified and margin_warning(cov) is None
+    print("test_margin_warning_flags_a_shortened_opening_without_failing OK")
 
 
 def test_measure_coverage_clipped_leading_is_not_verified():
@@ -412,6 +437,7 @@ def main() -> int:
         test_measure_coverage_dual_falls_back_to_visible,
         test_measure_coverage_dual_both_fail_combines_reasons,
         test_film_presence_empty_vs_film,
+        test_margin_warning_flags_a_shortened_opening_without_failing,
     ]
     passed = skipped = 0
     for t in tests:

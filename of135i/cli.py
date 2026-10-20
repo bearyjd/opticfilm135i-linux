@@ -887,6 +887,16 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
                   f"frame is kept")
         return not fp.present
 
+    def _note_margin(cov) -> None:
+        """Flag (never fail) a verified frame whose margin is implausibly
+        wide -- the opening found is shorter than the holder's, e.g. a
+        film end opaque to the measuring channel (aperture_crop
+        MAX_PLAUSIBLE_MARGIN_MM). Recorded as `coverage_warning`."""
+        w = aperture_crop.margin_warning(cov)
+        if w:
+            _note("coverage_warning", w)
+            print(f"aperture coverage: WARNING — {w}", file=sys.stderr)
+
     from . import aperture_crop
     ir_file = None
     preview_file = None
@@ -933,6 +943,7 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         print(f"aperture coverage: VERIFIED (source: {coverage.source}) — "
               f"margins lead {coverage.leading_margin_mm:.3f} mm, trail "
               f"{coverage.trailing_margin_mm:.3f} mm")
+        _note_margin(coverage)
         if _note_film(visible, coverage):
             return None, None, None, bool(args.ir and not args.no_clean), coverage
         visible = aperture_crop.crop_to_aperture(visible, coverage, dpi=args.dpi)
@@ -960,6 +971,7 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         print(f"aperture coverage: VERIFIED — margins lead "
               f"{coverage.leading_margin_mm:.3f} mm, trail "
               f"{coverage.trailing_margin_mm:.3f} mm")
+        _note_margin(coverage)
         if _note_film(full, coverage):
             return None, None, None, False, coverage
         visible = aperture_crop.crop_to_aperture(full, coverage, dpi=args.dpi)
