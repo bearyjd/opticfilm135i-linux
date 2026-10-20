@@ -241,6 +241,61 @@ def measure_coverage_dual(visible, ir, *, dpi, min_margin_mm=0.15) -> ApertureCo
                    reason=f"IR: {cov_ir.reason}; visible: {cov_vis.reason}")
 
 
+@dataclass(frozen=True)
+class FilmPresence:
+    """Verdict from :func:`film_presence`: ``saturated_share`` is the
+    share of sampled pixels (inside the aperture) with all three channels
+    above the saturation code; ``present`` is False for an empty opening."""
+
+    present: bool
+    saturated_share: float
+
+
+def film_presence(image, coverage: ApertureCoverage, *, dpi, band=0.5,
+                  saturation_code=60000, empty_share=0.5, inset_mm=0.3,
+                  step=4) -> FilmPresence:
+    """Is there film in the verified aperture, or only open light?
+
+    Coverage checks the opening, not what is in it: an empty holder slot
+    passes it. In the raw frame an empty opening reads above
+    `saturation_code` in all three channels across its whole width, while
+    film (even unexposed base) never saturates blue through the orange
+    mask. Over the rows strictly inside the aperture (inset by `inset_mm`
+    at each edge, so the edge penumbra is excluded), over the central
+    `band` of the width (same convention as :func:`along_strip_profile`),
+    sampled every `step` rows and columns, this returns the share of
+    pixels with all three channels > `saturation_code`; present is
+    ``share < empty_share``.
+
+    A coverage without located edges, or an aperture too short for the
+    inset, cannot be judged: reported as present (share 0.0), never as
+    empty. Measure it on the array `coverage` was measured on.
+    """
+    arr = np.asarray(image)
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        raise ValueError(f"expected a (lines, width, channels>=3) image, got shape {arr.shape}")
+    if coverage.leading_line is None or coverage.trailing_line is None:
+        return FilmPresence(True, 0.0)
+    n_lines, width = arr.shape[0], arr.shape[1]
+    inset = inset_mm * dpi / MM_PER_INCH
+    lo = max(int(np.ceil(coverage.leading_line + inset)), 0)
+    hi = min(int(np.floor(coverage.trailing_line - inset)), n_lines - 1)
+    if hi < lo:
+        return FilmPresence(True, 0.0)
+
+    band = min(max(float(band), 0.0), 1.0)
+    half = width * band / 2.0
+    c0 = min(max(int(round(width / 2.0 - half)), 0), width)
+    c1 = min(max(int(round(width / 2.0 + half)), c0 + 1), width)
+    step = max(1, int(step))
+    sample = arr[lo:hi + 1:step, c0:c1:step, :3]
+    if sample.size == 0:
+        return FilmPresence(True, 0.0)
+    saturated = (sample > saturation_code).all(axis=2)
+    share = float(saturated.mean())
+    return FilmPresence(share < empty_share, share)
+
+
 def crop_to_aperture(image, coverage: ApertureCoverage, *, dpi, pad_mm=0.0) -> np.ndarray:
     """Return image cropped along axis 0 to [leading, trailing] (+/- pad),
     clamped to the image. Deterministic. Raises ValueError if

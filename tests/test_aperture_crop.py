@@ -28,7 +28,7 @@ import numpy as np
 
 from of135i import aperture
 from of135i.aperture_crop import (ApertureCoverage, along_strip_profile, crop_to_aperture, measure_coverage,
-                                  measure_coverage_dual)
+                                  measure_coverage_dual, film_presence)
 
 DPI = 600
 LINES_PER_MM = DPI / 25.4
@@ -366,6 +366,34 @@ def test_measure_coverage_dual_both_fail_combines_reasons():
     print("test_measure_coverage_dual_both_fail_combines_reasons OK")
 
 
+def test_film_presence_empty_vs_film():
+    n_ap = _aperture_lines()
+    n = 100 + n_ap + 100
+    empty = np.full((n, WIDTH, 3), 800, dtype="<u2")
+    empty[100:100 + n_ap] = 65000
+    cov = measure_coverage(empty, dpi=DPI)
+    assert cov.verified
+    fp = film_presence(empty, cov, dpi=DPI)
+    assert not fp.present and fp.saturated_share > 0.9, fp
+
+    film = empty.copy()
+    film[100:100 + n_ap] = 40000
+    film[150:154, 90:96, :] = 65000            # a few saturated specks
+    cov = measure_coverage(film, dpi=DPI)
+    assert cov.verified
+    fp = film_presence(film, cov, dpi=DPI)
+    assert fp.present and fp.saturated_share < 0.05, fp
+    # Saturated in only some channels is still film (blue never saturates).
+    mixed = empty.copy()
+    mixed[100:100 + n_ap, :, 2] = 20000
+    fp = film_presence(mixed, measure_coverage(mixed, dpi=DPI), dpi=DPI)
+    assert fp.present and fp.saturated_share == 0.0, fp
+    # Edges outside the inset are excluded: plastic rows never count.
+    unlocated = ApertureCoverage(False, None, None, None, None, "x", 0.0)
+    assert film_presence(film, unlocated, dpi=DPI).present
+    print("test_film_presence_empty_vs_film OK")
+
+
 def main() -> int:
     tests = [
         test_measure_coverage_clean_aperture_is_verified,
@@ -383,6 +411,7 @@ def main() -> int:
         test_measure_coverage_dual_ir_first_when_visible_hides_edge,
         test_measure_coverage_dual_falls_back_to_visible,
         test_measure_coverage_dual_both_fail_combines_reasons,
+        test_film_presence_empty_vs_film,
     ]
     passed = skipped = 0
     for t in tests:

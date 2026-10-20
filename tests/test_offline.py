@@ -809,6 +809,162 @@ def test_digitize_records_partial_frame_progress():
     print("test_digitize_records_partial_frame_progress OK")
 
 
+# ------------------------------------------- digitize: film presence / stop
+
+
+def _dual_frame_raw(kind, dpi=600, W=8):
+    """Alternating IR/visible raw for one digitize frame: a lit aperture
+    between dark plastic. kind "film": visible 40000 with a few saturated
+    specks; "empty": visible fully saturated (open light); "hidden": film
+    content hides the edge in the visible channel (flat dark) while IR
+    still shows the opening."""
+    lpm = dpi / 25.4
+    n = int(round(40 * lpm))
+    a, b = int(round(4 * lpm)), int(round(34 * lpm))
+    ir_col = np.full(n, 800, dtype=np.uint16)
+    ir_col[a:b] = 40000
+    vis = np.repeat(ir_col[:, None], W, axis=1)
+    if kind == "empty":
+        vis[a:b, :] = 65000
+        ir_col[a:b] = 65000
+    elif kind == "film":
+        vis[a + 10:a + 12, 2:4] = 65000
+    elif kind == "hidden":
+        vis[:, :] = 800
+    ir = np.repeat(ir_col[:, None], W, axis=1)
+    inter = np.empty((n * 2, W), dtype=np.uint16)
+    inter[0::2] = ir
+    inter[1::2] = vis
+    return np.repeat(inter[:, :, None], 3, axis=2).astype("<u2").tobytes(), W
+
+
+def _run_digitize(kinds, frames="1-4", **flags):
+    """Drive _cmd_digitize with a fake scanner whose frame N returns
+    kinds[N]. Returns (rc, manifest record, roll dir, scan-call list,
+    captured stdout)."""
+    import argparse
+    import contextlib
+    import io
+    from of135i import cli, digitize
+
+    scans: list = []
+
+    class _FakeScanner:
+        park_mode = "verbatim"
+        warmup_budget_s = 60.0
+        last_diag = {"gain_codes": [1, 2, 3], "offset_codes": [4, 5, 6],
+                     "dark_b_substituted": False, "calibration": "fresh"}
+
+        def check_start_state(self): pass
+        def is_magazine_present(self): return True
+        def initialize(self, ir, dpi): pass
+        def scan(self, frame, ir=None, dpi=None):
+            scans.append(frame)
+            return _dual_frame_raw(kinds[frame]) + (None,)
+        def eject(self): scans.append("eject")
+
+    with tempfile.TemporaryDirectory() as d:
+        args = argparse.Namespace(
+            out=d, prefix="", roll=1, force=True, assume_loaded=True,
+            dpi=600, positive=False, rotate=0, ir=True, no_clean=True,
+            no_diag=False, park="verbatim", warmup_budget=None, frames=frames,
+            **flags)
+        orig = cli._run_writing_session
+        cli._run_writing_session = lambda body: body(_FakeScanner())
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = cli._cmd_digitize(args)
+        finally:
+            cli._run_writing_session = orig
+        rdir = digitize.roll_dir(d, "", 1)
+        rec = digitize.read_manifest(d)[-1]
+        files = sorted(p.name for p in rdir.iterdir())
+        sidecars = {}
+        for p in rdir.glob("*.diag.json"):
+            import json
+            sidecars[p.name] = json.loads(p.read_text())
+        return rc, rec, files, scans, buf.getvalue(), sidecars
+
+
+def test_digitize_empty_slot_stops_strip_after_film():
+    kinds = {1: "film", 2: "film", 3: "empty", 4: "film"}
+    rc, rec, files, scans, out, sc = _run_digitize(kinds)
+    assert rc == 0, rc
+    assert rec["status"] == "ok", rec
+    assert scans == [1, 2, 3, "eject"], scans       # frame 4: no hardware work
+    assert rec["skipped_frames"] == [4] and rec["stop_reason"] == "empty aperture at frame 3"
+    assert rec["frames"] == [1, 2, 3, 4]
+    assert [e["frame"] for e in rec["per_frame"]] == [1, 2, 3]
+    e1, e3 = rec["per_frame"][0], rec["per_frame"][2]
+    assert e1["film_present"] is True and e1["saturated_share"] < 0.05, e1
+    assert e1["coverage_source"] == "ir" and e1["main"].endswith("f1.tiff")
+    assert e3["film_present"] is False and e3["saturated_share"] > 0.9, e3
+    assert e3["coverage_verified"] is True and e3["coverage_reason"] == "empty aperture"
+    assert e3["main"] is None and e3["ir"] is None and e3["preview"] is None
+    assert "f3.tiff" not in files and "f3-ir.tiff" not in files
+    assert "f3.overscan.tiff" in files and "f3-ir.overscan.tiff" in files
+    assert "f1.tiff" in files and "f4.overscan.tiff" not in files
+    assert sc["f3.diag.json"]["film"]["present"] is False
+    assert sc["f3.diag.json"]["coverage"]["reason"] == "empty aperture"
+    assert sc["f3.diag.json"]["coverage"]["verified"] is True
+    assert sc["f1.diag.json"]["film"]["present"] is True
+    assert sc["f1.diag.json"]["coverage"]["source"] == "ir"
+    assert "EMPTY" in out
+    print("test_digitize_empty_slot_stops_strip_after_film OK")
+
+
+def test_digitize_empty_first_slot_does_not_stop():
+    kinds = {1: "empty", 2: "film", 3: "film", 4: "film"}
+    rc, rec, files, scans, out, sc = _run_digitize(kinds)
+    assert rc == 0 and rec["status"] == "ok", (rc, rec)
+    assert scans == [1, 2, 3, 4, "eject"], scans
+    assert "skipped_frames" not in rec and "stop_reason" not in rec
+    assert "f1.tiff" not in files and "f2.tiff" in files
+    print("test_digitize_empty_first_slot_does_not_stop OK")
+
+
+def test_digitize_no_stop_at_empty_scans_all():
+    kinds = {1: "film", 2: "film", 3: "empty", 4: "film"}
+    rc, rec, files, scans, out, sc = _run_digitize(kinds, no_stop_at_empty=True)
+    assert rc == 0 and scans == [1, 2, 3, 4, "eject"], (rc, scans)
+    assert "skipped_frames" not in rec and "f4.tiff" in files
+    print("test_digitize_no_stop_at_empty_scans_all OK")
+
+
+def test_digitize_ir_hidden_edge_verifies_via_ir():
+    rc, rec, files, scans, out, sc = _run_digitize(
+        {1: "hidden"}, frames="1")
+    e = rec["per_frame"][0]
+    assert e["coverage_verified"] is True and e["coverage_source"] == "ir", e
+    print("test_digitize_ir_hidden_edge_verifies_via_ir OK")
+
+
+def test_digitize_plain_path_records_empty_aperture():
+    import argparse
+    import os
+    from of135i import cli
+    dpi, W = 3600, 8
+    lpm = dpi / 25.4
+    n = int(round(34 * lpm))
+    a, b = int(round(3 * lpm)), int(round(29 * lpm))
+    col = np.full(n, 800, dtype=np.uint16)
+    col[a:b] = 65000
+    arr = np.repeat(np.repeat(col[:, None], W, axis=1)[:, :, None], 3, axis=2)
+    raw = arr.astype("<u2").tobytes()
+    args = argparse.Namespace(dpi=dpi, ir=False, no_clean=True, rotate=0, positive=False)
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "f1.tiff")
+        progress: dict = {}
+        main, irf, prev, cleaned, cov = cli._finish_digitize_frame(
+            args, raw, W, out, dual=False, progress=progress)
+        assert cov.verified and cov.source == "visible", cov
+        assert main is None and not os.path.exists(out)
+        assert os.path.exists(cli._overscan_raw_path(out))
+        assert progress["film_present"] is False and progress["saturated_share"] > 0.9
+    print("test_digitize_plain_path_records_empty_aperture OK")
+
+
 # ------------------------------------------------ SANE port (stage 2 tables)
 
 
@@ -1253,6 +1409,11 @@ def main() -> int:
         test_loadflow_next_strip_refuses_when_cold,
         test_loadflow_next_strip_feed_not_engaged_names_full_load,
         test_cli_load_next_strip_excludes_release_and_double_jog,
+        test_digitize_empty_slot_stops_strip_after_film,
+        test_digitize_empty_first_slot_does_not_stop,
+        test_digitize_no_stop_at_empty_scans_all,
+        test_digitize_ir_hidden_edge_verifies_via_ir,
+        test_digitize_plain_path_records_empty_aperture,
         test_sane_tables_generated_and_current,
         test_sane_tables_injections_land_on_value_bytes,
         test_holder_geometry_measures_a_synthetic_holder,

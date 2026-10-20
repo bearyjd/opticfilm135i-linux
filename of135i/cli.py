@@ -752,7 +752,7 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
 
 
 def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
-                        frame: int, coverage=None) -> None:
+                        frame: int, coverage=None, film=None) -> None:
     """Write <out>'s .diag.json sidecar from scanner.last_diag (see
     diag.py/device.py) unless --no-diag was given, and log a one-line
     INFO summary of the per-frame calibration/health counters.
@@ -776,6 +776,12 @@ def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
             "trailing_margin_mm": coverage.trailing_margin_mm,
             "source": getattr(coverage, "source", "visible"),
         }
+        if film is not None:
+            # digitize only: film presence inside the verified aperture.
+            sidecar["film"] = {"present": bool(film["present"]),
+                               "saturated_share": film["saturated_share"]}
+            if not film["present"]:
+                sidecar["coverage"]["reason"] = "empty aperture"
     sidecar["cli"] = {
         "frame": frame,
         "frames": args.frames,
@@ -850,11 +856,25 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         if progress is not None:
             progress[key] = value
 
+    def _note_film(arr, cov) -> bool:
+        """Film presence on the array coverage was measured on; records
+        it in `progress` and returns True when the aperture is empty
+        (no product is then written; the overscan frame already is)."""
+        fp = aperture_crop.film_presence(arr, cov, dpi=args.dpi)
+        _note("film_present", fp.present)
+        _note("saturated_share", fp.saturated_share)
+        if not fp.present:
+            print(f"aperture EMPTY — no film in this opening "
+                  f"({fp.saturated_share:.1%} of sampled pixels saturated in "
+                  f"all channels); no main negative written, the overscan "
+                  f"frame is kept")
+        return not fp.present
+
+    from . import aperture_crop
     ir_file = None
     preview_file = None
     coverage = None
     if dual:
-        from . import aperture_crop
         visible, ir = image.split_ir(raw, width=width, dpi=args.dpi)
         _shift = round(24 * args.dpi / 7200)
         visible = image.align_channels(visible, dpi=args.dpi)
@@ -896,10 +916,11 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         print(f"aperture coverage: VERIFIED (source: {coverage.source}) — "
               f"margins lead {coverage.leading_margin_mm:.3f} mm, trail "
               f"{coverage.trailing_margin_mm:.3f} mm")
+        if _note_film(visible, coverage):
+            return None, None, None, bool(args.ir and not args.no_clean), coverage
         visible = aperture_crop.crop_to_aperture(visible, coverage, dpi=args.dpi)
         ir = aperture_crop.crop_to_aperture(ir, coverage, dpi=args.dpi)
     else:
-        from . import aperture_crop
         full = image.align_channels(image.assemble(raw, width), dpi=args.dpi)
         coverage = aperture_crop.measure_coverage(full, dpi=args.dpi)
         # Preserve the full overscan frame regardless of the verdict
@@ -922,6 +943,8 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         print(f"aperture coverage: VERIFIED — margins lead "
               f"{coverage.leading_margin_mm:.3f} mm, trail "
               f"{coverage.trailing_margin_mm:.3f} mm")
+        if _note_film(full, coverage):
+            return None, None, None, False, coverage
         visible = aperture_crop.crop_to_aperture(full, coverage, dpi=args.dpi)
         del full
         ir = None
@@ -1070,7 +1093,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             print("error: no magazine detected after load", file=sys.stderr)
             return 1
         incomplete: list[int] = []
-        for frame in dig_frames:
+        seen_film = False
+        for idx, frame in enumerate(dig_frames):
             scanner.initialize(ir=dual, dpi=args.dpi)
             out = str(digitize.frame_path(args.out, args.prefix, roll, frame))
             log.info("scanning frame %d @ %d dpi%s", frame, args.dpi,
@@ -1091,21 +1115,46 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             main, irf, prev, cleaned, cov = _finish_digitize_frame(
                 args, raw, width, out, dual, progress=entry)
             entry.update(main=main, ir=irf, preview=prev, dust_cleaned=cleaned)
+            film = None
             if cov is not None:
                 entry["coverage_verified"] = bool(cov.verified)
                 entry["coverage_reason"] = cov.reason
                 entry["coverage_source"] = cov.source
                 if not cov.verified:
                     incomplete.append(frame)
+                elif "film_present" in entry:
+                    film = {"present": entry["film_present"],
+                            "saturated_share": entry["saturated_share"]}
+                    if not film["present"]:
+                        # Not a coverage failure: the opening was captured
+                        # whole, there is just nothing in it.
+                        entry["coverage_reason"] = "empty aperture"
             del raw
             entry["stage"] = "diag"
-            _write_diag_sidecar(args, scanner, out, frame, coverage=cov)
+            if film is not None:
+                _write_diag_sidecar(args, scanner, out, frame, coverage=cov, film=film)
+            else:
+                _write_diag_sidecar(args, scanner, out, frame, coverage=cov)
             d = scanner.last_diag or {}
             entry.update(stage=None,
                          calibration=d.get("calibration"),
                          gain_codes=d.get("gain_codes"),
                          offset_codes=d.get("offset_codes"),
                          dark_b_substituted=d.get("dark_b_substituted"))
+            if film is not None:
+                if film["present"]:
+                    seen_film = True
+                elif seen_film and not getattr(args, "no_stop_at_empty", False):
+                    # Empty aperture after film in this strip: the strip has
+                    # ended; skip the rest (no hardware work), still eject.
+                    skipped = list(dig_frames[idx + 1:])
+                    if skipped:
+                        record["skipped_frames"] = skipped
+                        record["stop_reason"] = f"empty aperture at frame {frame}"
+                        print(f"stopping: empty aperture at frame {frame} after film; "
+                              f"skipping frame(s) {', '.join(map(str, skipped))} "
+                              f"(--no-stop-at-empty scans them anyway)")
+                    break
         scanner.eject()
         print("ejected")
         if incomplete:
@@ -1406,6 +1455,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_dig.add_argument("--no-ir", dest="ir", action="store_false",
         help="skip the IR pass and dust removal (non-3600 profiles still "
              "run a dual-light capture; only the IR output is dropped)")
+    p_dig.add_argument("--no-stop-at-empty", action="store_true",
+                       help="scan every requested frame even after an empty "
+                            "aperture that follows film (default: the strip "
+                            "has ended, the remaining frames are skipped)")
     p_dig.add_argument("--no-clean", action="store_true",
         help="skip IR-based dust/scratch removal on the visible image")
     p_dig.add_argument("--no-diag", action="store_true",
