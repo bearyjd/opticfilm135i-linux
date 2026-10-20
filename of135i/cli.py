@@ -1763,7 +1763,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_dig.add_argument("--force", action="store_true",
         help="scan even if this roll already has files on disk or is "
              "recorded done; clears the roll's previous f*.tiff/.diag.json "
-             "first so the dir is not a mix of two runs")
+             "first so the dir is not a mix of two runs (--film 110: "
+             "both placements' files and the image<N> photographs)")
     p_dig.add_argument("--frames", default="1-4", metavar="SPEC",
         help=f"which frames of the strip to scan, e.g. 1-4 (default), "
              f"1-6 for a full-length strip, or 1,3-4. The holder holds "

@@ -79,8 +79,9 @@ corrects.
 ## 5. Numbering and image identity
 
 An image's number is its **position on the strip**, derived from where
-it was found and which placement the operator declared with
-`--placement A|B` (required with `--film 110`):
+it was found and which placement the strip is in — given with
+`--placement A|B`, or, when it is not given, **inferred from the first
+numbered image's position** (below):
 
     position  = (aperture − 1) × 37.947 mm + image start inside the aperture
     number    = round((position − phase) / 25.5 mm) + 1
@@ -111,7 +112,24 @@ visual placement rule of §3 has ample slack, and a 0.3 mm pitch error
 per frame (this strip's pitch is n = 1) would take ~20 frames to reach
 it.
 
-Rules, all enforced by the CLI (`_film110_hook`):
+**Inferred placement.** The two phases are 12.75 mm apart on a 25.5 mm
+film pitch, so the data itself says which placement a strip is in:
+`film110.infer_placement` computes the position residual against A's and
+B's phase grid and returns the closer one. A residual above
+`PLACEMENT_INFER_TOLERANCE_MM` (4.0 mm; the farthest an image can be from
+both is 6.4 mm, midway at about 9.9 mm) is *ambiguous*: that image is
+refused ("lies between the two placements' phases (A off by …, B off by …)
+-> give --placement A or B"), nothing is written for it, and the next image
+may still decide. The first numbered image decides for the whole command;
+every later image is checked against that placement exactly as below. An
+explicit `--placement` is the override: it is never second-guessed by the
+inference, and an image off its phase is still refused. The decided
+placement is printed on the deciding aperture's line ("placement A
+(inferred)" / "(given)") and reported by `scan` in a summary line and by
+`digitize` in the roll record (§11).
+
+Rules, all enforced by the CLI (`_film110_process_aperture`, shared by
+`scan` and `digitize`):
 
 - A whole image and a trailing split (an image running under the next
   bar) are numbered; a leading split (the tail of the previous aperture's
@@ -133,11 +151,11 @@ Rules, all enforced by the CLI (`_film110_hook`):
 - The detector's per-aperture `FrameFind.index` stays what it is — the
   order within that aperture — and is not the strip number.
 
-**What is not implemented and is not planned:** no session or manifest
-ties A and B together; the identity is the number, the pairing is the
-operator's two stems, and choosing the final product per photograph is
-the operator's step (sag rule, §4). `digitize --film 110` (§10) would be
-the place for that, once 110 has passed Test 87.
+**`scan` does not tie A and B together:** the identity is the number, the
+pairing is the operator's two stems, and choosing the final product per
+photograph is the operator's step (sag rule, §4). `digitize --film 110`
+(§11) is the integrated route: one roll directory, one product per
+photograph, the sag rule applied automatically.
 
 ## 6. Commands
 
@@ -158,8 +176,8 @@ of135i scan --frames <whole-image-apertures> --dpi 3600 --ir --film 110 --placem
 of135i scan --frames <whole-image-apertures> --dpi 3600 --ir --film 110 --placement B --eject -o b.tiff
 ```
 
-`--placement` is required with `--film 110` and refused without it. The
-products are then `a-image1.tiff`, `a-image3.tiff`, `a-image4.tiff`,
+`--placement` is optional with `--film 110` (inferred from the first image,
+§5) and refused without it. The products are then `a-image1.tiff`, `a-image3.tiff`, `a-image4.tiff`,
 `b-image2.tiff`, `b-image4.tiff`, … — the number is the photograph (§5),
 the stem is the placement.
 
@@ -178,6 +196,9 @@ aperture, it writes:
   registered — the dual scan path already guarantees this on the shared
   grid dust removal runs on).
 
+`digitize --film 110` writes its photographs differently (`image<N>.tiff`
+in the roll directory, §11).
+
 A **split** image is reported (which bar, and "take it in placement B"
 / "A") but no file is written for it — the aperture product and
 overscan remain the only record, exactly as an unverified-coverage frame
@@ -188,6 +209,15 @@ off the declared placement's phase is **never numbered** — both are
 reported on the aperture line and make the command exit 5 (§5). The
 aperture product and the overscan are written regardless, so a refused
 110 product loses nothing that was scanned.
+
+Integrated route (§11): two runs, one load each, into the same roll
+directory; the placement is inferred, the products are `image<N>.tiff`:
+
+```
+of135i digitize --out ~/scans/boxA --film 110            # placement A
+# re-seat the strip (§3, placement B), then, same roll:
+of135i digitize --out ~/scans/boxA --film 110 --roll 1   # placement B
+```
 
 ## 8. How the detector reads an aperture
 
@@ -398,6 +428,94 @@ are kept beside them as evidence.
 - **Positive (slide) 110 film and B&W 110** are untested; the detector
   works on light levels, the IR clean path assumes a dye-image negative
   as for 135.
-- **`digitize` integration is deferred** (its roll/manifest model assumes
-  one frame per aperture and one load per strip; 110 needs two loads per
-  strip) — docs/film-110-proposal.md §3.3.
+- **Placement inference is one operator's phases, n = 2 strips.** A strip
+  seated 4–9 mm off both phases (visibly "between" A and B) is refused, not
+  guessed; give `--placement`. A strip seated so far off that it lands near
+  the *other* phase is inferred as that placement — the numbering is then
+  consistent with where the strip actually is, which is what matters, but
+  the advice "take it in the other placement" refers to the inferred one.
+- **`digitize --film 110` is offline-tested only** (synthetic apertures
+  through the real command with a fake scanner); the hardware check is
+  Test 102 (§11). Its limits: no mid-run resume, a failed run of one
+  placement can only be redone with `--force` (which clears both
+  placements), and the diag sidecar of a frame written under the provisional
+  stem keeps that stem in its own `output` field. The empty-aperture stop
+  rule and `--no-stop-at-empty` are the 135 ones.
+
+## 11. `digitize --film 110` — the two-run roll
+
+*Implemented offline 2026-10-21; hardware check pending (Test 102).*
+
+A 110 strip takes two placements (§3), so a roll takes two `digitize`
+runs. Both write into the **same** roll directory; the first run picks the
+roll number as usual, the second names it with `--roll N`. Each run is
+what `digitize` always is — one load, `--frames` (default 1-4), eject —
+and uses the same pipeline, coverage, film-presence check, overscan files,
+diag and `cal.npz`; the 110 detector then runs on each verified,
+aperture-registered crop (one detector call per aperture, the same
+detection, inference, numbering and cropping code as `scan --film 110`).
+
+**Files.** Frame files carry the placement as a prefix so the runs cannot
+collide: `a-f1.tiff`, `a-f1-ir.tiff`, `a-f1.overscan.tiff`,
+`a-f1-ir.overscan.tiff`, `a-f1.diag.json`, `a-f1.cal.npz`,
+`a-f1-preview.tiff` (`b-f…` for placement B). The **photographs** are
+`image<N>.tiff` and `image<N>-ir.tiff` (with `--ir`), N = position on the
+strip (§5), one file per photograph for the whole roll, written only for
+WHOLE images, cropped and padded like `scan`'s, oriented like the frame's
+main negative (rotated if asked, never inverted).
+
+**Provisional stem.** When `--placement` is not given, the placement is
+known only after the first numbered image is detected, which happens while
+the frame's files are being written. Until then a frame is written under the
+stem `x-f<N>`; as soon as a frame decides the placement, every `x-` frame so
+far is renamed (`digitize.rename_film110_frame`, called in one place in the
+command, before the next frame is scanned). If the run ends with nothing
+found anywhere (every aperture empty, or only ambiguous images) the files
+keep the `x-` stem and the record says `placement: null`. The `.diag.json`
+written for a frame under the provisional stem keeps that stem in its own
+`output` field; it is not rewritten. A frame whose own detection decides the
+placement is renamed before its sidecar is written, so its sidecar is right.
+
+**Never overwritten, one exception.** An existing `image<N>.tiff` is kept
+(recorded on the image entry as `refused`, and listed in the roll's
+`problems`; the exit code stays 0). The exception is the sag rule (§4): when
+the manifest — or this run — shows the existing copy was delivered with
+`free_end_near: true` and the new one is not, the supported copy replaces
+it and the entry says `replaced_free_end_copy: true`. Everything the scan
+hook refuses (an image off the placement's phase, an ambiguous one) is also
+refused here, recorded per image, never a failure of the roll.
+
+**Roll record** (a line in `manifest.jsonl`, per run), in addition to the
+usual fields:
+
+| Field | Meaning |
+|---|---|
+| `film` | `"110"` |
+| `placement` | `"A"`, `"B"` or `null` (nothing decided it) |
+| `placement_given` | true when `--placement` was passed |
+| `images` | one entry per numbered image: `number`, `aperture`, `whole`, `split` (`null`/`"trailing"`), `free_end_near`, `main`, `ir` (paths, `null` when not written), `size_mm` (`[along, lateral]` for whole images, else `null`), `replaced_free_end_copy`, and `refused` (only when nothing was written) |
+| `problems` | the refusal messages of this run |
+| `advice` | `{"other_placement": "B", "images": [2, 5]}`: the numbers split in this placement that no run has delivered yet, i.e. to be taken in the other placement; `images` is empty when nothing is missing |
+
+`per_frame` entries are as for 135 (they describe apertures).
+
+**Guard and resume.** The second run on a roll is accepted without
+`--force` when the directory holds only the *other* placement's files (or
+provisional `x-` files) and the roll's last manifest record is a 110 run.
+The same placement twice is refused before any hardware (exit 2) with a
+message naming it; if the placement is not given and the strip reads as one
+the roll already holds, the run stops at the deciding frame, ejects, exits
+5, records the roll failed, and overwrites nothing. A roll with output that
+is not a recorded 110 run is refused as for 135. `--force` clears both
+placements' files and the photographs (exact names only) and redoes the
+roll. `digitize.roll_is_done` for a 110 roll: the last record is `ok`,
+found a placement and has an empty `advice.images`, or both placements
+have an `ok` record; a run that found nothing is not done. `next_roll` is
+unchanged — a new strip is a new roll.
+
+**Test 102 (hardware, pending):** a 110 strip through the two runs with
+`--film 110` and no `--placement`; expected: placement inferred correctly
+in both, `image<N>.tiff` for every photograph exactly once, the free-end
+copy of the last image replaced by the B copy, `advice` right after run A
+and empty after run B, `film110_check.py --edge-check` clean on the
+products.

@@ -4,6 +4,24 @@ Notable changes to the Plustek OpticFilm 135i Linux driver and its SANE
 backend port. Entries name the hardware evidence (docs/test-log.md) where
 one exists; "offline" means implemented and tested without the scanner.
 
+## Unreleased
+
+- `digitize --film 110` (offline; hardware check pending, Test 102): a 110
+  strip is digitised as a two-run roll — one run per placement into the same
+  roll directory. Frame files carry the placement (`a-f1.tiff`, `b-f1.tiff`;
+  provisional `x-` stem until an inferred placement is decided), every whole
+  photograph is written once as `image<N>.tiff` (+ `-ir.tiff`) by strip
+  position, never overwritten except a free-end copy by the supported one
+  (sag rule). The roll record gains `film`, `placement`, `placement_given`,
+  `images`, `problems` and `advice`; the second run is accepted without
+  `--force`, the same placement twice is refused before hardware,
+  `roll_is_done` knows the protocol. `tests/test_film110_digitize.py`.
+- 110 placement is inferred (offline; hardware check pending):
+  `--placement` is optional with `--film 110` on `scan` and `digitize`; the
+  first numbered image decides (`film110.infer_placement`, an image more than
+  4.0 mm from both phases is refused with a request to give it); an explicit
+  `--placement` still overrides and still refuses off-phase images.
+
 ## v0.2.5 — 2026-10-20
 
 - Non-strict polls (production telemetry 2026-09/10, 652 frames;

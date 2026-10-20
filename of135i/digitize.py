@@ -15,6 +15,11 @@ Layout::
     <out>/<prefix>roll-<NNN>/f<K>-ir.tiff  IR channel
     <out>/<prefix>roll-<NNN>/f<K>.diag.json
 
+A 110 roll (``--film 110``, docs/film-110.md §11) takes two runs into the
+same directory: ``<p>-f<K>.tiff`` (+ sidecars) per placement ``p`` (``a``,
+``b``, or the provisional ``x`` until an inferred placement is decided) and
+one ``image<N>.tiff`` / ``image<N>-ir.tiff`` per photograph.
+
 Raw (unclipped, un-inverted) TIFF is the archival product; colour
 interpretation is the application's job. The manifest makes the run
 auditable (per-frame gain/offset, dark_b substitution flag, status) and

@@ -818,9 +818,13 @@ Image-side only: no motor, wait, calibration or geometry change
    then at or outside the independently measured foot; owner's eye:
    whole picture present on all four, a little overscan).
 3. README says "supported", with n = 2 stated — **DONE 2026-09-20**.
+4. `digitize --film 110` + inferred placement — **implemented offline
+   2026-10-21, hardware check pending (Test 102).** `--placement` is
+   optional (inferred from the first image's position); a strip is a
+   two-run roll with one `image<N>.tiff` per photograph and the sag rule
+   applied automatically (`docs/film-110.md` §11).
 
-Not in scope: a 110 FEEDL grid, 126 Instamatic, holder-ID detection,
-`digitize --film 110` (follow-up once 2 passes).
+Not in scope: a 110 FEEDL grid, 126 Instamatic, holder-ID detection.
 
 ## Candidates, not scheduled (2026-09-13)
 
