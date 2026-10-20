@@ -6,7 +6,22 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
-Nothing yet.
+- Dual (IR) paths measure aperture coverage on the IR channel first and on
+  the visible frame only if IR does not verify
+  (`aperture_crop.measure_coverage_dual`, `ApertureCoverage.source`);
+  recorded as `coverage_source` in the manifest and `coverage.source` in
+  the diag sidecar (offline; production telemetry 2026-09/10, 711 frames).
+- `digitize` detects an empty aperture (`aperture_crop.film_presence`):
+  only the overscan files are written, the entry records
+  `film_present: false`, and the strip stops after an empty frame that
+  follows film (`skipped_frames`, `stop_reason`; `--no-stop-at-empty`
+  scans all) (offline; production telemetry 2026-09/10, 711 frames).
+- Per-pixel calibration data is exported as `<stem>.cal.npz` next to the
+  diag sidecar (`Scanner.last_cal_data`; `--no-cal-data` on `scan` and
+  `digitize`) (offline; production telemetry 2026-09/10, 711 frames).
+- Console output can no longer abort a command: stdout/stderr are wrapped
+  so a closed pipe is swallowed instead of raising `BrokenPipeError`
+  mid-scan (offline; production telemetry 2026-09/10, 711 frames).
 
 ## v0.2.3 — 2026-10-16
 Submission revision v8 on the merge request: the SANE backend no longer takes a process lock, bench-only names are gone from the backend, and the `.desc` status is `:basic`. No change to anything sent to the scanner. See [docs/release-notes-v0.2.3.md](docs/release-notes-v0.2.3.md).
