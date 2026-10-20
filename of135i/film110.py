@@ -901,3 +901,54 @@ def infer_placement(aperture: int, line0: float, dpi: float,
     if abs(residual) > PLACEMENT_INFER_TOLERANCE_MM:
         return None, residual
     return placement, residual
+
+
+# ------------------------------------------------------------ two strips
+#
+# `digitize --film 110 --strips 2` (docs/film-110.md §12) loads two 110
+# strips side by side in the six-aperture holder: slot 1 = apertures 1-3,
+# slot 2 = apertures 4-6. Slot 1 is numbered exactly like a lone strip
+# (`image_number`, phase from the holder's left end). Slot 2's strip lies
+# against the holder's RIGHT end, so its start depends on the strip's
+# length and leader: its numbering is anchored by the data instead -- its
+# first numbered image is image 1, every later one is numbered by its
+# distance from that one in film pitches (`image_number_anchored`).
+# Nothing here assumes which lateral rail a strip lies against.
+SLOT_APERTURES = 3
+# An image cannot start before the film does; an image predicted this far
+# before a free film start (px_per_mm * mm) is a hole's ghost, not an image.
+FILM_START_TOLERANCE_MM = 1.0
+
+
+def slot_of(aperture: int, strips: int = 1) -> int:
+    """1-based slot of a holder aperture: always 1 when `strips == 1`;
+    with two strips, apertures 1-3 are slot 1 and 4-6 slot 2."""
+    if strips <= 1:
+        return 1
+    return (aperture - 1) // SLOT_APERTURES + 1
+
+
+def slot_apertures(slot: int) -> range:
+    """The holder apertures of a slot (two-strip loads)."""
+    first = (slot - 1) * SLOT_APERTURES + 1
+    return range(first, first + SLOT_APERTURES)
+
+
+def global_position_mm(aperture: int, line0: float, dpi: float,
+                       holder=STRIP) -> float:
+    """`line0` (px, aperture-registered) as a position in mm from
+    aperture 1's start along the holder's own aperture grid -- the same
+    coordinate `image_number` works in."""
+    return (aperture - 1) * holder.pitch_mm + line0 / (dpi / MM_PER_INCH)
+
+
+def image_number_anchored(line0_mm_global: float, anchor_mm: float,
+                          film: Film = FILM_110) -> tuple:
+    """Number (1-based) and phase residual in mm (signed, |r| <= pitch/2)
+    of the image starting at `line0_mm_global`, counted from the image
+    that starts at `anchor_mm` (image 1). The anchor itself is (1, 0.0).
+    A number < 1 means the image lies before the anchor; the caller
+    refuses it. Pure."""
+    k = (line0_mm_global - anchor_mm) / film.pitch_mm
+    n = round(k) + 1
+    return n, (k - round(k)) * film.pitch_mm

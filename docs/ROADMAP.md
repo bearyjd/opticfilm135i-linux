@@ -823,6 +823,11 @@ Image-side only: no motor, wait, calibration or geometry change
    optional (inferred from the first image's position); a strip is a
    two-run roll with one `image<N>.tiff` per photograph and the sag rule
    applied automatically (`docs/film-110.md` §11).
+5. `digitize --film 110 --strips 2`: two strips of up to four images in
+   one load (strip 1 left, strip 2 right), two rolls per run, slot 2
+   numbered from its first detected image — **implemented offline
+   2026-10-21, hardware check pending (Test 103)** (`docs/film-110.md`
+   §12).
 
 Not in scope: a 110 FEEDL grid, 126 Instamatic, holder-ID detection.
 
