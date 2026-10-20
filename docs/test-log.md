@@ -7001,3 +7001,86 @@ the four sidecars.
 and the sidecars go into the analysis area.
 
 **Result.** Not run.
+
+### Test 101: first production series on the production-feedback code — ten strips, the calibration-path speck, the white-dip guard (2026-10-20)
+
+**What ran.** The production project scanned a complete roll (Kodak
+Gold 200, ten strips of four frames, edge numbers 36 down to 0) with the
+driver on the `production-feedback` branch as it stood before the two
+later commits of the day (IR-first coverage, film presence with the 0.5
+threshold, calibration export, resilient console): `of135i digitize
+--frames 1-4 --dpi 3600 --no-clean`, one cold-start load, then nine
+`load --next-strip` loads without a jog, no power cycle, about 4.7 min
+per strip. The driver repository's working tree was not touched during
+the series. The strips' sidecars, manifests and `cal.npz` exports were
+read afterwards (read-only); the production copies stay in the
+production project.
+
+**Result: PASS, with two findings that changed the branch.**
+
+- 40 of 40 frames verified; coverage on the IR channel on 39, the
+  visible fallback on one (verified too). Lead margins 0.48–1.00 mm,
+  trail 0.58–1.07 mm. Gain 44–45 / 32–33 / 38–39, offset 265–267.
+  Position / scan / park on the production medians; 99 benign poll
+  timeouts over 39 frames, the two known signatures only, no failure.
+  Nine next-strip loads gripped at the first poll. Nothing unusual
+  reported in the sound.
+- Finding 1 — the empty-aperture threshold. The last strip's frame 1
+  was the roll's leader: 54 % of the opening open light, 46 % unexposed
+  base. `film_presence` at 0.5 classed it empty and wrote no product.
+  Nothing was lost, but a strip end inside an opening can carry a
+  picture: the threshold became 0.95 (`EMPTY_APERTURE_SHARE`), checked
+  on the real frames (leader 0.54 → film, fog 0.0 → film, an empty slot
+  from an earlier project 0.99999 → empty).
+- Finding 2 — a bright line through 36 of 40 frames, +2–4 %, visible
+  and IR, at a column that wandered between strips (about 3430 on
+  strips 12–15, 3520 on 17/18/20, 3635 on 16/19; strip 11 clean). The
+  frames' `cal.npz` exports explain it: a dust speck 16–30 columns wide
+  dims the white measurement (`verify_meas`) by 2–12 % at that column,
+  the per-pixel gain computed from it over-corrects, and the frame
+  carries the inverse as a bright line. The speck is not in the image
+  path (the guarded output of Test 101b shows no dark line). The
+  vendor flow measures the same way. The sensor's own dim pixels (eight
+  single columns in R, a nine-column run in B at 2228–2236, 2–3.5 %)
+  are single-channel and appear in every frame; the speck's shadow is
+  achromatic. `calibrate.guard_white_dips` was built on that
+  distinction and validated on the 40 exports: every speck dip guarded,
+  no sensor pixel touched, the four clean frames untouched.
+- The shading-noise hypothesis of `docs/production-telemetry-2026-10.md`
+  is refuted by the same data: the gain table's fine column structure
+  is 91 % correlated frame to frame, its row-averaging noise is 0.01 %.
+  A fixed residual column pattern of about 0.4 % in uniform film
+  remains after the hardware correction (correlated 0.79 between two
+  strips 80 minutes apart); its cause is not established and it is
+  parked.
+- Lamp: the green white reference varied 3.3 % over 83 minutes, not
+  monotonically; within each strip frame 1 was brightest and the level
+  fell about 1 % to frame 4 (the lamp warms while on, recovers in the
+  pause); blue fell 1.3 % over the session. Per-frame calibration stays.
+
+**Test 101b (the same day).** The owner blew the film slot out with a
+rubber bulb (scanner idle) and re-scanned the strip of roll 19 (holder
+positions 2–5; position 5 empty) with the working tree carrying the
+guard. The speck was still there, moved (3627 → 3476) and deeper (9 %),
+and was guarded in all four frames (`white_dips` in the sidecars). At
+the guarded columns the output showed no bright line beyond +1.5–2 % at
+isolated shoulder columns (the guard then learned to grow over the
+shoulders; predicted residual under 0.7 %), and no dark line in either
+visible or IR (minimum −0.6 to −1.6 %, the noise floor of the measure):
+the speck is in the calibration light path only. Position 5 came out
+`empty aperture` with share 1.0, correctly. The speck's behaviour —
+still within a strip, moving between strips, moved by the blower —
+pointed at the holder or the magazine rather than the scanner's inside.
+Confirmed the same evening: an empty holder scanned with the guard (four
+calibrations, no film) still showed the speck at 5–7 % (columns
+3654–3705); the owner blew the holder and magazine out (no glass there)
+and scanned the empty holder again — `tools/cal_dips.py` reports no dips
+on any of the four frames, tables A and B. The speck sat on the holder or
+the magazine. An empty holder in the magazine is a hardware-verified way
+to take calibration measurements without film (Tests 56, 57, 59 already
+loaded and scanned an empty holder); with the 0.95 threshold every frame
+comes out `empty aperture` and the strip does not stop early, since the
+stop rule needs a film frame first.
+
+**Status after the test.** Test 100 (the poll floor) remains planned
+and unrun; the series ran with the 1.0 s floor.

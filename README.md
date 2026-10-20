@@ -2,7 +2,7 @@
 
 ![License: GPL-2.0-or-later or MIT (driver), CC BY 4.0 (docs)](https://img.shields.io/badge/License-GPL--2.0--or--later%20%7C%20MIT%20%7C%20CC--BY--4.0-blue.svg)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
-![Release: v0.2.3](https://img.shields.io/badge/Release-v0.2.3-blue.svg)
+![Release: v0.2.4](https://img.shields.io/badge/Release-v0.2.4-blue.svg)
 ![Status: CLI driver complete, SANE backend working locally](https://img.shields.io/badge/Status-CLI%20driver%20complete%2C%20SANE%20backend%20working%20locally-green.svg)
 
 **Unofficial, community-built Linux driver for the Plustek OpticFilm 135i**
@@ -22,7 +22,7 @@ other units are not yet known.
 
 The project has two parts, at different stages:
 
-- **Python / pyusb command-line driver — released (v0.2.3), working on the
+- **Python / pyusb command-line driver — released (v0.2.4), working on the
   test unit.** Scans to raw 16-bit TIFF/PNM at all five resolutions
   (600 / 1200 / 2400 / 3600 / 7200 dpi), with an infrared dust/scratch channel,
   whole-strip batch scanning, and a resumable bulk-digitisation workflow.
@@ -173,8 +173,8 @@ installed from this repository's build.
 
 ## Development status
 
-**Status: v0.2.3 released (2026-10-16, the CLI driver and the SANE
-backend; [release notes](docs/release-notes-v0.2.3.md)).** The standalone Python/pyusb
+**Status: v0.2.4 released (2026-10-20, the CLI driver and the SANE
+backend; [release notes](docs/release-notes-v0.2.4.md)).** The standalone Python/pyusb
 command-line driver reached its defined milestone — magazine loading,
 single-frame and whole-strip batch scanning, all five resolutions, IR and dust
 removal, and eject — with scan, calibration, IR and dust removal
@@ -189,7 +189,11 @@ code removed from the backend and no functional change; v0.2.2 (2026-10-13)
 restores one register write in the cold start, adds the readable front-panel
 buttons, and puts submission revision v7 on the merge request; v0.2.3
 (2026-10-16) puts revision v8 there, which drops the backend's process lock
-at the maintainer's question and changes nothing sent to the scanner. "Complete" here means that functional milestone is met **within
+at the maintainer's question and changes nothing sent to the scanner;
+v0.2.4 (2026-10-20) is the first release shaped by production use — 711
+frames of telemetry and a ten-strip series run on the release candidate —
+with IR-first coverage, empty-aperture detection, calibration export and
+a guard against dust in the calibration light path. "Complete" here means that functional milestone is met **within
 its frozen scope on the one test unit** — it is **not** broad field testing or
 proof of compatibility with other scanners or Linux systems. The **SANE
 backend is a separate effort with its own status** — working locally, submitted
