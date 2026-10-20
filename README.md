@@ -478,8 +478,8 @@ entry). An empty slot before any film frame never stops the strip.
 `--no-stop-at-empty` scans every requested frame regardless.
 
 For a flat-field experiment without the hardware, each frame that measured
-a fresh calibration also gets `fN.cal.npz` (numpy `savez_compressed`, a few
-MB per frame) next to its `.diag.json`: `white_line`, `dark_a`, `dark_b`,
+a fresh calibration also gets `fN.cal.npz` (numpy `savez_compressed`, about 13
+MB per frame on the dual path, 3 % of the raw data) next to its `.diag.json`: `white_line`, `dark_a`, `dark_b`,
 `shading_meas`, `verify_meas`, the uploaded shading tables
 (`shading_table`/`shading_table2`, or `shading_table_a/_b` and
 `shading_table2_a/_b` on the dual path), `gain_codes`, `offset_codes`,

@@ -1373,7 +1373,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip writing the <output>.diag.json calibration/timing sidecar")
     p_scan.add_argument("--no-cal-data", action="store_true",
         help="do not write the <output>.cal.npz per-pixel calibration data "
-             "(white line, dark/shading measurements, uploaded tables; a few "
+             "(white line, dark/shading measurements, uploaded tables; about 13 "
              "MB per frame; written only when the scan measured a fresh "
              "calibration, and only with the .diag.json sidecar)")
     p_scan.add_argument("--warmup-budget", type=float, default=None, metavar="SECONDS",
@@ -1499,7 +1499,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip writing per-frame .diag.json sidecars")
     p_dig.add_argument("--no-cal-data", action="store_true",
         help="do not write the per-frame .cal.npz per-pixel calibration data "
-             "(white line, dark/shading measurements, uploaded tables; a few "
+             "(white line, dark/shading measurements, uploaded tables; about 13 "
              "MB per frame; written only for frames that measured a fresh "
              "calibration, and only with the .diag.json sidecars)")
     p_dig.add_argument("--park", choices=("verbatim", "semantic"), default="semantic",
