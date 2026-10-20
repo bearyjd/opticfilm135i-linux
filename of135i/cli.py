@@ -535,19 +535,34 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
     # all but strip 1's trailing leader / the gap. That predecessor is
     # recognised by sharing the hole (FrameFind.perforation_line) with the
     # cross-slot split; it is reported and dropped.
-    ghost_holes = set()
+    # (FrameFind.perforation_line is the hole's END for the image after it
+    # and its START for the image before it: "the same hole" = within
+    # HOLE_MAX_MM.)
+    ghost_holes = []
     if two and not anchored and aperture == state.last_aperture:
-        ghost_holes = {f.perforation_line for f in find.frames
+        ghost_holes = [f.perforation_line for f in find.frames
                        if f.split == "trailing"
                        and f.orientation == "hole-before-image"
-                       and f.line0 > f.perforation_line}
+                       and f.line0 > f.perforation_line]
+    hole_px = film110.HOLE_MAX_MM * px_per_mm
     for fr in frames:
-        if (ghost_holes and fr.perforation_line in ghost_holes
-                and fr.orientation == "hole-before-image"
-                and fr.line0 < fr.perforation_line):
+        if (ghost_holes and fr.orientation == "hole-before-image"
+                and fr.line0 < fr.perforation_line
+                and any(0 <= g - fr.perforation_line <= hole_px
+                        for g in ghost_holes)):
             parts.append("image predicted before the next strip's first "
                          "hole: no strip lies there (strip end / gap), "
                          "ignored")
+            continue
+        if (anchored and find.film_line_start is not None
+                and fr.line0 < find.film_line_start
+                - film110.FILM_START_TOLERANCE_MM * px_per_mm):
+            # The film begins inside this aperture and the predicted image
+            # starts before it: the first hole of the strip predicted an
+            # image BEFORE itself (strip 1's end / the gap), which cannot
+            # exist. Without this the ghost would become the anchor.
+            parts.append("image predicted before the strip's film begins "
+                         "(strip end / gap before it): no image, ignored")
             continue
         if fr.split == "leading":
             # The tail of an image that started in the previous aperture

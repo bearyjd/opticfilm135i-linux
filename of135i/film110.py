@@ -915,6 +915,9 @@ def infer_placement(aperture: int, line0: float, dpi: float,
 # distance from that one in film pitches (`image_number_anchored`).
 # Nothing here assumes which lateral rail a strip lies against.
 SLOT_APERTURES = 3
+# An image cannot start before the film does; an image predicted this far
+# before a free film start (px_per_mm * mm) is a hole's ghost, not an image.
+FILM_START_TOLERANCE_MM = 1.0
 
 
 def slot_of(aperture: int, strips: int = 1) -> int:
