@@ -2021,6 +2021,7 @@ class Scanner:
             warmup = cache["warmup"]
             shading_stats = cache["shading_stats"]
             shading2_stats = cache["shading2_stats"]
+            white_dips_diag = None       # tables reused, no white measured
             log.info("calibration: reusing cached codes (gain R=%#04x G=%#04x B=%#04x, "
                      "offset R=%#06x G=%#06x B=%#06x)", gain_r, gain_g, gain_b,
                      off_r, off_g, off_b)
@@ -2079,7 +2080,11 @@ class Scanner:
             _t0 = time.monotonic()
             verify_raw = self._exec_ops(verify_phase.ops[:verify_phase.split_at])[0]
             verify_meas = np.frombuffer(verify_raw, dtype="<u2").reshape(128, 3762, 3)
-            shading2 = calibrate.shading_table2(verify_meas, shading_meas)
+            white_guarded, white_dips = calibrate.guard_white_dips(verify_meas)
+            if white_dips:
+                log.info("white measurement: %d narrow dip(s) guarded before the gain table: %s",
+                         len(white_dips), [d.as_dict() for d in white_dips])
+            shading2 = calibrate.shading_table2(white_guarded, shading_meas)
             remaining = verify_phase.patched(shading_table2=shading2)[verify_phase.split_at:]
             self._exec_ops(remaining)
             self._diag_phase_seconds["cal_shading_verify"] = (
@@ -2104,6 +2109,7 @@ class Scanner:
             }
             shading_stats = _shading_stats(shading)
             shading2_stats = _shading_stats(shading2)
+            white_dips_diag = [d.as_dict() for d in white_dips]
 
             # Cache immediately on success -- see __init__'s _cal_cache
             # comment and (d) in the design: a LATER failure (position/
@@ -2214,6 +2220,7 @@ class Scanner:
             "offset_codes": [off_r, off_g, off_b],
             "shading": shading_stats,
             "shading2": shading2_stats,
+            "white_dips": white_dips_diag,
             "feedl": feedl,
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
@@ -2364,10 +2371,15 @@ class Scanner:
         # table B (IR lines) uses TARGET_B — matching the vendor's
         # per-address targets, with the line subsets swapped to the
         # empirically correct assignment.
+        white_a, dips_a = calibrate.guard_white_dips(verify_meas[1::2])
+        white_b, dips_b = calibrate.guard_white_dips(verify_meas[0::2])
+        if dips_a or dips_b:
+            log.info("white measurement: narrow dip(s) guarded before the gain tables: A %s B %s",
+                     [d.as_dict() for d in dips_a], [d.as_dict() for d in dips_b])
         shading2_a = calibrate.shading_table2_dual(
-            verify_meas[1::2], shading_meas_vis, width=W, target=calibrate.SHADING2_TARGET_A)
+            white_a, shading_meas_vis, width=W, target=calibrate.SHADING2_TARGET_A)
         shading2_b = calibrate.shading_table2_dual(
-            verify_meas[0::2], shading_meas_ir, width=W, target=calibrate.SHADING2_TARGET_B)
+            white_b, shading_meas_ir, width=W, target=calibrate.SHADING2_TARGET_B)
         remaining = verify_phase.patched(
             shading_table2_a=shading2_a, shading_table2_b=shading2_b,
         )[verify_phase.split_at:]
@@ -2488,6 +2500,7 @@ class Scanner:
             "offset_codes": [off_r, off_g, off_b],
             "shading": {"a": _shading_stats(shading_a), "b": _shading_stats(shading_b)},
             "shading2": {"a": _shading_stats(shading2_a), "b": _shading_stats(shading2_b)},
+            "white_dips": {"a": [d.as_dict() for d in dips_a], "b": [d.as_dict() for d in dips_b]},
             "feedl": feedl,
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,

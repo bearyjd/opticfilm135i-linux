@@ -23,6 +23,17 @@ one exists; "offline" means implemented and tested without the scanner.
   opening is empty at 95 % open light (`EMPTY_APERTURE_SHARE`), not 50 %:
   a strip end inside the opening is film and is written (first production
   series 2026-10-20, ten strips: a leader frame measured 0.54).
+- The white measurement is guarded before the per-pixel gain table is
+  computed (`calibrate.guard_white_dips`, `WHITE_DIP_*` constants): a
+  narrow dip (≤ 40 columns, > 1.5 %) present in all three channels — a
+  dust speck in the calibration light path, which over-corrected into a
+  2–4 % bright line through 36 of 40 frames of the first production
+  series (2026-10-20) — is replaced by the running median; the sensor's
+  own single-channel dim pixels are never touched (validated on those 40
+  exports: all speck dips guarded, no sensor pixel). Diag `white_dips`;
+  `tools/cal_dips.py` lists dips and the host-side correction factor for
+  frames scanned before the guard. Python driver only; the SANE backend
+  computes its tables in C++ without the guard (follow-up).
 - Per-pixel calibration data is exported as `<stem>.cal.npz` next to the
   diag sidecar (`Scanner.last_cal_data`; `--no-cal-data` on `scan` and
   `digitize`) (offline; production telemetry 2026-09/10, 711 frames).

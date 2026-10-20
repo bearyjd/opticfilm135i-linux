@@ -989,8 +989,90 @@ def test_residual_dark_b_fails_closed_through_scan():
     print("test_residual_dark_b_fails_closed_through_scan OK")
 
 
+def test_guard_white_dips_narrow_dip_only():
+    """A narrow dip in the white measurement (dust in the calibration
+    light path) is replaced by the running median; a wide depression, the
+    lit/unlit edges and a dip-free input pass through bit for bit."""
+    width = 5184
+    x = np.arange(width, dtype=np.float64)
+    smooth = 52000.0 * (1.0 - 0.3 * ((x - 2592.0) / 2592.0) ** 2)
+    lit = (x >= 600) & (x < 4600)
+    base = np.where(lit, smooth, 300.0)
+    white = np.stack([base, base * 0.95, base * 0.9], axis=1)      # (width, 3)
+    meas = np.stack([white, white], axis=0).astype(np.uint16)       # 2 identical lines
+    plain = meas.astype(np.float64).mean(axis=0)
+
+    out, dips = calibrate.guard_white_dips(meas)
+    assert out.shape == (1, width, 3) and dips == [], dips
+    assert np.array_equal(out[0], plain), "dip-free input must pass through unchanged"
+    # Same table either way.
+    t_raw = calibrate.shading_table2_dual(meas, meas, width=width, target=calibrate.SHADING2_TARGET_A)
+    t_out = calibrate.shading_table2_dual(out, meas, width=width, target=calibrate.SHADING2_TARGET_A)
+    assert t_raw == t_out
+
+    # The production speck: 15 columns, 3 % deep, every channel.
+    dusty = meas.astype(np.float64)
+    dusty[:, 3430:3445, :] *= 0.97
+    out, dips = calibrate.guard_white_dips(dusty)
+    assert len(dips) == 3 and {d.channel for d in dips} == {0, 1, 2}, dips
+    for d in dips:
+        assert 3428 <= d.start <= 3430 and 3444 <= d.stop <= 3446, d
+        assert 0.025 < d.depth < 0.035, d
+    # Guarded columns sit on the smooth profile; the rest is untouched.
+    rel = out[0, 3430:3445] / plain[3430:3445]
+    assert np.all(np.abs(rel - 1.0) < 0.003), rel
+    mask = np.ones(width, bool); mask[3425:3450] = False
+    assert np.array_equal(out[0][mask], dusty.mean(axis=0)[mask])
+    # The resulting table differs from the dusty one only around the dip.
+    t_dusty = calibrate.shading_table2_dual(dusty, meas, width=width, target=calibrate.SHADING2_TARGET_A)
+    t_guard = calibrate.shading_table2_dual(out, meas, width=width, target=calibrate.SHADING2_TARGET_A)
+    assert t_guard != t_dusty and t_guard == t_raw[:0] + t_guard  # bytes, same length
+    assert len(t_guard) == len(t_dusty)
+
+    # The sensor's own dim pixels are single-channel: one column in R
+    # 3 % dim, nine columns in B 3.5 % dim (both seen on the unit, in
+    # every frame). The gain table corrects them; the guard must not.
+    pixel = meas.astype(np.float64)
+    pixel[:, 2728, 0] *= 0.97
+    pixel[:, 2228:2237, 2] *= 0.965
+    out, dips = calibrate.guard_white_dips(pixel)
+    assert dips == [] and np.array_equal(out[0], pixel.mean(axis=0)), dips
+    # ... even when the speck sits elsewhere in the same frame.
+    both = pixel.copy(); both[:, 3430:3445, :] *= 0.97
+    out, dips = calibrate.guard_white_dips(both)
+    assert len(dips) == 3 and all(3425 <= d.start for d in dips), dips
+    assert out[0, 2728, 0] == both.mean(axis=0)[2728, 0]
+    assert np.array_equal(out[0, 2228:2237, 2], both.mean(axis=0)[2228:2237, 2])
+    # A shadow whose three channels sit at offset columns (R shallow and
+    # fragmented, as on the unit) is still guarded in every channel.
+    offset = meas.astype(np.float64)
+    offset[:, 3375:3380, 0] *= 0.975; offset[:, 3382:3386, 0] *= 0.98
+    offset[:, 3414:3438, 1] *= 0.92
+    offset[:, 3424:3445, 2] *= 0.89
+    out, dips = calibrate.guard_white_dips(offset)
+    assert {d.channel for d in dips} == {0, 1, 2} and len(dips) == 4, dips
+    # Too wide to be a speck (200 columns): left alone, it may be the lamp.
+    wide = meas.astype(np.float64); wide[:, 2000:2200, :] *= 0.97
+    out, dips = calibrate.guard_white_dips(wide)
+    assert dips == [] and np.array_equal(out[0], wide.mean(axis=0))
+    # A shallow dip (1 %) is below the guard: the sensor's own structure.
+    shallow = meas.astype(np.float64); shallow[:, 3000:3010, :] *= 0.99
+    out, dips = calibrate.guard_white_dips(shallow)
+    assert dips == [] and np.array_equal(out[0], shallow.mean(axis=0))
+    # A dip within the edge margin of the lit window is never touched.
+    edge = meas.astype(np.float64); edge[:, 620:630, :] *= 0.9
+    out, dips = calibrate.guard_white_dips(edge)
+    assert dips == [] and np.array_equal(out[0], edge.mean(axis=0))
+    # A dark lamp (nothing lit) is passed through, never "guarded".
+    dark = np.full((2, width, 3), 20, dtype=np.uint16)
+    out, dips = calibrate.guard_white_dips(dark)
+    assert dips == [] and np.array_equal(out[0], dark.astype(np.float64).mean(axis=0))
+    print("test_guard_white_dips_narrow_dip_only OK")
+
+
 def main() -> int:
     tests = [
+        test_guard_white_dips_narrow_dip_only,
         test_gain_codes_against_capture,
         test_offset_codes_fallback_on_zero_dark,
         test_offset_codes_from_reference_bracket,

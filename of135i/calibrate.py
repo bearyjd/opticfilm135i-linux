@@ -21,6 +21,8 @@ import logging
 import struct
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
+from typing import NamedTuple
 
 log = logging.getLogger("of135i")
 
@@ -336,6 +338,133 @@ def shading_table2_dual(
     gains = np.clip(np.rint(float(target) * 0x4000 / np.clip(w, 1.0, None)), 1, 65535)
     return _pack_shading(f0.astype(np.uint16).reshape(-1),
                          gains.astype(np.uint16).reshape(-1), width=width)
+
+
+# ---- white-measurement dip guard -------------------------------------
+# The per-pixel gain is computed from one white measurement per frame.
+# A dust speck in the CALIBRATION light path (not the image path) dims a
+# few columns of that measurement; the gain then over-corrects them, and
+# the frame carries a bright line through its whole height, visible and
+# IR alike. First production series on this code (2026-10-20, ten strips
+# of one roll): one speck about 15 columns (0.1 mm) wide, 2-4 % deep,
+# wandering between strips (columns ~3430, ~3520, ~3635), bright lines
+# of +2-4 % in 32 of 40 frames. The sensor has its own dim pixels (up to
+# ~3.5 %, one or nine columns wide) which the gain table corrects
+# correctly and which must NOT be guarded; they are single-channel (the
+# CCD's colour lines are separate), while a shadow is achromatic: in the
+# same 40 exports every dust dip showed in all three channels (the
+# channels' column positions offset by up to ~40 columns), every sensor
+# dip in exactly one. So a dip is guarded only when BOTH other channels
+# show a dip of at least `companion_width` columns within
+# `companion_distance` of it. The guard replaces a guarded dip by the
+# running median of its neighbourhood before the gain is computed;
+# everything else is passed through bit for bit. The lateral lit/unlit
+# edges of the window are left alone (`edge_margin`), as is anything
+# wider than `max_width`.
+WHITE_DIP_MAX_WIDTH = 40       # columns; the speck was 16-30 per channel
+WHITE_DIP_MIN_DEPTH = 0.015    # relative to the running median
+WHITE_DIP_WINDOW = 81          # running-median window (robust to <= 40 outliers)
+WHITE_DIP_EDGE_MARGIN = 64     # columns kept clear of the lit/unlit edges
+WHITE_DIP_COMPANION_WIDTH = 5  # a companion dip in another channel is this wide
+WHITE_DIP_COMPANION_DISTANCE = 50   # ... and this close (columns between the runs)
+
+
+class WhiteDip(NamedTuple):
+    """One guarded dip: `channel` 0-2, columns `start`..`stop` inclusive,
+    `depth` = how much darker than the running median (relative, > 0)."""
+    channel: int
+    start: int
+    stop: int
+    depth: float
+
+    def as_dict(self) -> dict:
+        return {"channel": self.channel, "start": self.start, "stop": self.stop,
+                "depth": round(self.depth, 4)}
+
+
+def _running_median(x: np.ndarray, window: int) -> np.ndarray:
+    pad = window // 2
+    p = np.pad(x, pad, mode="edge")
+    return np.median(sliding_window_view(p, window), axis=-1)
+
+
+def _runs(idx: np.ndarray) -> list[tuple[int, int]]:
+    if idx.size == 0:
+        return []
+    breaks = np.flatnonzero(np.diff(idx) != 1)
+    starts = np.concatenate([[idx[0]], idx[breaks + 1]])
+    stops = np.concatenate([idx[breaks], [idx[-1]]])
+    return [(int(s), int(e)) for s, e in zip(starts, stops)]
+
+
+def guard_white_dips(
+    white_meas: np.ndarray, *, max_width: int = WHITE_DIP_MAX_WIDTH,
+    min_depth: float = WHITE_DIP_MIN_DEPTH, window: int = WHITE_DIP_WINDOW,
+    edge_margin: int = WHITE_DIP_EDGE_MARGIN,
+    companion_width: int = WHITE_DIP_COMPANION_WIDTH,
+    companion_distance: int = WHITE_DIP_COMPANION_DISTANCE,
+) -> tuple[np.ndarray, list[WhiteDip]]:
+    """Mean the white measurement over its lines and guard narrow dips.
+
+    `white_meas` is (lines, width, 3) as shading_table2()/
+    shading_table2_dual() take it. Returns ``(guarded, dips)`` where
+    `guarded` is (1, width, 3) float64 -- the per-column mean, with each
+    guarded dip replaced by the running median -- which those functions
+    accept in place of the raw measurement (the mean of one line is that
+    line, so an input without dips yields byte-identical tables).
+
+    A dip is a run of columns, no wider than `max_width`, whose mean lies
+    more than `min_depth` below the `window`-column running median, at
+    least `edge_margin` columns inside the lit window (columns above half
+    the central level). It is guarded only when each of the other two
+    channels has a dip at least `companion_width` wide within
+    `companion_distance` columns of it (an achromatic shadow); a dip in
+    one channel alone is the sensor's own and is left to the gain table.
+    """
+    arr = np.asarray(white_meas).astype(np.float64)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError(f"expected (lines, width, 3) array, got shape {arr.shape}")
+    w = arr.mean(axis=0)                     # (width, 3)
+    width = w.shape[0]
+    out = w.copy()
+    pos = np.arange(width)
+    lo = np.clip(pos - edge_margin, 0, width)
+    hi = np.clip(pos + edge_margin + 1, 0, width)
+    # Pass 1: candidate runs per channel.
+    candidates: list[list[tuple[int, int, float]]] = [[], [], []]
+    medians = []
+    for c in range(3):
+        col = w[:, c]
+        med = _running_median(col, window)
+        medians.append(med)
+        level = float(np.median(col[width // 4: 3 * width // 4]))
+        if level <= 0.0:
+            continue
+        lit = col > 0.5 * level
+        cs = np.concatenate([[0], np.cumsum(lit)])
+        valid = (cs[hi] - cs[lo]) == (hi - lo)    # lit throughout the margin
+        rel = (col - med) / np.maximum(med, 1.0)
+        flagged = np.flatnonzero(valid & (rel < -min_depth))
+        for start, stop in _runs(flagged):
+            if stop - start + 1 > max_width:
+                continue
+            candidates[c].append((start, stop, float(-rel[start:stop + 1].min())))
+
+    def _near(start: int, stop: int, other: int) -> bool:
+        for s, e, _ in candidates[other]:
+            if e - s + 1 >= companion_width and max(0, s - stop, start - e) <= companion_distance:
+                return True
+        return False
+
+    # Pass 2: guard the achromatic ones.
+    dips: list[WhiteDip] = []
+    for c in range(3):
+        others = [o for o in range(3) if o != c]
+        for start, stop, depth in candidates[c]:
+            if all(_near(start, stop, o) for o in others):
+                out[start:stop + 1, c] = medians[c][start:stop + 1]
+                dips.append(WhiteDip(c, start, stop, depth))
+    return out[None, :, :], dips
 
 
 def _pack_shading(offsets: np.ndarray, gains: np.ndarray, width: int = 3762) -> bytes:

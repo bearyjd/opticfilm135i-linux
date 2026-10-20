@@ -487,9 +487,24 @@ MB per frame on the dual path, 3 % of the raw data) next to its `.diag.json`: `w
 `shading_meas`, `verify_meas`, the uploaded shading tables
 (`shading_table`/`shading_table2`, or `shading_table_a/_b` and
 `shading_table2_a/_b` on the dual path), `gain_codes`, `offset_codes`,
-`dpi`, `dual`. Frames that reuse the cached calibration have none (the
-sidecar's `cal_data` field is `null`). `--no-cal-data` (on `scan` and
-`digitize`) skips the file. Console output is also protected: a closed
+`dpi`, `dual` (`shading_meas` is the dark measurement, `verify_meas` the
+white one; on the dual path its odd lines are the visible pass and its
+even lines the IR pass). Frames that reuse the cached calibration have
+none (the sidecar's `cal_data` field is `null`). `--no-cal-data` (on
+`scan` and `digitize`) skips the file. The white measurement is guarded
+before the per-pixel gain is computed (`calibrate.guard_white_dips`): a
+dust speck in the calibration light path dims a few columns of it, the
+gain then over-corrects them and the frame carries a bright line through
+its whole height — on the first production series one speck, 0.1 mm
+wide, 2–4 % bright lines in 36 of 40 frames. A narrow dip (at most 40
+columns, deeper than 1.5 %) that shows in all three colour channels is
+replaced by its neighbourhood's running median; the sensor's own dim
+pixels are single-channel and are left to the gain table. The guarded
+dips are listed in the sidecar's `white_dips`; `tools/cal_dips.py
+<stem>.cal.npz` lists them for exported data together with the
+per-column factor that corrects a frame scanned before the guard
+existed. (Python driver only; the SANE backend computes its tables in
+C++ without this guard.) Console output is also protected: a closed
 stdout/stderr pipe can no longer abort a scan.
 
 ### What the driver knows about the magazine

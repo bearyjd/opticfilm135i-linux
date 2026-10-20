@@ -90,7 +90,10 @@ single USB operation the driver would otherwise perform:
   (`present`, `saturated_share`); `cal_data` names the
   `<output>.cal.npz` file holding the frame's per-pixel calibration
   measurements (`Scanner.last_cal_data`; `null` on a calibration-cache
-  hit or with `--no-cal-data`). `digitize`'s manifest entries add
+  hit or with `--no-cal-data`); `white_dips` lists the dips
+  `calibrate.guard_white_dips` replaced in the white measurement before
+  the gain table was computed (a list on the plain path, `{"a", "b"}` on
+  the dual path, `null` on a cache hit). `digitize`'s manifest entries add
   `coverage_source`, `film_present`, `saturated_share`, and
   `coverage_warning` when a margin exceeds
   `aperture_crop.MAX_PLAUSIBLE_MARGIN_MM`; the roll record
