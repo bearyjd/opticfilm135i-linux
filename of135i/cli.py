@@ -26,7 +26,9 @@ cycle instruction and exits -- it never sends a recovery command.
 from __future__ import annotations
 
 import argparse
+import errno
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -1505,7 +1507,87 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _ResilientStream:
+    """A console stream that can never kill a scan.
+
+    A print to a stdout/stderr pipe whose reader has gone away raises
+    BrokenPipeError; unhandled, that aborted a scanning session
+    mid-strip (production telemetry, 2026-09/10, 711 frames). This
+    wrapper catches BrokenPipeError and OSError(EPIPE) in write/flush,
+    marks the stream broken, points the underlying file descriptor at
+    os.devnull (the standard recipe, so the interpreter's flush at exit
+    cannot fail either) and drops all further output silently. Everything
+    else (fileno, isatty, other attributes) delegates to the wrapped
+    stream. KeyboardInterrupt and every other error pass through.
+    """
+
+    def __init__(self, stream, *, redirect_fd: bool = True):
+        self._stream = stream
+        self._redirect_fd_on_break = redirect_fd
+        self.broken = False
+
+    @staticmethod
+    def _is_pipe_error(exc: BaseException) -> bool:
+        return isinstance(exc, BrokenPipeError) or (
+            isinstance(exc, OSError) and exc.errno == errno.EPIPE)
+
+    def _redirect_fd(self) -> None:
+        """Point the wrapped stream's fd at os.devnull. Overridable (the
+        unit test does not touch real descriptors)."""
+        try:
+            fd = self._stream.fileno()
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, fd)
+            finally:
+                os.close(devnull)
+        except Exception:
+            pass
+
+    def _mark_broken(self) -> None:
+        self.broken = True
+        if self._redirect_fd_on_break:
+            self._redirect_fd()
+
+    def write(self, data):
+        if self.broken:
+            return len(data)
+        try:
+            return self._stream.write(data)
+        except OSError as e:
+            if not self._is_pipe_error(e):
+                raise
+            self._mark_broken()
+            return len(data)
+
+    def flush(self):
+        if self.broken:
+            return None
+        try:
+            return self._stream.flush()
+        except OSError as e:
+            if not self._is_pipe_error(e):
+                raise
+            self._mark_broken()
+            return None
+
+    def __getattr__(self, name):
+        # Only reached for attributes not defined above.
+        return getattr(self._stream, name)
+
+
+def _install_resilient_console() -> None:
+    """Wrap sys.stdout/sys.stderr (once) so console output cannot abort
+    a command. Must run before logging is configured, so the logging
+    StreamHandler binds to the wrapped stderr."""
+    if not isinstance(sys.stdout, _ResilientStream):
+        sys.stdout = _ResilientStream(sys.stdout)
+    if not isinstance(sys.stderr, _ResilientStream):
+        sys.stderr = _ResilientStream(sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
+    _install_resilient_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(

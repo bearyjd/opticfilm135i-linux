@@ -838,7 +838,7 @@ def _dual_frame_raw(kind, dpi=600, W=8):
     return np.repeat(inter[:, :, None], 3, axis=2).astype("<u2").tobytes(), W
 
 
-def _run_digitize(kinds, frames="1-4", **flags):
+def _run_digitize(kinds, frames="1-4", stdout=None, **flags):
     """Drive _cmd_digitize with a fake scanner whose frame N returns
     kinds[N]. Returns (rc, manifest record, roll dir, scan-call list,
     captured stdout)."""
@@ -871,7 +871,7 @@ def _run_digitize(kinds, frames="1-4", **flags):
             **flags)
         orig = cli._run_writing_session
         cli._run_writing_session = lambda body: body(_FakeScanner())
-        buf = io.StringIO()
+        buf = stdout if stdout is not None else io.StringIO()
         try:
             with contextlib.redirect_stdout(buf):
                 rc = cli._cmd_digitize(args)
@@ -884,7 +884,7 @@ def _run_digitize(kinds, frames="1-4", **flags):
         for p in rdir.glob("*.diag.json"):
             import json
             sidecars[p.name] = json.loads(p.read_text())
-        return rc, rec, files, scans, buf.getvalue(), sidecars
+        return rc, rec, files, scans, getattr(buf, "getvalue", lambda: "")(), sidecars
 
 
 def test_digitize_empty_slot_stops_strip_after_film():
@@ -1015,6 +1015,113 @@ def test_cal_data_flag_and_missing_data_write_nothing():
     side, npz, loaded = _cal_sidecar_run(data)                      # old args object
     assert loaded is not None
     print("test_cal_data_flag_and_missing_data_write_nothing OK")
+
+
+# ------------------------------------------------ resilient console output
+
+
+class _PipeBreaker:
+    """A fake stream that raises BrokenPipeError from write number
+    `fail_at` on (1-based), recording what it accepted."""
+
+    def __init__(self, fail_at=2):
+        self.fail_at = fail_at
+        self.calls = 0
+        self.accepted = []
+        self.flush_calls = 0
+
+    def write(self, data):
+        self.calls += 1
+        if self.calls >= self.fail_at:
+            raise BrokenPipeError(32, "Broken pipe")
+        self.accepted.append(data)
+        return len(data)
+
+    def flush(self):
+        self.flush_calls += 1
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def isatty(self):
+        return False
+
+
+def test_resilient_stream_swallows_broken_pipe():
+    from of135i import cli
+    fake = _PipeBreaker(fail_at=2)
+    redirects = []
+
+    class _NoDup2(cli._ResilientStream):
+        def _redirect_fd(self):
+            redirects.append(True)
+
+    st = _NoDup2(fake)
+    assert st.write("one\n") == 4
+    assert st.write("two\n") == 4          # raises inside; swallowed
+    assert st.broken and redirects == [True]
+    calls = fake.calls
+    assert st.write("three\n") == 6         # dropped silently, not forwarded
+    assert fake.calls == calls and fake.accepted == ["one\n"]
+    st.flush()                              # no-op once broken
+    assert fake.flush_calls == 0
+    assert st.isatty() is False             # delegation
+    # EPIPE as a plain OSError is also caught; other OSErrors are not.
+    import errno
+
+    class _Epipe:
+        def write(self, d): raise OSError(errno.EPIPE, "pipe")
+        def flush(self): pass
+    s2 = _NoDup2(_Epipe()); s2.write("x"); assert s2.broken
+
+    class _Eio:
+        def write(self, d): raise OSError(errno.EIO, "io")
+    try:
+        _NoDup2(_Eio()).write("x")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("a non-pipe OSError must propagate")
+    # flush path
+    s3 = _NoDup2(_PipeBreaker(fail_at=99)); s3.flush(); assert s3.broken
+    print("test_resilient_stream_swallows_broken_pipe OK")
+
+
+def test_resilient_stream_redirects_fd_to_devnull():
+    import os
+    from of135i import cli
+    r, w = os.pipe()
+    f = os.fdopen(w, "w")
+    os.close(r)                              # reader gone: next write -> EPIPE
+    st = cli._ResilientStream(f)
+    st.write("x" * 100000)
+    try:
+        st.flush()
+    except Exception as e:                    # pragma: no cover
+        raise AssertionError(f"flush must not raise: {e!r}")
+    assert st.broken
+    st.write("more"); st.flush()              # silent
+    try:
+        f.close()                             # exit-time flush cannot fail
+    except Exception as e:                    # pragma: no cover
+        raise AssertionError(f"close must not raise: {e!r}")
+    print("test_resilient_stream_redirects_fd_to_devnull OK")
+
+
+def test_digitize_survives_broken_stdout():
+    from of135i import cli
+    fake = _PipeBreaker(fail_at=2)
+
+    class _NoDup2(cli._ResilientStream):
+        def _redirect_fd(self): pass
+
+    kinds = {1: "film", 2: "film"}
+    rc, rec, files, scans, out, sc = _run_digitize(
+        kinds, frames="1-2", stdout=_NoDup2(fake))
+    assert fake.calls >= 2, "the stream must actually have been broken"
+    assert rc == 0 and rec["status"] == "ok", (rc, rec)
+    for n in ("f1.tiff", "f2.tiff", "f1-ir.tiff", "f2-ir.tiff", "f1.overscan.tiff",
+              "f2.overscan.tiff", "f1.diag.json", "f2.diag.json"):
+        assert n in files, (n, files)
+    print("test_digitize_survives_broken_stdout OK")
 
 
 # ------------------------------------------------ SANE port (stage 2 tables)
@@ -1468,6 +1575,9 @@ def main() -> int:
         test_digitize_plain_path_records_empty_aperture,
         test_cal_data_written_next_to_sidecar,
         test_cal_data_flag_and_missing_data_write_nothing,
+        test_resilient_stream_swallows_broken_pipe,
+        test_resilient_stream_redirects_fd_to_devnull,
+        test_digitize_survives_broken_stdout,
         test_sane_tables_generated_and_current,
         test_sane_tables_injections_land_on_value_bytes,
         test_holder_geometry_measures_a_synthetic_holder,
