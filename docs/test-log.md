@@ -7404,3 +7404,28 @@ five "holes against the rail" apertures of 2026-10-21 yield their images
 as well (consistent grids). Still open, Christian's requirement: the
 holes must never be a gate — the printed frame (0.13 × air) should locate
 the images when no hole can be read (candidate, docs/ROADMAP.md).
+
+**Test 104, the evening's series (2026-10-22, one strip per load after
+load 2, through the application) — lessons.** Four strips: roll 5 (edge
+numbers 21–23) complete in two passes; roll 6 (9–12) three of four, the
+fourth sitting in the pass-2 frames (numbering fault, fixed, PR #27 — an
+offline re-run from the stored frames would deliver it); roll 7 (1–4)
+three of four (hole edge flush against the rail, fixed, PR #28); roll 8
+(the same strip as roll 7, scanned again) complete in two passes — the
+second pass moved the strip 20.6 mm instead of the suggested 10.2 and
+still delivered everything, which is the free-pass contract working.
+Exit 5 once (roll 3 pass 4 with a single strip re-seated, correct).
+Never delivered despite passes: roll 6's photograph 2 (fixed). Seen in
+roll 8 pass 2: photograph 4 in aperture 4 not found ("no perforation
+found") — the strip's cut end after the last photograph carries no hole,
+so that image is found only where its preceding hole is in view; it was
+already delivered from pass 1.
+
+What the series taught, in Christian's order of priority for the driver:
+(1) *the holes must never be a gate* — the printed frame (0.13 × air)
+should locate an image when no hole can be read; (2) *re-numbering from
+stored frames* (`--from-frames`): every pass's frame files are kept, so a
+driver correction must never cost the operator a new pass; (3) *the edge
+numbers printed on the film are the photograph's identity* — read them.
+The application's full report: negativ-digitalisering
+docs/prov/110-serie-2026-10-21-rapport.md.
