@@ -476,7 +476,7 @@ def _rolling_nanmedian(x: np.ndarray, window: int) -> np.ndarray:
 
 def _hole_runs(green: np.ndarray, lo: int, hi: int, width: int, air: float,
                film_present: np.ndarray, px_per_mm: float, edge_is_low: bool,
-               outer_limit: "int | None" = None):
+               outer_limit: "int | None" = None, against_plastic: bool = False):
     """Candidate perforation runs on one lateral edge of the film band,
     as (start, end_inclusive) line runs, plus the per-line LOCAL film
     edge (rolling median of the tracked edge) used for lateral
@@ -485,7 +485,16 @@ def _hole_runs(green: np.ndarray, lo: int, hi: int, width: int, air: float,
     reaches air level."""
     n_lines = green.shape[0]
     band_edge = lo if edge_is_low else hi
-    edge = _track_edge(green, band_edge, air, px_per_mm, edge_is_low, outer_limit)
+    if against_plastic:
+        # The film edge rests against the rail, no air outside it: there is
+        # no air->film step to track, but the holes still read as air
+        # inside the band (the light comes through them). The band edge
+        # is the edge on every line (Test 104, roll 7: four photographs
+        # with their hole edge flush against the rail, holes plainly
+        # visible, "no perforation found").
+        edge = np.full(n_lines, float(band_edge))
+    else:
+        edge = _track_edge(green, band_edge, air, px_per_mm, edge_is_low, outer_limit)
     local = _rolling_nanmedian(edge, max(3, round(EDGE_TRACK_WINDOW_MM * px_per_mm)))
     ref = np.where(np.isnan(edge), local, edge)
     valid = ~np.isnan(ref)
@@ -689,15 +698,19 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
     edge_is_low = None
     runs: list = []
     local_edge = None
-    if touches_air_lo and not touches_air_hi:
+    # Holes are looked for on BOTH edges; an edge resting against the rail
+    # (no air outside) is taken as it is, the holes reading as air inside.
+    if touches_air_lo and not touches_air_hi and not touches_plastic_hi:
         edge_is_low = True
         runs, local_edge = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, True, limit_lo)
-    elif touches_air_hi and not touches_air_lo:
+    elif touches_air_hi and not touches_air_lo and not touches_plastic_lo:
         edge_is_low = False
         runs, local_edge = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, False, limit_hi)
     else:
-        runs_lo, local_lo = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, True, limit_lo)
-        runs_hi, local_hi = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, False, limit_hi)
+        runs_lo, local_lo = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, True,
+                                       limit_lo, against_plastic=touches_plastic_lo)
+        runs_hi, local_hi = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, False,
+                                       limit_hi, against_plastic=touches_plastic_hi)
         if runs_lo and not runs_hi:
             edge_is_low, runs, local_edge = True, runs_lo, local_lo
         elif runs_hi and not runs_lo:

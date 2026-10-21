@@ -7389,3 +7389,18 @@ rotated pairs correlated 0.80–0.96, the slide pairs ≈ 0. The true turn
 (about 101.9 mm) won, and the strip came out 5, 4, 3, 2. Fixed with a 3 mm
 slack; the harness on the roll's frames now gives 4, 3, 2, 1 with
 photograph 2 delivered and all four present.
+
+**Test 104, roll 7 (2026-10-22 evening, found by the production session)
+— hole edge flush against the rail.** Pass 1 found only photograph 4;
+apertures 1–2 said "no perforation found in the film band" with the holes
+plainly visible. Measured: the film's hole edge lay against the rail with
+no air gap (rim 0.46–0.48 × air up to the band edge, plastic 0.05 × air
+right outside), while the holes still reached air level inside the hole
+zone (411 lines ≥ 0.95 × air). The edge tracker looks for the air→film
+step from outside and found none. Fixed: on a side that abuts plastic the
+band edge is the edge on every line, and both edges are searched. Roll 7
+pass 1 now gives photograph 1 whole, 2 split, 3 whole, 4 whole; Test 103's
+five "holes against the rail" apertures of 2026-10-21 yield their images
+as well (consistent grids). Still open, Christian's requirement: the
+holes must never be a gate — the printed frame (0.13 × air) should locate
+the images when no hole can be read (candidate, docs/ROADMAP.md).
