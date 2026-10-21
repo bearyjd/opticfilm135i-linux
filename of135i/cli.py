@@ -494,7 +494,7 @@ class Film110State:
         self.deferred: list = []                # [(aperture, parts, items)]
         self.numbering: "dict | None" = None    # {"kind","key","entries"}
         self.orientation = "same"
-        self.numbering_basis = "protocol"       # "protocol" | "content" | "geometry"
+        self.numbering_basis = "protocol"       # "protocol" | "content"
         self.film_start_mm: "float | None" = None
         self.film_end_mm: "float | None" = None
         self.finalized = False
@@ -669,6 +669,13 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
         # biased edge.
         it["bounds"] = [int(x) for x in film110.product_bounds(
             fr, dpi=args.dpi, pad_mm=pad, shape=vis_crop.shape)]
+        # The sighting as scanned (no pad), and which part of the image it
+        # shows (mm from the image's own start): a later pass recognises
+        # the photograph on this, whole or split.
+        vb = [int(x) for x in film110.product_bounds(
+            fr, dpi=args.dpi, pad_mm=0.0, shape=vis_crop.shape)]
+        it["vis_bounds"] = vb
+        it["extent"] = [(vb[0] - fr.line0) / px_per_mm, (vb[1] - fr.line0) / px_per_mm]
 
         def crops(fr=fr):
             v = film110.crop(vis_crop, fr, dpi=args.dpi, pad_mm=pad)
@@ -676,21 +683,22 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
                  if ir_crop is not None else None)
             return v, i
         it["crops"] = crops
-        it["thumb"] = None
+        it["patch"] = None
         items.append(it)
 
     if state.ref is not None:
         # A later pass: hold the whole images (copies: a view would keep
         # the whole aperture alive) until the slot is complete.
         for it in items:
-            if "fr" in it and it["fr"].whole:
+            if "fr" not in it:
+                continue
+            vb = it["vis_bounds"]
+            if vb[1] > vb[0] and vb[3] > vb[2]:
+                it["patch"] = film110.patch(vis_crop[vb[0]:vb[1], vb[2]:vb[3]], px_per_mm)
+            if it["fr"].whole:
                 v, i = it["crops"]()
                 v = _np.ascontiguousarray(v)
                 i = _np.ascontiguousarray(i) if i is not None else None
-                try:
-                    it["thumb"] = film110.thumbnail(v)
-                except ValueError:
-                    it["thumb"] = None
                 it["crops"] = lambda v=v, i=i: (v, i)
         state.deferred.append((aperture, parts, items))
         print(f"110: aperture {aperture} — {sum(1 for x in items if 'fr' in x)} "
@@ -736,6 +744,13 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
                 n, residual = film110.number_turned(g, nm["key"], nm["entries"])
             else:
                 n, residual = film110.number_by_shift(g, nm["key"], nm["entries"])
+            if n < 1 and not fr.whole:
+                # A hole's prediction before the roll's first image (the
+                # leader, now on this side after a turn): nothing to count.
+                parts.append(note + f"image predicted at {pos_mm:.1f} mm, "
+                             f"before the roll's first image: the strip's "
+                             f"leader, ignored")
+                continue
             if abs(residual) > film110.SHIFT_RESIDUAL_MM or n < 1:
                 msg = (f"image at {pos_mm:.1f} mm does not fit the roll's "
                        f"earlier images (off by {residual:+.1f} mm, number "
@@ -807,7 +822,9 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
         entry = {"number": n, "aperture": aperture, "whole": bool(fr.whole),
                  "split": fr.split, "free_end_near": bool(fr.free_end_near),
                  "position_mm": round(float(g), 2),
-                 "crop": it["bounds"] if fr.whole else None,
+                 "crop": it["vis_bounds"],
+                 "extent_mm": [round(float(it["extent"][0]), 2),
+                               round(float(it["extent"][1]), 2)],
                  "main": None, "ir": None, "kept": False,
                  "size_mm": ([round(float(fr.size_mm[0]), 2),
                               round(float(fr.size_mm[1]), 2)]
@@ -841,21 +858,23 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
     print(f"110: aperture {aperture} — " + "; ".join(parts))
 
 
-def _film110_load_ref_thumbs(args: argparse.Namespace, roll: int,
-                             ref: dict) -> list:
-    """[(number, position_mm, thumbnail)] of the reference record's whole
-    images, re-extracted from that pass's frame file on disk (p<k>-f<N>.tiff
-    holds the aperture-registered crop, rotated by the run's --rotate; the
-    entry's `crop` bounds are in the un-rotated axes). One frame file is
-    loaded at a time and freed; a missing file or an entry without crop
+def _film110_load_ref_patches(args: argparse.Namespace, roll: int,
+                              ref: dict) -> list:
+    """[(number, position_mm, u0, u1, patch)] of the reference record's
+    sightings, whole or split, re-extracted from that pass's frame file on
+    disk (p<k>-f<N>.tiff holds the aperture-registered crop, rotated by
+    the run's --rotate; the entry's `crop` bounds are in the un-rotated
+    axes, `extent_mm` says which part of the image they show). One frame
+    file is loaded at a time and freed; a missing file or an entry without
     bounds simply contributes nothing."""
     from . import digitize, film110
     import numpy as _np
     out = []
     k = int(ref.get("rotate") or 0) // 90
+    px_per_mm = float(ref.get("dpi") or args.dpi) / film110.MM_PER_INCH
     by_ap: dict = {}
     for e in ref.get("images") or []:
-        if (e.get("whole") and e.get("crop") and e.get("number")
+        if (e.get("crop") and e.get("extent_mm") and e.get("number")
                 and e.get("position_mm") is not None):
             by_ap.setdefault(e["aperture"], []).append(e)
     for ap, es in sorted(by_ap.items()):
@@ -869,11 +888,11 @@ def _film110_load_ref_thumbs(args: argparse.Namespace, roll: int,
             arr = _np.rot90(arr, -k)
         for e in es:
             l0, l1, c0, c1 = e["crop"]
-            try:
-                out.append((e["number"], float(e["position_mm"]),
-                            film110.thumbnail(arr[l0:l1, c0:c1])))
-            except ValueError:
-                pass
+            if l1 <= l0 or c1 <= c0:
+                continue
+            u0, u1 = e["extent_mm"]
+            out.append((e["number"], float(e["position_mm"]), float(u0), float(u1),
+                        film110.patch(arr[l0:l1, c0:c1], px_per_mm)))
         del arr
     return out
 
@@ -884,9 +903,10 @@ def _film110_finalize(args: argparse.Namespace, state: Film110State, roll: int,
     slid or turned since the reference record (image content, see
     of135i.film110.decide_orientation) -- number the held images and write
     the whole ones. When it cannot be decided nothing is written and
-    `state.aborted` says why (exit 5). Without whole images on both sides
-    to compare, the shift is taken from the positions alone (basis
-    "geometry") and the strip counts as not turned."""
+    `state.aborted` says why (exit 5) -- also when no image is whole in
+    both this run and the reference: the shift is never taken from
+    positions alone (the film is periodic; a move of more than half a
+    pitch would number every image one off without anyone noticing)."""
     from . import film110
     import numpy as _np
     if state.finalized:
@@ -904,38 +924,48 @@ def _film110_finalize(args: argparse.Namespace, state: Film110State, roll: int,
             if "fr" in it:
                 g = film110.global_position_mm(aperture, it["fr"].line0, args.dpi)
                 positions.append(g)
-                if it["thumb"] is not None:
-                    new.append((g, it["thumb"]))
+                if it.get("patch") is not None:
+                    new.append((g, it["extent"][0], it["extent"][1], it["patch"]))
     if not positions:
         return
-    old = _film110_load_ref_thumbs(args, roll, ref) if new else []
+    old = _film110_load_ref_patches(args, roll, ref) if new else []
     ref_orientation = ref.get("orientation") or "same"
-    if new and old:
-        dec = film110.decide_orientation(new, old, state.slot,
-                                          new_all=positions, old_all=entries)
-        if dec is None:
-            state.aborted = (
-                f"could not tell whether the strip slid or was turned since "
-                f"pass {ref.get('pass', '?')} (the images do not match the "
-                f"earlier ones clearly enough) -> nothing written; seat the "
-                f"strip so that at least one whole image is seen, or --force")
-            return
-        turned = dec["orientation"] == "turned"
-        state.numbering = {"kind": "turned" if turned else "slide",
-                           "key": dec["key"], "entries": entries}
-        state.numbering_basis = dec["basis"]
-    else:
-        found = film110.match_shift(positions, entries, state.slot)
-        if found is None:
-            state.aborted = (
-                "could not match this pass to the roll's earlier images (no "
-                "image pairs with an earlier one within the allowed move, or "
-                "the pairings disagree by more than "
-                f"{film110.SHIFT_AGREE_MM:g} mm) -> nothing written")
-            return
-        turned = False
-        state.numbering = {"kind": "slide", "key": found[0], "entries": entries}
-        state.numbering_basis = "geometry"
+    if not new or not old:
+        state.aborted = (
+            f"nothing of this run's images can be compared with pass "
+            f"{ref.get('pass', '?')} (no sighting on one side), so the "
+            f"strip's move cannot be read from the pictures -> nothing "
+            f"written; seat the strip so that an image seen before is seen "
+            f"again, or --force")
+        return
+    # What is physically possible: every recorded image must still lie in
+    # the slot after the move; and when the strip's own free end was seen
+    # in both runs, a slide must agree with that end's move.
+    end_shift = None
+    for key in ("film_end_mm", "film_start_mm"):
+        was, now = ref.get(key), getattr(state, key)
+        if was is not None and now is not None:
+            e = float(now) - float(was)
+            if end_shift is not None and abs(e - end_shift) > film110.END_AGREE_MM:
+                end_shift = None            # the two ends disagree: no evidence
+                break
+            end_shift = e
+    dec = film110.decide_orientation(
+        new, old, pos_range=film110.slot_position_range(state.slot, state.strips),
+        end_shift=end_shift)
+    if dec is None:
+        state.aborted = (
+            f"could not tell whether the strip slid or was turned since "
+            f"pass {ref.get('pass', '?')} (the images do not match the "
+            f"earlier ones clearly enough, or none overlaps an earlier "
+            f"sighting by {film110.OVERLAP_MIN_MM:g} mm) -> nothing "
+            f"written; seat the strip so that an image seen before is seen "
+            f"again, or --force")
+        return
+    turned = dec["orientation"] == "turned"
+    state.numbering = {"kind": "turned" if turned else "slide",
+                       "key": dec["key"], "entries": entries}
+    state.numbering_basis = "content"
     state.orientation = (ref_orientation if not turned else
                          "same" if ref_orientation == "turned" else "turned")
     for aperture, parts, items in deferred:
@@ -1620,6 +1650,12 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
     record["numbering"] = state.numbering_basis
     record["images"] = state.images
     record["problems"] = list(state.problems)
+    # The strip's own ends, when seen (global mm): a later pass pins its
+    # move on them, and the advice reads whether an end can reach plastic.
+    record["film_start_mm"] = (None if state.film_start_mm is None
+                               else round(float(state.film_start_mm), 2))
+    record["film_end_mm"] = (None if state.film_end_mm is None
+                             else round(float(state.film_end_mm), 2))
     prior = list(prior or [])
     roll, prefix = record.get("roll"), record.get("prefix", "")
     records = prior + [{"roll": roll, "prefix": prefix, "images": state.images}]

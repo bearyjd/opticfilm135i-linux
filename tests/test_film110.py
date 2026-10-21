@@ -839,30 +839,21 @@ def test_cli_hook_is_noop_for_film_135():
     print("test_cli_hook_is_noop_for_film_135 OK")
 
 
-def test_match_shift_and_number_by_shift():
+def test_number_by_shift_and_shift_window():
     pitch = FILM_110.pitch_mm
     rec = [(1, 3.5), (3, 3.5 + 2 * pitch), (4, 3.5 + 3 * pitch)]
     now = [3.5 + 10.6 + k * pitch for k in range(4)]
-    shift, n = film110.match_shift(now, rec)
-    assert abs(shift - 10.6) < 1e-9 and n >= 3, (shift, n)
     for k, want in enumerate((1, 2, 3, 4)):
-        num, res = film110.number_by_shift(now[k], shift, rec)
+        num, res = film110.number_by_shift(now[k], 10.6, rec)
         assert num == want and abs(res) < 1e-9, (k, num, res)
-    # The window is one pitch wide and leans towards the holder's middle:
-    # +12.75 is "further in" for slot 1, -12.75 for slot 2.
-    assert abs(film110.match_shift([3.5 + 12.75], rec, slot=1)[0] - 12.75) < 1e-9
-    assert abs(film110.match_shift([3.5 - 12.75], rec, slot=2)[0] + 12.75) < 1e-9
-    assert film110.shift_window(1) == (-pitch / 2 + 1.0, pitch / 2 + 1.0)
-    assert film110.shift_window(2) == (-pitch / 2 - 1.0, pitch / 2 - 1.0)
-    # Nothing to pair with, or pairings that disagree by more than 2 mm.
-    assert film110.match_shift([], rec) is None
-    assert film110.match_shift([3.5], []) is None
-    assert film110.match_shift([3.5 + 4.0, 3.5 + 8.0], [(1, 3.5)]) is None
-    assert film110.match_shift([3.5 + 4.0, 3.5 + 5.0], [(1, 3.5)]) is not None
     # Before the roll's first image: number < 1 (the caller refuses it).
     num, _res = film110.number_by_shift(3.5 + 10.6 - pitch, 10.6, rec)
     assert num == 0, num
-    print("test_match_shift_and_number_by_shift OK")
+    # The suggestion window is one pitch wide and leans towards the
+    # holder's middle: +12.75 is "further in" for slot 1, -12.75 for slot 2.
+    assert film110.shift_window(1) == (-pitch / 2 + 1.0, pitch / 2 + 1.0)
+    assert film110.shift_window(2) == (-pitch / 2 - 1.0, pitch / 2 - 1.0)
+    print("test_number_by_shift_and_shift_window OK")
 
 
 def test_thumbnail_and_decide_orientation():
@@ -884,27 +875,64 @@ def test_thumbnail_and_decide_orientation():
     assert film110.thumb_correlation(th[1], half) > 0.98
     assert float(film110.thumbnail(np.full((200, 200), 5.0)).std()) == 0.0
     pitch = FILM_110.pitch_mm
-    old = [(k, 3.5 + (k - 1) * pitch, th[k]) for k in (1, 2, 3, 4)]
+    L = FILM_110.image_mm[0]
+    # Sightings: (number, position, u0, u1, patch) / (position, u0, u1, patch);
+    # the pictures are 480 x 360 px for 17.2 x 13 mm, i.e. ~28 px/mm.
+    pp = {k: film110.patch(v, 480 / L) for k, v in pics.items()}
+    old = [(k, 3.5 + (k - 1) * pitch, 0.0, L, pp[k]) for k in (1, 2, 3, 4)]
+    rec = [(n, r) for n, r, *_ in old]
     # Slid by +10.6 mm: same pictures, same orientation.
-    new = [(3.5 + 10.6 + (k - 1) * pitch, th[k]) for k in (1, 2, 3, 4)]
+    new = [(3.5 + 10.6 + (k - 1) * pitch, 0.0, L, pp[k]) for k in (1, 2, 3, 4)]
     dec = film110.decide_orientation(new, old)
-    assert dec["orientation"] == "same" and dec["basis"] == "content", dec
+    assert dec["orientation"] == "same", dec
     assert abs(dec["key"] - 10.6) < 1e-6 and dec["mean"] > 0.99, dec
+    # Slid by a whole aperture and a bit (38 mm): positions alone would read
+    # it as 12.5 mm (one pitch less) and number every image one too high;
+    # the pictures say 38.
+    far = [(3.5 + 38.0 + (k - 1) * pitch, 0.0, L, pp[k]) for k in (1, 2, 3, 4)]
+    dec = film110.decide_orientation(far, old)
+    assert dec["orientation"] == "same" and abs(dec["key"] - 38.0) < 1e-6, dec
+    num, _r = film110.number_by_shift(far[0][0], dec["key"], rec)
+    assert num == 1, num
+    # Moved back out by more than half a pitch: the same.
+    back = [(3.5 - 14.0 + (k - 1) * pitch, 0.0, L, pp[k]) for k in (2, 3, 4)]
+    dec = film110.decide_orientation(back, old)
+    assert dec["orientation"] == "same" and abs(dec["key"] + 14.0) < 1e-6, dec
+    # A split sighting pairs on the part it shows: image 2 seen from 0 to
+    # 9 mm (a trailing split) against the whole recorded image 2.
+    n2 = int(round(pp[2].shape[0] * 9.0 / L))      # patch rows, not picture rows
+    part = [(3.5 + 10.6 + pitch, 0.0, 9.0, pp[2][:n2])]
+    dec = film110.decide_orientation(part, old)
+    assert dec["orientation"] == "same" and abs(dec["key"] - 10.6) < 1e-6, dec
+    assert dec["mean"] > 0.95, dec
+    # Too little overlap (4 mm): no pair, no decision.
+    n4 = int(round(pp[2].shape[0] * 4.0 / L))
+    assert film110.decide_orientation([(3.5 + 10.6 + pitch, 0.0, 4.0, pp[2][:n4])], old) is None
     # Turned: reverse order, each picture rotated 180 degrees; the photograph
     # that started at r now starts at C - r (C = 100 here).
-    turned = [(100.0 - old[k - 1][1], th[k][::-1, ::-1]) for k in (1, 2, 3, 4)]
+    turned = [(100.0 - old[k - 1][1], 0.0, L, pp[k][::-1, ::-1]) for k in (1, 2, 3, 4)]
     dec = film110.decide_orientation(turned, old)
     assert dec["orientation"] == "turned" and dec["mean"] > 0.99, dec
-    num, res = film110.number_turned(100.0 - old[1][1], dec["key"], [(n, r) for n, r, _t in old])
+    num, res = film110.number_turned(100.0 - old[1][1], dec["key"], rec)
     assert num == 2 and abs(res) < 1e-6, (num, res)
+    # A turned strip's leading split shows the END of the picture (its
+    # last 9 mm) rotated: paired on that part.
+    tail = pp[3][pp[3].shape[0] - n2:][::-1, ::-1]
+    dec = film110.decide_orientation([(100.0 - old[2][1], 0.0, 9.0, tail)], old)
+    assert dec["orientation"] == "turned" and dec["mean"] > 0.95, dec
     # Other pictures altogether: cannot tell.
-    other = [(3.5 + 10.6 + (k - 1) * pitch, film110.thumbnail(picture(50 + k)))
+    other = [(3.5 + 10.6 + (k - 1) * pitch, 0.0, L, film110.patch(picture(50 + k), 480 / L))
              for k in (1, 2, 3, 4)]
     assert film110.decide_orientation(other, old) is None
-    # A geometric slide with nothing whole to verify it stands on geometry.
-    dec = film110.decide_orientation(
-        [], old, new_all=[3.5 + 10.6], old_all=[(n, r) for n, r, _t in old])
-    assert dec["orientation"] == "same" and dec["basis"] == "geometry", dec
+    # Nothing on one side: no decision (never geometry alone).
+    assert film110.decide_orientation([], old) is None
+    assert film110.decide_orientation(new, []) is None
+    # Physically impossible moves are pruned: with the slot ending at 60 mm
+    # the +38 mm slide cannot be, so the pictures must say something else.
+    assert film110.decide_orientation(far, old, pos_range=(-17.2, 60.0)) is None
+    # A free end seen in both runs pins the slide.
+    assert film110.decide_orientation(new, old, end_shift=10.0)["orientation"] == "same"
+    assert film110.decide_orientation(new, old, end_shift=20.0) is None
     print("test_thumbnail_and_decide_orientation OK")
 
 
@@ -960,7 +988,7 @@ def main() -> int:
         test_cli_hook_refuses_the_ambiguous_position_then_decides_later,
         test_explicit_placement_overrides_inference,
         test_cli_hook_is_noop_for_film_135,
-        test_match_shift_and_number_by_shift,
+        test_number_by_shift_and_shift_window,
         test_thumbnail_and_decide_orientation,
         test_bar_centering_shifts_put_the_bar_in_the_gap,
         test_cli_scan_parser_defaults_to_135,

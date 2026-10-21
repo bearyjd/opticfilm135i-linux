@@ -457,6 +457,13 @@ are kept beside them as evidence.
 
 ## 11. `digitize --film 110` — the two-run roll
 
+*Superseded in part by §13 (2026-10-22): a roll is no longer limited to
+two runs, the placement no longer refuses a run, and from the second run
+on the numbering comes from the roll's own images, not from the holder's
+phase. The protocol below still describes the first run and the two
+seatings that deliver every image of a four-image strip; file names are
+now `p<k>-f<N>.tiff` per pass instead of `a-`/`b-`.*
+
 *Implemented offline 2026-10-21; hardware check pending (Test 102).*
 
 A 110 strip takes two placements (§3), so a roll takes two `digitize`
@@ -691,3 +698,66 @@ data; the hardware check is Test 103 — a two-strip load through both
 placements, eyes on: the same photograph has the same number in A and B for
 both strips, no ghost image in apertures 3 and 4, no image shifted by the
 anchor, `film110_check.py --edge-check` clean on the products.
+
+## 13. Free passes — any seating, slide or turn (2026-10-22, offline)
+
+*Implemented offline after Test 103 (Christian's decision: "utred fri
+placering hellre än mm-instruktion"); hardware check pending (Test 104).*
+
+**The contract.** Every `digitize --film 110 [--strips 2] --roll N` run on
+an existing roll is a *pass* (`pass` in the record; frame files
+`p1-f…`, `p2-f…`, …) and is accepted as long as the roll is not done. The
+placement is read from the data and recorded (`A`, `B` or `free`) but never
+refuses a run; the same seating twice is allowed and changes nothing. Per
+photograph the best copy wins — whole and supported, then whole with the
+strip end free, then split — and a copy that is not better is `kept`
+(information on the image entry, not a problem). A roll is **done** when
+no number has only been seen split (`advice.missing` empty) and no
+delivered copy has the strip end free (`advice.free_end` empty); the
+operator may stop earlier. `advice.suggest` is a measured recommendation
+("image 2: move 5.7 mm further in", "image 4: no seating puts the strip
+end under plastic"), advice not a requirement; the old `advice.images` /
+`other_placement` keys stay one release for the application. Exit codes
+are unchanged (0, 2 refused before hardware, 4 coverage, 5 numbering could
+not be established — nothing written, the frame files kept).
+
+**Numbering from pass 2: recognise, never guess.** Pass 1 numbers as §5/§12.
+Every later pass holds its sightings until the slot's last aperture and
+then matches them against the newest earlier record of the roll. The film
+is periodic, so positions alone cannot tell a move of *d* from one of
+*d* ± 25.5 mm, and a strip turned 180° in its plane lies on the same grid
+as one that slid: positions are therefore never trusted on their own.
+Instead every sighting — whole or split — carries where it lies
+(`position_mm`), which part of the image it shows (`extent_mm`, mm from
+the image's own start) and its crop bounds; the earlier pass's sightings
+are re-read from its frame files, and each (new, old) pair that overlaps
+by at least 6 mm is compared on that part — as it is (SLIDE by *d* =
+*p* − *r*) and rotated 180° (TURNED about *c* = *p* + *r*). Pairs that
+agree on *d* (or *c*) form a hypothesis; what is physically possible (every
+recorded image must still lie in the slot after the move) and the strip's
+own free end, when seen in both passes (`film_start_mm` / `film_end_mm`),
+prune the hypotheses; the best remaining one wins only with a mean
+correlation of at least 0.5 and 0.15 above every other. Otherwise exit 5.
+Test 103 measured 0.74–0.96 for the same photograph against at most 0.52
+for different ones. A sighting predicted before the roll's first image
+that is not whole is the leader (ignored); a *whole* image there is a
+problem (the earlier pass missed the strip's first image). Products of a
+turned pass are rotated back, so every `image<N>.tiff` of a roll has pass
+1's orientation; `orientation` (`same`/`turned`, cumulative against pass
+1) and `numbering` (`protocol`/`content`) are in the record.
+
+**The operator.** Holes towards the open side, both film edges visible
+(§12), then: *place the strips so that in two passes you maximise the
+support at the edge, and make sure every image gets one pass without a
+bar across it* (the application's instruction, same words). Between passes
+a strip may be slid by any amount or turned end for end in its plane;
+never flipped over. A pass whose images cannot be recognised against the
+earlier ones stops without writing: seat the strip so that something seen
+before is seen again.
+
+**Detector note.** The plausibility test that drops a window of clear film
+(bright AND flat) now references the brightest film in the aperture
+(`CLEAR_BASE_PERCENTILE` 99, was 90): an aperture holding only printed
+border and pictures had read its brightest picture as the clear base and
+dropped a bright, flat picture. Identical results on all 24 archived real
+110 apertures.

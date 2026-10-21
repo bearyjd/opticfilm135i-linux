@@ -32,7 +32,7 @@ from test_film110 import AIR, PLASTIC, _build_fixture
 DPI = 600
 PPM = DPI / 25.4
 PAD_MM = 3.0                      # plastic either side of the opening
-AMP = None            # picture content off: every image looks alike (see _content)
+AMP = 0.45            # picture content on by default: every image has its own picture (see _content)
 APERTURE_MM = 36.0
 
 
@@ -65,6 +65,8 @@ def _strip_apertures(placement, free_end_in_a=True):
         arr, _p, _lo, _hi = _build_fixture(
             DPI, holes_mm=holes, images_mm=imgs, leading_dense_to_mm=dense,
             free_end_mm=free_end, seed=10 * j)
+        _paint_content(arr, [(phase + k * FILM_110.pitch_mm - base, k + 1,
+                              col0, col1, False) for k in range(4)])
         out[j] = arr
     out[4] = _empty_aperture()
     return out
@@ -519,8 +521,11 @@ def test_turned_strip_is_recognised_and_its_products_are_rotated_back():
             assert rc == 0 and rec["status"] == "ok", (rc, err[-400:])
             assert (rec["orientation"], rec["numbering"]) == ("turned", "content"), rec
             # The detector also predicts an image beyond the turned strip's
-            # last one (its tail): it would be number 0 and is refused.
-            assert len(rec["problems"]) == 1 and "number 0" in rec["problems"][0], rec["problems"]
+            # last one (its tail, now before the roll's first image): a
+            # split prediction with number < 1 is the leader, ignored --
+            # information, not a problem.
+            assert rec["problems"] == [], rec["problems"]
+            assert "before the roll's first image: the strip's leader, ignored" in out, out
             imgs = _by_number(rec)
             # Photograph k is the one whose id is k: after the turn they run 4,3,2,1.
             ordered = sorted(imgs.values(), key=lambda e: e["position_mm"])
@@ -627,6 +632,49 @@ def _content(amp=0.45):
         AMP = old
 
 
+def _paint_content(arr, entries):
+    """Give every photograph its own content: a smooth pattern on the
+    picture's interior, blended in over the outer 15 % of the picture so
+    that it adds no edge of its own (a hard pattern boundary 1.5 mm
+    inside the picture moved the detector's edge refinement by that much
+    on some images) and the builder's halo and borders stay. `entries` = [(local_start_mm, photograph
+    id, col0_mm, col1_mm, turned)]; off when AMP is None."""
+    if AMP is None:
+        return
+    for local, pid, col0, col1, turned in entries:
+        ra = max(0, int(round(local * PPM)))
+        rb = min(arr.shape[0], int(round((local + ILEN) * PPM)))
+        ca = int(round((col0 + 0.3) * PPM))
+        cb = int(round((col1 - 0.3) * PPM))
+        if rb <= ra or cb <= ca:
+            continue
+        rows = (np.arange(ra, rb) / PPM - local) / ILEN
+        cols = (np.arange(ca, cb) / PPM - col0) / (col1 - col0)
+        u, v = np.meshgrid(rows, cols, indexing="ij")
+        if turned:
+            u, v = 1.0 - u, 1.0 - v
+        pat = _pattern(pid, u, v)
+        fade = 0.15
+        wu = np.clip(np.minimum(u, 1.0 - u) / fade, 0.0, 1.0)
+        wv = np.clip(np.minimum(v, 1.0 - v) / fade, 0.0, 1.0)
+        w = (wu * wu * (3 - 2 * wu)) * (wv * wv * (3 - 2 * wv))
+        # Inside, the builder's sky/shadow step (common to every image, it
+        # would make any two look alike) gives way to the picture: the
+        # region's mean level modulated by the pattern; at the edges the
+        # builder's own structure stays.
+        reg = arr[ra:rb, ca:cb].astype(np.float64)
+        # A negative's picture is never lighter than the film base, and the
+        # detector drops a window that reads like clear film (bright AND
+        # flat): the pattern's peaks stay at 80 % of the region's brightest
+        # level (the gate halo or the thin half, i.e. about the base).
+        top = np.percentile(reg, 99.5, axis=(0, 1), keepdims=True)
+        lvl = 0.80 * top / (1.0 + AMP)
+        w3 = w[:, :, None]
+        pic = lvl * (1.0 + AMP * pat[:, :, None])
+        arr[ra:rb, ca:cb] = np.clip(reg * (1.0 - w3) + pic * w3,
+                                    0, 65535).astype(np.uint16)
+
+
 def _pattern(pid, u, v):
     """Picture content of photograph `pid` at (u, v) in [0, 1]^2 (u along
     the transport): a deterministic smooth pattern, different for every
@@ -639,7 +687,17 @@ def _pattern(pid, u, v):
         a, b = rng.uniform(-3.0, 3.0, 2)
         ph = rng.uniform(0, 2 * np.pi)
         f = f + np.sin(2 * np.pi * (a * u + b * v) + ph) * rng.uniform(0.5, 1.0)
-    return np.clip(f / 3.0, -1.0, 1.0)
+    f = np.clip(f / 3.0, -1.0, 1.0)
+    # Plus a fine texture (about 1 mm period), as real pictures have: a
+    # smooth pattern alone leaves some 6-10 mm stretches nearly flat, and
+    # the detector reads a window that is bright AND flat as clear film.
+    # (Several of them at random phases: a lone sinusoid is its own 180
+    # degree rotation up to a phase, a sum of six is not.)
+    for _ in range(6):
+        a, b = rng.uniform(9.0, 20.0, 2) * rng.choice((-1, 1), 2)
+        ph = rng.uniform(0, 2 * np.pi)
+        f = f + 0.15 * np.sin(2 * np.pi * (a * u + b * v) + ph)
+    return np.clip(f, -1.0, 1.0)
 
 
 def _holes_of(spec):
@@ -714,27 +772,8 @@ def _piece(j, spec, seed):
     arr, _p, blo, bhi = _build_fixture(
         DPI, holes_mm=holes, images_mm=imgs,
         seed=seed, perforated_side=spec["side"], printed_border=True)
-    # Give every photograph its own content (a smooth pattern on the
-    # picture's interior; the edges stay as the builder painted them).
-    guard = 1.5
-    for s, pid in (zip(spec["starts"], spec["ids"]) if AMP is not None else ()):
-        local = s - base
-        ra = max(0, int(round((local + guard) * PPM)))
-        rb = min(arr.shape[0], int(round((local + ILEN - guard) * PPM)))
-        ca = int(round((col0 + 0.6) * PPM))
-        cb = int(round((col1 - 0.6) * PPM))
-        if rb <= ra or cb <= ca:
-            continue
-        rows = (np.arange(ra, rb) / PPM - local) / ILEN
-        cols = (np.arange(ca, cb) / PPM - col0) / (col1 - col0)
-        u, v = np.meshgrid(rows, cols, indexing="ij")
-        if spec["turned"]:
-            u, v = 1.0 - u, 1.0 - v
-        pat = _pattern(pid, u, v)
-        reg = arr[ra:rb, ca:cb].astype(np.float64)
-        lvl = reg.mean(axis=(0, 1), keepdims=True)
-        arr[ra:rb, ca:cb] = np.clip(lvl * (1.0 + AMP * pat[:, :, None]),
-                                    0, 65535).astype(np.uint16)
+    _paint_content(arr, [(s - base, pid, col0, col1, spec["turned"])
+                         for s, pid in zip(spec["starts"], spec["ids"])])
     r0 = max(0, int(round((spec["start"] - base) * PPM)))
     r1 = min(arr.shape[0], int(round((spec["end"] - base) * PPM)))
     mask = np.zeros(arr.shape[0], bool)
@@ -863,48 +902,51 @@ def test_two_strips_run_a_makes_two_rolls():
 
 
 def test_second_run_fills_both_rolls():
-    with tempfile.TemporaryDirectory() as d:
-        assert _run2(d, _holder_apertures(_strip1("A"), _strip2("A")))[0] == 0
-        first = {(r, n): (digitize.roll_dir(d, "", r) / f"image{n}.tiff").read_bytes()
-                 for r, ns in ((1, (1, 3)), (2, (2,))) for n in ns}
-        rc, (r1, r2), scans, out, err = _run2(
-            d, _holder_apertures(_strip1("B"), _strip2("B")), roll=1)
-        assert rc == 0, (rc, err)
-        assert (r1["placement"], r2["placement"]) == ("B", "B")
-        assert r1["placement_source"] == "inferred"
-        assert _shape(r1) == {1: "W", 2: "W", 3: "T", 4: "W"}, _shape(r1)
-        assert _shape(r2) == {1: "W", 2: "T", 3: "W", 4: "W"}, _shape(r2)
-        # Every photograph of both strips now exists; the sag rule replaced
-        # the free-end copies (1 of roll 2, 4 of roll 1) with supported ones.
-        for r in (1, 2):
-            names = _names(d, r)
-            for n in (1, 2, 3, 4):
-                assert f"image{n}.tiff" in names, (r, n, names)
-        assert _images(r1)[4]["replaced_free_end_copy"] is True
-        assert _images(r2)[1]["replaced_free_end_copy"] is True
-        # Delivered images are kept, not overwritten.
-        for (r, n), data in first.items():
-            assert (digitize.roll_dir(d, "", r) / f"image{n}.tiff").read_bytes() == data \
-                or (r, n) == (2, 1), (r, n)
-        assert r1["advice"]["images"] == [], r1["advice"]
-        # Strip 2's last image has its strip end free in BOTH seatings: no
-        # supported copy exists, so that roll is not done.
-        assert r2["advice"]["missing"] == [] and r2["advice"]["free_end"] == [4], r2["advice"]
-        assert digitize.roll_is_done(d, 1) and not digitize.roll_is_done(d, 2)
-        assert (r1["pass"], r2["pass"]) == (2, 2)
-        # p2- frame files per slot, aperture numbers kept.
-        assert {"p2-f1.tiff", "p2-f3.tiff"} <= set(_names(d, 1))
-        assert {"p2-f4.tiff", "p2-f6.tiff"} <= set(_names(d, 2))
-        # A pair is refused only when BOTH rolls are done; here roll 2 is not,
-        # so a third pass is accepted (roll 1's images are all kept).
-        rc, (t1, t2), scans, out, err = _run2(
-            d, _holder_apertures(_strip1("B"), _strip2("B")), roll=1)
-        assert rc == 0 and (t1["pass"], t2["pass"]) == (3, 3), (rc, err)
-        assert all(e["kept"] or not e["whole"] for e in t1["images"])
-        # A new pair numbers on at 3, 4.
-        rc, (r3, r4), *_ = _run2(d, _holder_apertures(_strip1("A"), _strip2("A")))
-        assert rc == 0 and (r3["roll"], r4["roll"]) == (3, 4)
-    print("test_second_run_fills_both_rolls OK")
+    # Real photographs differ from each other; the second run is numbered
+    # by recognising them (docs/film-110.md), so the fixture needs content.
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            assert _run2(d, _holder_apertures(_strip1("A"), _strip2("A")))[0] == 0
+            first = {(r, n): (digitize.roll_dir(d, "", r) / f"image{n}.tiff").read_bytes()
+                     for r, ns in ((1, (1, 3)), (2, (2,))) for n in ns}
+            rc, (r1, r2), scans, out, err = _run2(
+                d, _holder_apertures(_strip1("B"), _strip2("B")), roll=1)
+            assert rc == 0, (rc, err)
+            assert (r1["placement"], r2["placement"]) == ("B", "B")
+            assert r1["placement_source"] == "inferred"
+            assert _shape(r1) == {1: "W", 2: "W", 3: "T", 4: "W"}, _shape(r1)
+            assert _shape(r2) == {1: "W", 2: "T", 3: "W", 4: "W"}, _shape(r2)
+            # Every photograph of both strips now exists; the sag rule replaced
+            # the free-end copies (1 of roll 2, 4 of roll 1) with supported ones.
+            for r in (1, 2):
+                names = _names(d, r)
+                for n in (1, 2, 3, 4):
+                    assert f"image{n}.tiff" in names, (r, n, names)
+            assert _images(r1)[4]["replaced_free_end_copy"] is True
+            assert _images(r2)[1]["replaced_free_end_copy"] is True
+            # Delivered images are kept, not overwritten.
+            for (r, n), data in first.items():
+                assert (digitize.roll_dir(d, "", r) / f"image{n}.tiff").read_bytes() == data \
+                    or (r, n) == (2, 1), (r, n)
+            assert r1["advice"]["images"] == [], r1["advice"]
+            # Strip 2's last image has its strip end free in BOTH seatings: no
+            # supported copy exists, so that roll is not done.
+            assert r2["advice"]["missing"] == [] and r2["advice"]["free_end"] == [4], r2["advice"]
+            assert digitize.roll_is_done(d, 1) and not digitize.roll_is_done(d, 2)
+            assert (r1["pass"], r2["pass"]) == (2, 2)
+            # p2- frame files per slot, aperture numbers kept.
+            assert {"p2-f1.tiff", "p2-f3.tiff"} <= set(_names(d, 1))
+            assert {"p2-f4.tiff", "p2-f6.tiff"} <= set(_names(d, 2))
+            # A pair is refused only when BOTH rolls are done; here roll 2 is not,
+            # so a third pass is accepted (roll 1's images are all kept).
+            rc, (t1, t2), scans, out, err = _run2(
+                d, _holder_apertures(_strip1("B"), _strip2("B")), roll=1)
+            assert rc == 0 and (t1["pass"], t2["pass"]) == (3, 3), (rc, err)
+            assert all(e["kept"] or not e["whole"] for e in t1["images"])
+            # A new pair numbers on at 3, 4.
+            rc, (r3, r4), *_ = _run2(d, _holder_apertures(_strip1("A"), _strip2("A")))
+            assert rc == 0 and (r3["roll"], r4["roll"]) == (3, 4)
+        print("test_second_run_fills_both_rolls OK")
 
 
 def test_either_rail_gives_the_same_numbering():
@@ -1163,13 +1205,17 @@ def test_two_strips_three_passes():
 
 
 def test_pattern_contents_are_distinct():
-    u, v = np.meshgrid(np.linspace(0, 1, 96), np.linspace(0, 1, 72), indexing="ij")
+    # 160 x 120 samples: the thumbnail cuts THUMB_INSET off every side first.
+    u, v = np.meshgrid(np.linspace(0, 1, 160), np.linspace(0, 1, 120), indexing="ij")
     th = {i: film110.thumbnail(_pattern(i, u, v)) for i in range(1, 7)}
+    # A picture against its own 180 degree rotation, and against every
+    # other picture, must stay well under ORIENT_MIN_CORR (0.5) minus the
+    # margin (0.15): the orientation decision has room then.
     for i in th:
-        assert abs(film110.thumb_correlation(th[i], th[i][::-1, ::-1])) < 0.2, i
+        assert abs(film110.thumb_correlation(th[i], th[i][::-1, ::-1])) < 0.35, i
         for j in th:
             if i != j:
-                assert abs(film110.thumb_correlation(th[i], th[j])) < 0.25, (i, j)
+                assert abs(film110.thumb_correlation(th[i], th[j])) < 0.3, (i, j)
     print("test_pattern_contents_are_distinct OK")
 
 

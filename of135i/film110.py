@@ -87,7 +87,7 @@ LEVEL_MIN_CONTRAST = 0.08       # below this relative level difference nothing i
 WHOLE_MARGIN_MM = 0.3
 LEADING_CONTINUATION_MM = 1.0
 LEADING_CONTINUATION_FRAC = 0.8
-CLEAR_BASE_PERCENTILE = 90.0
+CLEAR_BASE_PERCENTILE = 99.0
 
 # Design choices not dictated by the spec, made here and documented:
 #  - all "levels" (air, film presence, holes, gradients) are read from the
@@ -979,19 +979,18 @@ def image_number_anchored(line0_mm_global: float, anchor_mm: float,
 # ------------------------------------------------------- free passes (shift)
 #
 # `digitize --film 110` runs on an existing roll are not tied to the two
-# fixed placements: the strip may be seated anywhere. From the second run
-# on, numbering therefore works from the roll's OWN earlier data. The strip
-# moved as one piece between two runs, so every image's position differs
-# from the recorded one by the same amount (Test 103: within 0.3 mm); that
-# amount is the SHIFT. Because the film is periodic, a shift is only known
-# modulo the film pitch: the operator is assumed to have moved the strip by
-# less than about half a pitch, with a little extra room in the direction
-# "further in" (towards the middle of the holder), which is the direction
-# the driver itself suggests. A move the other way by more than the window
-# is indistinguishable from a move one pitch further in and would number
-# every image one too high; the window is stated in the advice text.
+# fixed placements: the strip may be seated anywhere, slid or turned. From
+# the second run on, numbering therefore works from the roll's OWN earlier
+# data. The strip moved as one piece between two runs, so every image's
+# position differs from the recorded one by the same amount (Test 103:
+# within 0.3 mm); that amount is the SHIFT. Because the film is periodic a
+# shift is only known modulo the film pitch from positions alone, so the
+# shift is never taken from positions: it is the one at which the images
+# LOOK like the recorded ones (`decide_orientation`, below), and a run in
+# which no image can be recognised is refused rather than guessed. The
+# window below only bounds the moves the driver SUGGESTS (`pick_shift`).
 SHIFT_INWARD_SLACK_MM = 1.0     # extra room beyond +/- pitch/2 towards the middle
-SHIFT_AGREE_MM = 2.0            # candidate shifts must lie within this of each other
+SHIFT_AGREE_MM = 2.0            # pairings within this of each other are one shift
 SHIFT_RESIDUAL_MM = 2.0         # an image this far off the shifted grid is refused
 
 
@@ -1006,29 +1005,6 @@ def shift_window(slot: int = 1, film: Film = FILM_110) -> tuple:
     if slot == 2:
         return (-half - SHIFT_INWARD_SLACK_MM, half - SHIFT_INWARD_SLACK_MM)
     return (-half + SHIFT_INWARD_SLACK_MM, half + SHIFT_INWARD_SLACK_MM)
-
-
-def match_shift(positions_now, recorded, slot: int = 1,
-                film: Film = FILM_110):
-    """The strip's shift since an earlier record. `positions_now` are the
-    start positions (mm along the holder, `global_position_mm`) of the
-    images seen in this run; `recorded` is a list of (number, position_mm)
-    from the earlier record. Every (new, recorded) pairing whose
-    difference lies inside `shift_window(slot)` is a candidate; because
-    the window is one pitch wide each image contributes at most one
-    candidate per recorded image. Returns (shift_mm, n_pairs) -- the median
-    of the candidates -- or None when there is no candidate or when the
-    candidates disagree by more than SHIFT_AGREE_MM (no consistent shift:
-    the caller must not guess). Pure."""
-    lo, hi = shift_window(slot, film)
-    cands = sorted(p - r for p in positions_now for _n, r in recorded
-                   if lo <= p - r < hi)
-    if not cands or cands[-1] - cands[0] > SHIFT_AGREE_MM:
-        return None
-    mid = len(cands) // 2
-    median = (cands[mid] if len(cands) % 2
-              else 0.5 * (cands[mid - 1] + cands[mid]))
-    return median, len(cands)
 
 
 def number_by_shift(position_mm: float, shift_mm: float, recorded,
@@ -1089,18 +1065,29 @@ def pick_shift(candidates, slot: int = 1, film: Film = FILM_110):
 # recorded ones, once as they are (SLIDE) and once with the new thumbnail
 # rotated 180 degrees (TURNED). The numbers stay with the photographs.
 THUMB_SIZE = (96, 72)           # (lines, columns): a 17.2 x 13.0 mm image, ~96 px long
+THUMB_INSET = 0.12              # fraction of each side cut off before binning: the
+                                # product pad, the gate halo and the printed border
+                                # are the same on every image and would make any
+                                # two images correlate; only the picture decides
 ORIENT_MIN_CORR = 0.5           # the winning hypothesis' mean correlation at least ...
 ORIENT_MARGIN = 0.15            # ... and this far above the other one
+END_AGREE_MM = 3.0              # a slide must agree with a free film end seen in both runs
+PATCH_PX_PER_MM = 8.0           # the working copy of a sighting kept for the content check
+OVERLAP_MIN_MM = 6.0            # two sightings of an image are compared on at least this much
 
 
-def thumbnail(arr, size=THUMB_SIZE):
-    """`arr` ((lines, cols) or (lines, cols, channels)) averaged into
-    `size` bins and normalised to zero mean and unit variance (all zeros
-    for a flat patch). Pure; the area average makes the thumbnail
-    independent of the scan resolution."""
+def thumbnail(arr, size=THUMB_SIZE, inset=THUMB_INSET):
+    """`arr` ((lines, cols) or (lines, cols, channels)), its outer `inset`
+    fraction on every side cut off, averaged into `size` bins and
+    normalised to zero mean and unit variance (all zeros for a flat
+    patch). Pure; the area average makes the thumbnail independent of the
+    scan resolution."""
     a = np.asarray(arr, dtype=np.float64)
     if a.ndim == 3:
         a = a.mean(axis=2)
+    if inset:
+        dy, dx = int(a.shape[0] * inset), int(a.shape[1] * inset)
+        a = a[dy:a.shape[0] - dy, dx:a.shape[1] - dx]
     h, w = size
     if a.shape[0] < h or a.shape[1] < w:
         raise ValueError(f"crop {a.shape} is smaller than the thumbnail {size}")
@@ -1111,6 +1098,62 @@ def thumbnail(arr, size=THUMB_SIZE):
     a = a - a.mean()
     sd = a.std()
     return (a / sd).astype(np.float32) if sd > 1e-9 else np.zeros_like(a, dtype=np.float32)
+
+
+def patch(arr, px_per_mm: float):
+    """A sighting's working copy for the content check: `arr` ((lines,
+    cols[, channels]), the VISIBLE part of an image as scanned) averaged
+    over channels and area-binned down to about PATCH_PX_PER_MM, as
+    float32. Small enough to hold for every sighting of a strip, fine
+    enough for a THUMB_SIZE thumbnail of a 6 mm overlap. Pure."""
+    a = np.asarray(arr, dtype=np.float64)
+    if a.ndim == 3:
+        a = a.mean(axis=2)
+    f = max(1, int(round(px_per_mm / PATCH_PX_PER_MM)))
+    if f > 1:
+        h, w = (a.shape[0] // f) * f, (a.shape[1] // f) * f
+        if h == 0 or w == 0:
+            return a.astype(np.float32)
+        a = a[:h, :w].reshape(h // f, f, w // f, f).mean(axis=(1, 3))
+    return a.astype(np.float32)
+
+
+def pair_correlation(new_item, old_item, kind: str, film: Film = FILM_110):
+    """How much two sightings look like the same photograph. `new_item` =
+    (position_mm, u0, u1, patch), `old_item` = (number, position_mm, u0,
+    u1, patch): u0..u1 is the part of the image the sighting shows, in mm
+    from the image's own start (a whole image is 0..length, a split shows
+    less), `patch` from `patch()`. Under `kind` "same" the two show the
+    same part where their u-ranges overlap; under "turned" the new
+    sighting's u runs the other way (u' = length - u) and its picture is
+    rotated 180 degrees. The overlapping parts are thumbnailed alike and
+    correlated. None when they overlap by less than OVERLAP_MIN_MM. Pure."""
+    _p, nu0, nu1, npatch = new_item
+    _n, _r, ou0, ou1, opatch = old_item
+    length = film.image_mm[0]
+    if kind == "turned":
+        nu0, nu1 = length - nu1, length - nu0
+    a, b = max(nu0, ou0), min(nu1, ou1)
+    if b - a < OVERLAP_MIN_MM:
+        return None
+
+    def rows(pch, u0, u1, lo, hi):
+        n = pch.shape[0]
+        r0 = int(round((lo - u0) / (u1 - u0) * n))
+        r1 = int(round((hi - u0) / (u1 - u0) * n))
+        return pch[max(0, r0):max(r0 + 1, min(n, r1))]
+
+    size = (max(16, int(round(THUMB_SIZE[0] * (b - a) / length))), THUMB_SIZE[1])
+    try:
+        if kind == "turned":
+            sub = rows(npatch, nu0, nu1, a, b)[::-1, ::-1]
+        else:
+            sub = rows(npatch, nu0, nu1, a, b)
+        tn = thumbnail(sub, size)
+        to = thumbnail(rows(opatch, ou0, ou1, a, b), size)
+    except ValueError:
+        return None
+    return thumb_correlation(tn, to)
 
 
 def thumb_correlation(a, b) -> float:
@@ -1137,59 +1180,94 @@ def _best_cluster(pairs):
     return None if best is None else best[1]
 
 
-def decide_orientation(new, old, slot: int = 1, film: Film = FILM_110,
-                       new_all=None, old_all=None):
-    """Did the strip SLIDE or was it TURNED since an earlier record?
-    `new`: [(position_mm, thumbnail)] of this run's whole images; `old`:
-    [(number, position_mm, thumbnail)] of the record's whole images;
-    `new_all` / `old_all`: the positions of ALL images seen (split ones
-    included; default: the whole ones), which fix the geometric slide.
+def decide_orientation(new, old, film: Film = FILM_110, *,
+                       pos_range=None, end_shift=None):
+    """Did the strip SLIDE or was it TURNED since an earlier record, and by
+    how much? `new`: [(position_mm, u0, u1, patch)] -- every sighting of
+    this run, whole or split; `old`: [(number, position_mm, u0, u1,
+    patch)] of the record's sightings (see `pair_correlation` for the
+    items).
 
-    SLIDE: when the positions of all images agree on one shift
-    (`match_shift`), that shift is the hypothesis and the whole-image pairs
-    at that shift are compared; when they do not, the hypothesis is the best
-    cluster of whole-image pairs inside the slot's shift window. TURNED:
-    pairs (new i, old j) share c = p_i + r_j, compared with the new
-    thumbnail rotated 180 degrees; the best cluster is the hypothesis.
-    The winner needs a mean correlation of at least ORIENT_MIN_CORR and
-    ORIENT_MARGIN over the other. A geometric slide with no whole pair to
-    verify it stands (basis "geometry") unless the turned hypothesis is
-    itself clearly confirmed. Returns {"orientation": "same"|"turned",
-    "key": mm, "mean": r, "other": r, "pairs": n, "basis":
-    "content"|"geometry"} or None when it cannot tell. Pure."""
-    lo, hi = shift_window(slot, film)
-    new_all = [p for p, _t in new] if new_all is None else list(new_all)
-    old_all = [(n, r) for n, r, _t in old] if old_all is None else list(old_all)
-    geo = match_shift(new_all, old_all, slot, film) if new_all and old_all else None
+    Every (new, old) pair that overlaps by OVERLAP_MIN_MM is a hypothesis:
+    SLIDE by d = p - r, compared as they are; TURNED about c = p + r, the
+    new picture rotated 180 degrees. Pairs that agree on d (or c) within
+    SHIFT_AGREE_MM/2 form a cluster. Clusters are first pruned by what is
+    physically possible -- `pos_range` (lo, hi): every recorded image
+    must still lie inside it after the move -- and by the strip's own
+    free end when one was seen in both runs (`end_shift` = its move, mm:
+    a slide must agree with it within END_AGREE_MM; a turn is not
+    checked against it). Among the clusters left, the best -- most pairs
+    with a usable correlation, then mean correlation -- wins when its
+    mean is at least ORIENT_MIN_CORR and ORIENT_MARGIN above every other
+    remaining cluster of either kind. No window on the shift: a move of
+    more than half a pitch, or of whole apertures, is told from a smaller
+    one by the pictures (and the free end), which positions alone cannot
+    do -- the film is periodic. Returns {"orientation": "same"|"turned",
+    "key": mm, "mean": r, "other": r, "pairs": n} or None when no two
+    sightings overlap or the pictures do not decide it. Pure."""
     slide, turned = [], []
-    for p, tn in new:
-        tr = tn[::-1, ::-1]
-        for _num, r, to in old:
-            if lo <= p - r < hi:
-                slide.append((p - r, thumb_correlation(tn, to)))
-            turned.append((p + r, thumb_correlation(tr, to)))
-    t = _best_cluster(turned)
-    mt = t[1] if t else -1.0
-    if geo is not None:
-        near = [(d, c) for d, c in slide if abs(d - geo[0]) <= SHIFT_AGREE_MM / 2]
-        s = (geo[0], sum(c for _d, c in near) / len(near), len(near)) if near else None
-        if s is None:
-            # Nothing to verify the slide by.
-            if t is not None and mt >= ORIENT_MIN_CORR:
-                return {"orientation": "turned", "key": t[0], "mean": mt,
-                        "other": -1.0, "pairs": t[2], "basis": "content"}
-            return {"orientation": "same", "key": geo[0], "mean": -1.0,
-                    "other": mt, "pairs": 0, "basis": "geometry"}
-    else:
-        s = _best_cluster(slide)
-    ms = s[1] if s else -1.0
-    if max(ms, mt) < ORIENT_MIN_CORR or abs(ms - mt) < ORIENT_MARGIN:
+    for item in new:
+        p = item[0]
+        for oitem in old:
+            r = oitem[1]
+            c = pair_correlation(item, oitem, "same", film)
+            if c is not None:
+                slide.append((p - r, c))
+            c = pair_correlation(item, oitem, "turned", film)
+            if c is not None:
+                turned.append((p + r, c))
+    if not slide and not turned:
         return None
-    if ms > mt:
-        return {"orientation": "same", "key": s[0], "mean": ms, "other": mt,
-                "pairs": s[2], "basis": "content"}
-    return {"orientation": "turned", "key": t[0], "mean": mt, "other": ms,
-            "pairs": t[2], "basis": "content"}
+    length = film.image_mm[0]
+    recorded = [o[1] for o in old]
+
+    def possible(kind, key):
+        if pos_range is not None:
+            lo, hi = pos_range
+            moved = ([r + key for r in recorded] if kind == "same"
+                     else [key - r - length for r in recorded])
+            if any(not (lo <= m <= hi) for m in moved):
+                return False
+        if (end_shift is not None and kind == "same"
+                and abs(key - end_shift) > END_AGREE_MM):
+            return False
+        return True
+
+    tol = SHIFT_AGREE_MM / 2
+    clusters = []
+    for kind, pairs in (("same", slide), ("turned", turned)):
+        for key0, _c in pairs:
+            members = [(k, c) for k, c in pairs if abs(k - key0) <= tol]
+            keys = sorted(k for k, _c in members)
+            key = keys[len(keys) // 2]
+            if not possible(kind, key):
+                continue
+            mean = sum(c for _k, c in members) / len(members)
+            good = sum(1 for _k, c in members if c >= ORIENT_MIN_CORR)
+            clusters.append(((good, mean), kind, key, mean, len(members)))
+    if not clusters:
+        return None
+    clusters.sort(key=lambda x: x[0], reverse=True)
+    _score, kind, key, mean, n = clusters[0]
+    others = [c[3] for c in clusters[1:]
+              if c[1] != kind or abs(c[2] - key) > tol]
+    other = max(others) if others else -1.0
+    if mean < ORIENT_MIN_CORR or mean - other < ORIENT_MARGIN:
+        return None
+    return {"orientation": kind, "key": key, "mean": mean, "other": other,
+            "pairs": n}
+
+
+def slot_position_range(slot: int = 1, strips: int = 1, film: Film = FILM_110,
+                        holder=STRIP) -> tuple:
+    """(lo, hi) mm along the holder where an image START of this slot's
+    strip can lie: from one image length before the slot's first aperture
+    (a leading split) to the end of its last one. A lone strip owns the
+    whole holder. Pure."""
+    aps = slot_apertures(slot) if strips == 2 else range(1, 7)
+    lo = (aps[0] - 1) * holder.pitch_mm - film.image_mm[0]
+    hi = aps[-1] * holder.pitch_mm
+    return lo, hi
 
 
 def number_turned(position_mm: float, c_mm: float, recorded,
