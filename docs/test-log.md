@@ -7182,3 +7182,46 @@ acceptance criterion "same photograph, same number in A and B" is
 untested because placement B was never run. Next: the same test through
 the application, both strips with their holes towards the open side,
 strip 1 left, strip 2 right, placement A then B.
+
+**Test 103, continued (2026-10-22, through the application): PASS on
+image identity, seven of eight photographs delivered.** Run from the
+production application (`negativ-digitalisering`, which runs this
+repository's `digitize` from master 6a1cff3 and loads the magazine
+itself), two strips, placement A then B, no `--placement`, exit 0 both
+runs, no "no perforation" and no problems. A first attempt was discarded
+on the owner's order (one strip, wrongly seated). Acceptance, read-only
+on the staging directory (`t103_accept.py`, private):
+
+- *Same photograph, same number in A and B — PASS.* Every image of a
+  strip moved by the same amount between the runs (strip 1: +10.5 to
+  +10.8 mm for all four numbers; strip 2: −10.9 to −11.5 mm), and the
+  content of each number's crop correlates A against B (0.74–0.96)
+  clearly above its correlation against any other number (≤ 0.52).
+- *Delivered.* Strip 1: 1 (A, free end), 3 (A), 4 (B, supported copy
+  replaced A's free-end one). Strip 2: 1 (B, supported, replaced), 2 (A),
+  3 (B), 4 (A, free end). Strip 1's image 2 was split in both runs
+  (trailing in A, leading in B by 0.46 mm) and is missing.
+- *Why image 2 is missing — seating, not the driver.* The strips were
+  moved 10.6 and 11.3 mm instead of 12.75, and strip 1 lay 1.6 mm short
+  of the holder's end in A. The numbering tolerated it (±6 mm) but the
+  placement inference of B was 0.2 mm from refusing (strip 1's image 1
+  at 12.5 mm against B's phase 16.25, tolerance 4.0). A visual rule for
+  B is proposed instead of a millimetre figure: the bar between
+  apertures 1 and 2 sits in the middle of the gap between images 1 and
+  2 (gap 8.3 mm, bar 2 mm: ±3 mm margin).
+- *The rail.* Strip 2 lay 1.1 mm under the rail in aperture 6 in A
+  (warning printed, picture clipped 0.1 mm); after the owner's nudge,
+  0 mm in B. Every leading split had its end edge confirmed; the
+  leader-ghost rule never fired wrongly. Sizes 16.5–17.4 × 12.8–13.7 mm,
+  the short ones on the free-end images.
+- *The edge images.* Both strips' outer images have a free end in A
+  and, with the shift, no support in B either (strip 1 image 1, strip 2
+  image 4 kept as A's free-end copies). The owner's rule for the
+  application: if image 1 or 4 comes out poor, seat the strip so that
+  its end has support at the outer edge (§12).
+
+Open after the test (owner's decisions): "exists -> kept" reported as a
+problem on a normal second run (it is information); an explicit list of
+numbers whose delivered copy is still a free-end one; a third run that
+replaces free-end copies only (today refused: the roll is done after
+A + B); the visual rule for B in §3/§12 and the application.

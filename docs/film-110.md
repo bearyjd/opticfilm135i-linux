@@ -574,6 +574,14 @@ once, so one load, one calibration and one eject can carry both.
   but the picture's own margin on that side is only ~1 mm: beyond it the
   CLI warns that the picture is clipped by the rail and asks for the strip
   to be nudged towards the open side.
+- **If image 1 or 4 (the edge images) come out poor, try to seat the strip
+  so that its end has support at the outer edge** (the operator's own
+  rule, Test 103 pass B, 2026-10-21; the same wording is shown by the
+  application at every 110 load). This is the sag rule of §4 seen from
+  the operator's side: a strip end that rests on nothing in either
+  placement — a short or missing leader — has no supported copy of its
+  edge image, and the driver then delivers the free-end copy marked
+  `free_end_near` rather than nothing.
 
 **Slots.** Strip 1 occupies apertures 1–3 (*slot 1*), strip 2 apertures 4–6
 (*slot 2*): `film110.SLOT_APERTURES = 3`, `film110.slot_of(aperture, strips)`.
