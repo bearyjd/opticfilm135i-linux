@@ -1068,11 +1068,20 @@ def number_by_shift(position_mm: float, shift_mm: float, recorded,
 
 
 def bar_spans_mm(slot: int = 1, strips: int = 2, holder=STRIP) -> list:
-    """The crossbars after the apertures of a slot, as (start, end) mm
-    along the holder. A lone strip (`strips` 1) owns all six apertures."""
+    """The plastic that can split an image of a slot's strip, as (start,
+    end) mm along the holder: the crossbar after each of its apertures,
+    and the holder's end wall before aperture 1 (slot 1, or a lone strip)
+    -- taken as one bar wide, so centring it in a gap works like any bar.
+    (Test 104: image 1 seated at 0.0 mm was "split by the leading bar"
+    and the advice found no bar to centre.) A lone strip (`strips` 1)
+    owns all six apertures; slot 2's last bar is the holder's far end."""
     aps = slot_apertures(slot) if strips == 2 else range(1, 7)
-    return [((j - 1) * holder.pitch_mm + holder.aperture_mm,
-             j * holder.pitch_mm) for j in aps]
+    bar = holder.pitch_mm - holder.aperture_mm
+    spans = [((j - 1) * holder.pitch_mm + holder.aperture_mm,
+              j * holder.pitch_mm) for j in aps]
+    if aps[0] == 1:
+        spans.insert(0, (-bar, 0.0))
+    return spans
 
 
 def bar_centering_shifts(position_mm: float, bars, film: Film = FILM_110) -> list:
@@ -1085,7 +1094,10 @@ def bar_centering_shifts(position_mm: float, bars, film: Film = FILM_110) -> lis
     gap = film.pitch_mm - length
     out = []
     for b0, b1 in bars:
-        if b1 > position_mm and b0 < position_mm + length:
+        # A bar within WHOLE_MARGIN_MM of the image splits it, as the
+        # detector's whole/split rule says (an image seated exactly at
+        # the holder's end wall touches it without overlapping it).
+        if b1 > position_mm - WHOLE_MARGIN_MM and b0 < position_mm + length + WHOLE_MARGIN_MM:
             c = (b0 + b1) / 2
             out.append(c - (position_mm + length + gap / 2))
             out.append(c - (position_mm - gap / 2))
