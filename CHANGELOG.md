@@ -6,6 +6,15 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- Test 104, roll 7 (2026-10-22 evening): a strip whose hole edge rests
+  flush against the rail -- no air outside the film, the holes still
+  reading as air inside the band -- was "no perforation found" on every
+  aperture (the edge tracker needs an air->film step). The band edge is
+  now the per-line edge on a side that abuts plastic, and both edges are
+  searched. Roll 7's photographs 1-3 are found; Test 103's apertures with
+  the holes against the rail (five of them, "no perforation found" on
+  2026-10-21) now yield their images too. The operator rule "the hole
+  edge must not be hidden by a rail" is thereby relaxed to "visible holes".
 - Test 104, load 2 (2026-10-22): "the system serves the photographs, not
   the other way round" (Christian). A WHOLE image is never refused for
   its numbering: one found before the roll's first-seen image (an earlier
