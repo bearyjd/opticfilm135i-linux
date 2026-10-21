@@ -15,10 +15,10 @@ Layout::
     <out>/<prefix>roll-<NNN>/f<K>-ir.tiff  IR channel
     <out>/<prefix>roll-<NNN>/f<K>.diag.json
 
-A 110 roll (``--film 110``, docs/film-110.md §11) takes two runs into the
-same directory: ``<p>-f<K>.tiff`` (+ sidecars) per placement ``p`` (``a``,
-``b``, or the provisional ``x`` until an inferred placement is decided) and
-one ``image<N>.tiff`` / ``image<N>-ir.tiff`` per photograph.
+A 110 roll (``--film 110``, docs/film-110.md §11) takes as many runs
+(passes) into the same directory as it needs: ``p<k>-f<K>.tiff`` (+
+sidecars) per pass ``k`` and one ``image<N>.tiff`` / ``image<N>-ir.tiff``
+per photograph.
 
 Raw (unclipped, un-inverted) TIFF is the archival product; colour
 interpretation is the application's job. The manifest makes the run
@@ -188,45 +188,58 @@ def roll_records(out_dir: str, roll: int, prefix: str = "") -> list[dict]:
             if r.get("roll") == roll and r.get("prefix", "") == prefix]
 
 
+def roll_records_current(out_dir: str, roll: int, prefix: str = "") -> list[dict]:
+    """The roll's records since the last `--force` redo: a record written by
+    a forced run carries `forced: true` and starts a new epoch (the manifest
+    is append-only, so earlier records stay but no longer describe what is
+    on disk). A roll never forced yields all its records."""
+    recs = roll_records(out_dir, roll, prefix)
+    for i in range(len(recs) - 1, -1, -1):
+        if recs[i].get("forced"):
+            return recs[i:]
+    return recs
+
+
 def roll_is_done(out_dir: str, roll: int, prefix: str = "") -> bool:
     """True when the roll needs no further scan.
 
     135: any 'ok' record. 110 (a roll whose last record has film "110"):
-    a roll takes two runs, one per placement (docs/film-110.md §11), so it
-    is done when the last record is 'ok', found a placement, and left
-    nothing for the other placement (`advice.images` empty), or when both
-    placements have an 'ok' record -- and in either case only when some
-    'ok' record numbered at least one image. A roll without a single
-    image is never done, whatever its records say about placement: the
-    strip was not read (Test 103: slot 2's strip with its holes against
-    the rail gave "ok, placement A, nothing left" and the roll counted as
-    done, so the other placement's run was refused). Its number is still
-    not reused (`next_roll` counts every record and directory)."""
+    done when some 'ok' record numbered at least one image AND the latest
+    'ok' record's advice (the roll's state after that run) lists no
+    `missing` number (seen only split, never delivered) and no `free_end`
+    number (delivered with the strip end free, docs/film-110.md §4). A
+    roll without a single image is never done: the strip was not read
+    (Test 103: slot 2's strip with its holes against the rail). The
+    driver cannot know how many images a strip has; "done" is about what
+    it has seen, and the operator may stop earlier. A record from before
+    the pass-based advice has only `images`, which is read the same way."""
     recs = roll_records(out_dir, roll, prefix)
     if recs and recs[-1].get("film") == "110":
+        recs = roll_records_current(out_dir, roll, prefix)
         oks = [r for r in recs
                if r.get("film") == "110" and r.get("status") == "ok"]
         if not any(r.get("images") for r in oks):
             return False
-        last = recs[-1]
-        if (last.get("status") == "ok" and last.get("placement")
-                and not (last.get("advice") or {}).get("images")):
-            return True
-        return {"A", "B"} <= {r.get("placement") for r in oks}
+        adv = oks[-1].get("advice") or {}
+        missing = adv["missing"] if "missing" in adv else adv.get("images", [])
+        return not missing and not adv.get("free_end")
     return roll in rolls_done(out_dir, prefix)
 
 
 # ------------------------------------------------------------ 110 rolls
 #
-# A 110 strip is scanned in two placements, each one `digitize --film 110`
-# run, both into the SAME roll directory (docs/film-110.md §11). Frame
-# files carry the placement as a prefix so the runs cannot collide:
-# a-f1.tiff / b-f1.tiff. While the placement is still unknown (inferred
-# from the first image found) a frame is written under the provisional tag
-# "x" and renamed as soon as the placement is decided. The photographs are
-# image<N>.tiff / image<N>-ir.tiff, N = position on the strip.
+# A 110 roll takes as many `digitize --film 110` runs ("passes") as it needs,
+# all into the SAME roll directory, until nothing is missing and nothing
+# was delivered with the strip end free (docs/film-110.md §11). Frame
+# files carry the pass as a prefix so the runs cannot collide: p1-f1.tiff,
+# p2-f1.tiff, ... (the placement and the strip's orientation are in the
+# manifest record). The photographs are image<N>.tiff / image<N>-ir.tiff,
+# N = position on the strip; the tags a/b/x of earlier versions are still
+# swept by --force.
 
-FILM110_FRAME_TAGS = ("a", "b", "x")
+FILM110_MAX_PASSES = 20
+FILM110_FRAME_TAGS = tuple(f"p{k}" for k in range(1, FILM110_MAX_PASSES + 1)) \
+    + ("a", "b", "x")
 # Highest photograph number the clean-up sweeps: 6 apertures x 37.947 mm
 # hold at most 9 images of 25.5 mm; 20 leaves room without scanning the
 # disk for arbitrary names.
@@ -239,7 +252,7 @@ _FILM110_FRAME_SUFFIXES = (".tiff", "-ir.tiff", ".overscan.tiff",
 def frame_path_110(out_dir: str, prefix: str, roll: int, tag: str,
                    frame: int) -> Path:
     """Visible-scan path of one 110 frame: <roll>/<tag>-f<N>.tiff (tag
-    "a", "b" or the provisional "x"); its sidecars sit beside it."""
+    "p1", "p2", ...); its sidecars sit beside it."""
     return roll_dir(out_dir, prefix, roll) / f"{tag}-f{frame}.tiff"
 
 
@@ -251,7 +264,8 @@ def film110_image_path(out_dir: str, prefix: str, roll: int, n: int,
 
 
 def film110_placements_on_disk(rdir: Path) -> set[str]:
-    """Which frame tags ("a", "b", "x") have at least one file in `rdir`."""
+    """Which frame tags ("p1", "p2", ...; legacy "a", "b", "x") have at
+    least one file in `rdir`."""
     found: set[str] = set()
     if not Path(rdir).is_dir():
         return found
@@ -264,24 +278,17 @@ def film110_placements_on_disk(rdir: Path) -> set[str]:
     return found
 
 
-def rename_film110_frame(rdir: Path, frame: int, src_tag: str,
-                         dst_tag: str) -> list[tuple[str, str]]:
-    """Rename one frame's files from tag `src_tag` to `dst_tag` (the
-    provisional "x" to the decided placement). All-or-nothing check first:
-    if any destination exists nothing is renamed and FileExistsError is
-    raised. Returns [(old_path, new_path), ...] for the files moved."""
-    rdir = Path(rdir)
-    pairs = []
-    for suf in _FILM110_FRAME_SUFFIXES:
-        old = rdir / f"{src_tag}-f{frame}{suf}"
-        if old.exists():
-            pairs.append((old, rdir / f"{dst_tag}-f{frame}{suf}"))
-    for _old, new in pairs:
-        if new.exists():
-            raise FileExistsError(str(new))
-    for old, new in pairs:
-        old.rename(new)
-    return [(str(o), str(n)) for o, n in pairs]
+def film110_next_pass(out_dir: str, prefix: str, roll: int) -> int:
+    """Index of the next pass on this roll: one past the roll's 110 records
+    since the last forced redo, and one past the highest p<k> frame tag on
+    disk (a crash between scanning and recording still owns its pass)."""
+    recs = [r for r in roll_records_current(out_dir, roll, prefix)
+            if r.get("film") == "110"]
+    nxt = len(recs) + 1
+    for tag in film110_placements_on_disk(roll_dir(out_dir, prefix, roll)):
+        if tag[0] == "p" and tag[1:].isdigit():
+            nxt = max(nxt, int(tag[1:]) + 1)
+    return nxt
 
 
 def clear_film110_outputs(out_dir: str, prefix: str, roll: int) -> list[str]:

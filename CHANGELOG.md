@@ -6,6 +6,33 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- `digitize --film 110` runs until the roll is done, at any seating (offline,
+  fixtures; no hardware yet): every run on an existing roll is a numbered
+  pass (`p1-`, `p2-`, ... frame files, `pass` in the record) accepted
+  unless the roll is done; the placement is recorded (A, B or `free`) and
+  never refuses. From pass 2 the strip may be slid -- by any amount -- or
+  turned 180 degrees in its plane: numbering waits for the end of the
+  strip and is taken from the roll's own earlier images by RECOGNISING
+  them (`film110.decide_orientation`): every sighting, whole or split,
+  is compared on the part of the image it shows (`position_mm`, `crop`,
+  `extent_mm` on the image entries) with the earlier pass's sightings
+  re-read from its frame files, as slid and as turned; what is physically
+  possible (the slot) and the strip's own free end seen in both passes
+  (`film_start_mm` / `film_end_mm` on the record) prune the hypotheses
+  first. Positions alone never decide (the film is periodic: a move of
+  more than half a pitch would otherwise number every image one off,
+  silently); when the pictures do not decide it, exit 5 and nothing is
+  written. `orientation`, `numbering` in the record; products of a turned
+  pass are rotated back. Image entries gain `kept` (a copy as good or
+  better exists: information, no longer a problem); `advice` is `missing`
+  / `free_end` / `suggest` plus the old `images` / `other_placement`; a
+  roll is done when nothing is missing and no delivered copy has the strip
+  end free. `--force` starts a new epoch of the roll's records (`forced`).
+  Detector: `CLEAR_BASE_PERCENTILE` 90 -> 99 (the clear-film reference
+  of the plausibility test is the brightest film, not the brightest
+  picture: an aperture holding only printed border and pictures read a
+  bright, flat picture as clear film; identical results on all 24
+  archived real 110 apertures).
 - Test 103 (2026-10-21), the first hardware pass of `digitize --film 110
   --strips 2` (two strips, placement A twice; placement B not yet run),
   and what it corrected: a film band narrower than 16 mm is accepted when
