@@ -6,6 +6,23 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- Test 103 (2026-10-21), the first hardware pass of `digitize --film 110
+  --strips 2` (two strips, placement A twice; placement B not yet run),
+  and what it corrected: a film band narrower than 16 mm is accepted when
+  its far edge lies under the rail (`film110.RAIL_HIDDEN_MAX_MM` 3.0,
+  `ApertureFind.rail_hidden_mm`, the CLI warns when the picture is
+  clipped by the rail); an image seated within `WHOLE_MARGIN_MM` of an
+  aperture edge is a leading/trailing split (not "whole: false, split:
+  none"); a leading split is counted unless the previous aperture already
+  numbered that image (number-based, so image 1 at −0.1 mm and image 4
+  at +0.03 mm are first sightings), and a leading prediction without a
+  confirmed end edge is the leader's ghost, ignored; a roll without a
+  single numbered image is never done (`digitize.roll_is_done`), so the
+  other placement's run is accepted on a slot that read nothing. Operator
+  rule recorded (`docs/film-110.md` §12): the edge with the small holes
+  faces the aperture's open side; holes against the rail give nothing.
+  Fixtures: holes model-consistent (2.6 mm long), leading images painted
+  as images, a hole after the last image. `tests/test_film110_digitize.py`.
 - `digitize --film 110 --strips 2` (offline; hardware check pending, Test
   103): two 110 strips of up to four images in one load, strip 1 against the
   holder's left end (apertures 1-3), strip 2 against its right end (4-6),

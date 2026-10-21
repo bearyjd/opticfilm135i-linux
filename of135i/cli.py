@@ -525,6 +525,16 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
 
     px_per_mm = args.dpi / film110.MM_PER_INCH
     parts = []
+    if find.rail_hidden_mm:
+        # The strip's far edge lies under the rail; the picture's own
+        # margin on that side is width - lateral offset - image width.
+        margin = (_holder.FILM_110.width_mm - _holder.FILM_110.image_lateral_offset_mm
+                  - _holder.FILM_110.image_mm[1])
+        clip = max(0.0, find.rail_hidden_mm - margin)
+        parts.append(f"film edge {find.rail_hidden_mm:.1f} mm under the rail"
+                     + (f" -> picture clipped by {clip:.1f} mm on that side; "
+                        f"nudge the strip towards the open side" if clip > 0.05
+                        else ""))
     anchored = state.strips == 2 and state.slot == 2
     two = state.strips == 2
     frames = (sorted(find.frames, key=lambda f: f.line0) if anchored
@@ -564,18 +574,19 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
             parts.append("image predicted before the strip's film begins "
                          "(strip end / gap before it): no image, ignored")
             continue
-        if fr.split == "leading":
-            # The tail of an image that started in the previous aperture
-            # was numbered there (as a trailing split), so it is not
-            # counted again here -- except in slot 2 while nothing in the
-            # slot is numbered yet: then the image that started under the
-            # bar before this aperture is the strip's FIRST image
-            # (incomplete here; the other placement delivers it) and
-            # falls through to be numbered.
-            if not (anchored and state.anchor_mm is None):
-                parts.append("leading lines continue the previous "
-                             "aperture's split image (already counted)")
-                continue
+        if fr.split == "leading" and not fr.refined.get("line1"):
+            # Every hole predicts BOTH its neighbours, so the strip's
+            # first hole also predicts an image before itself: the
+            # leader. A leading image that is really there has its
+            # visible END edge confirmed (every one of Test 103's three);
+            # a prediction without one is that ghost and is ignored. (A
+            # leading split that IS an image is numbered below and, when
+            # the previous aperture already numbered it as a trailing
+            # split, dropped there as already counted.)
+            parts.append("leading lines predicted by a hole with no image "
+                         "edge confirmed: the strip's leader, not an "
+                         "image, ignored")
+            continue
 
         pos_mm = fr.line0 / px_per_mm
         note = ""
@@ -648,6 +659,17 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
                 parts.append(note + msg)
                 state.problems.append(msg)
                 continue
+
+        if fr.split == "leading" and any(e["number"] == n for e in state.images):
+            # The tail of the image the previous aperture numbered as a
+            # trailing split: counted there, not again. Numbering decides
+            # this, not aperture order: Test 103 had image 1 seated flush
+            # with aperture 1's edge (-0.1 mm) and image 4 at +0.03 mm
+            # in aperture 3 with no trailing split before it, both
+            # genuine first sightings of their images.
+            parts.append(f"leading lines continue the previous aperture's "
+                         f"split image {n} (already counted)")
+            continue
 
         entry = {"number": n, "aperture": aperture, "whole": bool(fr.whole),
                  "split": fr.split, "free_end_near": bool(fr.free_end_near),
@@ -1305,8 +1327,7 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path) -> None:
 
 
 def _film110_roll_guard(args: argparse.Namespace, roll: int, rdir: Path,
-                        state: Film110State,
-                        tolerate_empty: bool = False) -> "str | None":
+                        state: Film110State) -> "str | None":
     """Before any hardware: may this 110 run write into `rdir`? None = yes
     (and `state.forbidden` is filled with the placements the roll already
     holds); otherwise the refusal message. A roll takes two runs, one per
@@ -1315,16 +1336,11 @@ def _film110_roll_guard(args: argparse.Namespace, roll: int, rdir: Path,
     provisional x- files) and the roll's last manifest record is a 110 run.
     The same placement twice is an operator error and is refused.
 
-    `tolerate_empty` (two-strip runs, §12): a roll whose every record found
-    no film at all is recorded done so its number is not reused, but the
-    other placement's run may still add to it, so "done" does not refuse
-    it."""
+    A roll without a single numbered image is never "done"
+    (`digitize.roll_is_done`), so a two-strip run whose other slot found
+    nothing is not refused for that slot's roll (§12)."""
     from . import digitize
-    recs0 = digitize.roll_records(args.out, roll, args.prefix)
-    all_empty = bool(recs0) and all(
-        r.get("film") == "110" and r.get("film_found") is False for r in recs0)
-    if digitize.roll_is_done(args.out, roll, args.prefix) and not (
-            tolerate_empty and all_empty):
+    if digitize.roll_is_done(args.out, roll, args.prefix):
         return (f"roll {roll} is recorded done (nothing is left for the other "
                 f"placement); use --roll for a new strip, or --force to redo it")
     if not digitize.roll_dir_has_output(args.out, args.prefix, roll):
@@ -1456,8 +1472,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                     print(f"error: {msg}.", file=sys.stderr)
                     return 2
             for c in ctxs:
-                msg = _film110_roll_guard(args, c.roll, c.rdir, c.state,
-                                          tolerate_empty=strips == 2)
+                msg = _film110_roll_guard(args, c.roll, c.rdir, c.state)
                 if msg is not None:
                     print(f"error: {msg}.", file=sys.stderr)
                     return 2

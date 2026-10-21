@@ -535,10 +535,11 @@ products.
 
 ## 12. Two strips per load — `digitize --film 110 --strips 2`
 
-*Implemented offline 2026-10-21; hardware check pending (Test 103). No
-real two-strip scan exists yet — every statement below is about synthetic
-fixtures (`tests/test_film110_digitize.py`), and the first real load is
-expected to find the rest.*
+*Implemented offline 2026-10-21; first hardware pass the same evening
+(Test 103: two strips, placement A twice, placement B not yet run). The
+operator's rules on how a strip must lie and three detector/guard rules
+below came out of that pass; everything else is still fixture-tested only
+(`tests/test_film110_digitize.py`).*
 
 The strip holder has six apertures (pitch 37.947 mm, opening 36 mm); two
 110 strips of up to four images each (about 102 mm plus leader) fit at
@@ -553,6 +554,19 @@ once, so one load, one calibration and one eject can carry both.
   length and leader).
 - **Placement B:** both strips moved half a film pitch (12.75 mm) towards
   the middle, strip 1 to the right and strip 2 to the left, by eye.
+- **The edge with the small holes faces the aperture's open side**, away
+  from the rail the strip lies against. Holes against the rail are hidden
+  and the aperture reads "no perforation found" — nothing is numbered
+  (Test 103: one strip lay right and one wrong in each pass; the wrong one
+  gave nothing). To turn a strip, turn it in its plane (the images then
+  run the other way along the holder and the numbers count from the
+  other short side); never flip it over.
+- **Both film edges stay visible.** A strip pushed under the rail is
+  accepted while no more than `film110.RAIL_HIDDEN_MAX_MM` (3.0 mm) of it
+  is hidden (`ApertureFind.rail_hidden_mm`; Test 103 measured 0.6–2.1 mm),
+  but the picture's own margin on that side is only ~1 mm: beyond it the
+  CLI warns that the picture is clipped by the rail and asks for the strip
+  to be nudged towards the open side.
 
 **Slots.** Strip 1 occupies apertures 1–3 (*slot 1*), strip 2 apertures 4–6
 (*slot 2*): `film110.SLOT_APERTURES = 3`, `film110.slot_of(aperture, strips)`.
@@ -571,15 +585,25 @@ A strip of more than four images does not fit beside another one; use
   every later image is numbered by its distance from that one in film
   pitches (`film110.image_number_anchored`: `round(distance / 25.5) + 1`).
   A *leading* split in the slot's first aperture (an image that started
-  under the bar before aperture 4) is not "already counted" there — it is
-  image 1, recorded with `whole: false, split: "leading"` and no product;
-  the other placement delivers it. Slot 2 has no placement inference of
+  under the bar before aperture 4) is image 1, recorded with `whole:
+  false, split: "leading"` and no product; the other placement delivers
+  it. Slot 2 has no placement inference of
   its own: its frame files and record carry the run's placement label, and
   `placement_source` says where that came from (`"given"`, `"slot 1
   inferred"`, or `"run order"`). Consequence: if the detector misses the
   strip's real first image in one placement, the numbering of that run is
   shifted by one against the other placement's — the eyes of Test 103 must
   check that the same photograph has the same number in both runs.
+- *Leading splits, both slots* (Test 103). An image whose start lies
+  within `WHOLE_MARGIN_MM` (0.3 mm) of the aperture's leading edge is a
+  leading split (image 1 sat at −0.1 mm, image 4 at +0.03 mm in aperture
+  3). It is numbered like any image and dropped only when the previous
+  aperture already numbered that image (as its trailing split) — the
+  number decides, not the aperture order. A leading *prediction* whose
+  visible end edge the data did not confirm (`FrameFind.refined["line1"]`
+  false) is the strip's first hole predicting an image before itself, i.e.
+  the leader: ignored, not a problem (every real leading image of Test 103
+  had its end edge confirmed).
 - *Run order.* When slot 1 numbered nothing and `--placement` is not given
   (slot 1 empty), the run is labelled by the manifest: `"A"` when roll N has
   no 110 record yet, else `"B"` (`placement_source: "run order"`).
@@ -598,11 +622,15 @@ given `--frames` must contain at least one aperture of each slot, else exit
 companion; the same-placement-twice and finished-roll refusals of §11 apply
 to each); `--force` clears both rolls.
 
-A slot that finds no film at all still gets its record — `status: "ok"`,
-`images: []`, the placement as labelled, `film_found: false` — and counts
-as done, so its roll number is not reused. The other placement's run may
-still add to such a roll (the guard tolerates it). One-strip loads should
-use `--strips 1`, which leaves no empty roll behind.
+A slot that finds no film at all, or film but no image, still gets its
+record — `status: "ok"`, `images: []`, the placement as labelled,
+`film_found` as seen. Such a roll is never "done": a roll without a single
+numbered image is not finished whatever its records say about placement
+(Test 103: slot 2's strip with its holes against the rail was recorded
+"ok, placement A, nothing left" and the roll counted as done, so the other
+placement's run was refused), and the other placement's run is accepted on
+it. Its number is still not reused. One-strip loads should use `--strips
+1`, which leaves no empty roll behind.
 
 **Empty apertures.** The stop rule of §11 is per slot: an empty aperture
 after film in slot 1 skips the rest of slot 1's apertures but never stops
@@ -636,8 +664,10 @@ bar and strip 2's first image can fall in the same two apertures:
   fixtures (the images of both strips lie in other apertures or are delivered
   by the other placement), but that is not guaranteed in general. A
   ghost-before-first-hole *inside* aperture 4 that is not before a free film
-  start (the film continues from aperture 3) is geometrically
-  indistinguishable from a real leading split of image 1.
+  start (the film continues from aperture 3) is geometrically the same as
+  a real leading split of image 1; what separates them is the end edge —
+  a real image has one where the prediction says, the leader has none
+  (the leading-split rule above).
 - A strip's images that are split in BOTH placements stay undelivered: slot
   1's phase is fixed by the holder, so §3's guarantee (every image whole in
   A or B) holds there; slot 2's phase depends on the strip's length and

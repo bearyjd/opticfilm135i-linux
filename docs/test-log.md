@@ -7109,3 +7109,76 @@ stop rule needs a film frame first.
 
 **Status after the test.** Test 100 (the poll floor) remains planned
 and unrun; the series ran with the 1.0 s floor.
+
+### Test 103: two 110 strips in one load, `digitize --film 110 --strips 2`, placement A (2026-10-21, PARTIAL — placement B not run)
+
+**Setup.** The first hardware run of the two-strip mode (`docs/film-110.md`
+§12), from the terminal, into a private directory. Two four-image 110
+strips in the strip holder: strip 1 against the holder's left end (slot 1,
+apertures 1–3), strip 2 against the right end (slot 2, apertures 4–6).
+Plan: placement A, eject, both strips 12.75 mm inwards, the same command
+with `--roll 1` for placement B. Acceptance: the same photograph gets the
+same number in A and B, no ghost at the strips' meeting point (apertures
+3/4), every whole image delivered, the sag rule applied.
+
+**What happened.** Two passes, both placement A. Pass 1 (rolls 1 and 2):
+strip 1 lay with the edge with the small holes towards the aperture's
+open side, strip 2 with its holes against the rail. Pass 2 (rolls 3 and
+4, after the owner turned both strips): the other way round. Placement B
+was never run. Transport, calibration, eject: normal in both passes.
+
+**Findings.**
+
+1. *Both strips lay with their far edge under the rail* (0.6–2.1 mm; the
+   visible band measured 13.9–15.4 mm against the model's 16.0 ± 1.0),
+   and four of six apertures were refused as "no 110 film band". Fixed
+   (commit d347069): a band narrower than the film by up to
+   `RAIL_HIDDEN_MAX_MM` (3.0 mm) is accepted when the narrow side abuts
+   plastic and the other side air; `ApertureFind.rail_hidden_mm` carries
+   the hidden width and the CLI warns when the picture's own margin on
+   that side is exceeded.
+2. *The edge with the small holes must face the aperture's open side.*
+   With the holes against the rail the aperture reads "no perforation
+   found in the film band" and nothing is numbered — strip 2 in pass 1,
+   strip 1 in pass 2. Recorded as the operator's rule (§12); two
+   instruction pictures drawn for the application (private).
+3. *Image 1 seated flush with aperture 1's edge (−0.1 mm)* was dropped as
+   a leading split "already counted" by a previous aperture that does not
+   exist; *image 4 at +0.03 mm in aperture 3* came out "whole: false,
+   split: none" and was reported split by no bar. Fixed: an image within
+   `WHOLE_MARGIN_MM` of an aperture edge is a leading/trailing split; a
+   leading split is counted unless the previous aperture already numbered
+   that image (the number decides, not the aperture order); a leading
+   prediction without a confirmed end edge is the strip's first hole
+   predicting the leader and is ignored — every real leading image of
+   this test had its end edge confirmed (`refined["line1"]` true), the
+   fixture's ghost had none.
+4. *Roll 2 (slot 2 without a find) was recorded done*, so the guard
+   refused the placement-B run (`--roll 1`); pass 2 had to be a new pair.
+   Fixed: a roll without a single numbered image is never done
+   (`digitize.roll_is_done`); its number is still not reused.
+5. *The film model holds* (n = 1 from Test 86): on the real frames the
+   hole measured ~2.3 mm long, the lead 2.3 mm and the trail 3.5–3.7 mm
+   (model 3.4). The test fixtures had drawn the holes 1.5 mm long, which
+   put the prediction of the image before a hole 1.1 mm off and hid a
+   defect of the kind in finding 3 from the suite; the fixtures now draw
+   the hole from the model, paint leading images as images and perforate
+   the tail after the last image. Driver constants unchanged.
+
+**Offline re-detection of all twelve frames** with the corrected code
+(`of135i/film110.py` + the CLI hook, no hardware): where a strip lay
+right, every image was found — strip 1 (roll 1): image 1 leading split,
+2 trailing split, 3 whole, 4 leading split at the edge with the free end
+near; strip 2 (roll 4): 1 whole (free end near), 2 whole, 3 trailing
+split, 4 whole. Four whole images delivered, four await placement B —
+exactly the two-placement protocol. Where the holes lay against the rail:
+nothing, as in finding 2. Review images (owner's eyes, not production
+acceptance): image 3 of strip 1 and images 1, 2 and 4 of strip 2.
+
+**Verdict.** PARTIAL. The hardware side of the two-strip load works
+(load, six apertures, eject, two rolls per run); on correctly seated
+strips the numbering and the sag rule came out as the protocol says; the
+acceptance criterion "same photograph, same number in A and B" is
+untested because placement B was never run. Next: the same test through
+the application, both strips with their holes towards the open side,
+strip 1 left, strip 2 right, placement A then B.
