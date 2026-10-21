@@ -6,6 +6,30 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- Test 104, load 2 (2026-10-22): "the system serves the photographs, not
+  the other way round" (Christian). A WHOLE image is never refused for
+  its numbering: one found before the roll's first-seen image (an earlier
+  pass missed it -- strip 2's first photograph lay under strip 1's
+  cassette end) is numbered 0, -1, ... and delivered as `image0.tiff`;
+  one that does not fit the roll's grid is delivered as
+  `image<N>-uncertain.tiff` (`uncertain: true`, a problems line) and does
+  not count as N. `advice.done` also requires that both ends of the
+  strip were seen in some pass, or lie under a holder end wall -- a
+  strip whose end was hidden is never done (three of four delivered had
+  been declared done). A whole image with both edges confirmed is no
+  longer dropped as "no strip lies there" in slot 1's last aperture (a
+  turned strip 1 reaching into slot 2 lost its image 2), and a content
+  cluster is scored by its best pair, not its mean (a 6 mm split
+  sighting correlating with nothing had vetoed the right cluster).
+  `ApertureFind.film_runs`; slot 1 hands strip 2's start seen in its
+  last aperture to slot 2. A pass after a TURNED pass counts numbers
+  along the reference's reversed grid (`direction` in `number_by_shift`;
+  pass 3 had numbered a three-image strip's middle image "4" and another
+  strip's "2" twice). Uncertain sightings never serve as a reference.
+  `SHIFT_RESIDUAL_MM` 2 -> 5 (real pitch 24.85–25.5 mm against the
+  model's 25.5: three pitches are 2 mm off by themselves). "Done" never
+  refuses a run: a pass on a done roll keeps every copy and changes
+  nothing ("roll 3 pass 4" must never stop a strip from being scanned).
 - Test 104, first pass (2026-10-22, two strips through the application,
   seated free in the channel): three detector corrections, each validated
   on the pass's frames and on all 24 archived real 110 apertures (identical

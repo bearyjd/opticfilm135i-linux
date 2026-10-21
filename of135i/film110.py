@@ -146,6 +146,7 @@ class ApertureFind:
     frames: list = field(default_factory=list)
     reason: str = ""
     rail_hidden_mm: float = 0.0        # film width hidden under a rail (0 = fully visible)
+    film_runs: list = field(default_factory=list)   # [(first_line, last_line)] of film present
 
 
 # ------------------------------------------------------------- small helpers
@@ -667,7 +668,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
         return ApertureFind(False, (lo, hi), film_line_start, film_line_end,
                              leading_continuation, [],
                              "film band not adjacent to air; perforations hidden",
-                             rail_hidden_mm)
+                             rail_hidden_mm, film_runs=[(int(a), int(b)) for a, b in present_runs])
 
     # d. Perforations: resolve the perforated edge and its hole runs. The
     # edge tracker's zone stops at the first plastic column beyond the
@@ -710,7 +711,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
         reason = ("no perforation found near either film edge" if edge_is_low is None
                    else "no perforation found in the film band")
         return ApertureFind(False, (lo, hi), film_line_start, film_line_end,
-                             leading_continuation, [], reason, rail_hidden_mm)
+                             leading_continuation, [], reason, rail_hidden_mm, film_runs=[(int(a), int(b)) for a, b in present_runs])
 
     perforated_edge_col = lo if edge_is_low else hi
     lat_len_px = film.image_mm[1] * px_per_mm
@@ -847,7 +848,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
     frames_out = frames_rev if score_rev > score_normal else frames_normal
 
     return ApertureFind(False, (lo, hi), film_line_start, film_line_end,
-                         leading_continuation, frames_out, "", rail_hidden_mm)
+                         leading_continuation, frames_out, "", rail_hidden_mm, film_runs=[(int(a), int(b)) for a, b in present_runs])
 
 
 def product_bounds(find: FrameFind, *, dpi: float | None = None, pad_mm: float = 0.0,
@@ -1036,20 +1037,28 @@ def image_number_anchored(line0_mm_global: float, anchor_mm: float,
 # LOOK like the recorded ones (`decide_orientation`, below), and a run in
 # which no image can be recognised is refused rather than guessed.
 SHIFT_AGREE_MM = 2.0            # pairings within this of each other are one shift
-SHIFT_RESIDUAL_MM = 2.0         # an image this far off the shifted grid is refused
+SHIFT_RESIDUAL_MM = 5.0         # an image farther off the shifted grid than this is
+                                # "uncertain" (delivered, flagged). Real film pitch runs
+                                # 24.85-25.5 mm against the model's 25.5 (Tests 103, 104):
+                                # three pitches from the nearest certain sighting is 2 mm
+                                # off by itself; 5 mm stays far below half a pitch (12.75)
 
 
 def number_by_shift(position_mm: float, shift_mm: float, recorded,
-                    film: Film = FILM_110) -> tuple:
-    """Number (1-based; < 1 means before the roll's first image, the
-    caller refuses it) and residual in mm (signed, |r| <= pitch/2) of the
-    image starting at `position_mm`, counted from the recorded image
-    (number, position_mm) that lies nearest once the strip's `shift_mm`
-    is taken off. `recorded` must not be empty. Pure."""
+                    film: Film = FILM_110, direction: int = 1) -> tuple:
+    """Number (< 1 means before the roll's first-seen image) and residual
+    in mm (signed, |r| <= pitch/2) of the image starting at
+    `position_mm`, counted from the recorded image (number, position_mm)
+    that lies nearest once the strip's `shift_mm` is taken off.
+    `direction` is +1 when the recorded grid's numbers grow along the
+    holder, -1 when the reference record was itself TURNED against pass
+    1 (its numbers then fall along the holder: Test 104, load 2, pass 3
+    numbered a three-image strip's middle image "4" and another's "2"
+    twice). `recorded` must not be empty. Pure."""
     num, pos = min(recorded,
                    key=lambda e: abs(position_mm - e[1] - shift_mm))
     k = (position_mm - pos - shift_mm) / film.pitch_mm
-    return num + round(k), (k - round(k)) * film.pitch_mm
+    return num + direction * round(k), (k - round(k)) * film.pitch_mm
 
 
 def bar_spans_mm(slot: int = 1, strips: int = 2, holder=STRIP) -> list:
@@ -1227,19 +1236,19 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
     Every (new, old) pair that overlaps by OVERLAP_MIN_MM is a hypothesis:
     SLIDE by d = p - r, compared as they are; TURNED about c = p + r, the
     new picture rotated 180 degrees. Pairs that agree on d (or c) within
-    SHIFT_AGREE_MM/2 form a cluster. Clusters are first pruned by what is
+    SHIFT_AGREE_MM/2 form a cluster, as good as its best pair. Clusters are first pruned by what is
     physically possible -- `pos_range` (lo, hi): every recorded image
     must still lie inside it after the move -- and by the strip's own
     free end when one was seen in both runs (`end_shift` = its move, mm:
     a slide must agree with it within END_AGREE_MM; a turn is not
     checked against it). Among the clusters left, the best -- most pairs
-    with a usable correlation, then mean correlation -- wins when its
-    mean is at least ORIENT_MIN_CORR and ORIENT_MARGIN above every other
-    remaining cluster of either kind. No window on the shift: a move of
+    with a usable correlation, then best correlation -- wins when its
+    best pair is at least ORIENT_MIN_CORR and ORIENT_MARGIN above every
+    other remaining cluster's best pair, of either kind. No window on the shift: a move of
     more than half a pitch, or of whole apertures, is told from a smaller
     one by the pictures (and the free end), which positions alone cannot
     do -- the film is periodic. Returns {"orientation": "same"|"turned",
-    "key": mm, "mean": r, "other": r, "pairs": n} or None when no two
+    "key": mm, "corr": r, "other": r, "pairs": n} or None when no two
     sightings overlap or the pictures do not decide it. Pure."""
     slide, turned = [], []
     for item in new:
@@ -1278,19 +1287,23 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
             key = keys[len(keys) // 2]
             if not possible(kind, key):
                 continue
-            mean = sum(c for _k, c in members) / len(members)
+            # A cluster is as good as its best pair: a split sighting with
+            # a few millimetres of flat overlap correlates with nothing,
+            # and must not drag down the cluster its geometry puts it in
+            # (Test 104, load 2: 0.84 and -0.19 in the true cluster).
+            best = max(c for _k, c in members)
             good = sum(1 for _k, c in members if c >= ORIENT_MIN_CORR)
-            clusters.append(((good, mean), kind, key, mean, len(members)))
+            clusters.append(((good, best), kind, key, best, len(members)))
     if not clusters:
         return None
     clusters.sort(key=lambda x: x[0], reverse=True)
-    _score, kind, key, mean, n = clusters[0]
+    _score, kind, key, best, n = clusters[0]
     others = [c[3] for c in clusters[1:]
               if c[1] != kind or abs(c[2] - key) > tol]
     other = max(others) if others else -1.0
-    if mean < ORIENT_MIN_CORR or mean - other < ORIENT_MARGIN:
+    if best < ORIENT_MIN_CORR or best - other < ORIENT_MARGIN:
         return None
-    return {"orientation": kind, "key": key, "mean": mean, "other": other,
+    return {"orientation": kind, "key": key, "corr": best, "other": other,
             "pairs": n}
 
 
@@ -1307,8 +1320,10 @@ def slot_position_range(slot: int = 1, strips: int = 1, film: Film = FILM_110,
 
 
 def number_turned(position_mm: float, c_mm: float, recorded,
-                  film: Film = FILM_110) -> tuple:
-    """`number_by_shift` for a TURNED strip: the new image starting at
-    `position_mm` is the photograph that started at c - position_mm in the
-    recorded record's frame (c from `decide_orientation`). Pure."""
-    return number_by_shift(c_mm - position_mm, 0.0, recorded, film)
+                  film: Film = FILM_110, direction: int = 1) -> tuple:
+    """`number_by_shift` for a strip TURNED since the reference record:
+    the new image starting at `position_mm` is the photograph that
+    started at c - position_mm in the record's frame (c from
+    `decide_orientation`); `direction` is the record's own, as in
+    `number_by_shift`. Pure."""
+    return number_by_shift(c_mm - position_mm, 0.0, recorded, film, direction)

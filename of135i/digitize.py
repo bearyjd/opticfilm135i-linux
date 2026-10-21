@@ -221,6 +221,11 @@ def roll_is_done(out_dir: str, roll: int, prefix: str = "") -> bool:
         if not any(r.get("images") for r in oks):
             return False
         adv = oks[-1].get("advice") or {}
+        if "done" in adv:
+            # The run computed it with the strip's ends in view (cli
+            # _film110_fill_record): nothing missing, nothing free-ended,
+            # and no room for an unseen image.
+            return bool(adv["done"])
         missing = adv["missing"] if "missing" in adv else adv.get("images", [])
         return not missing and not adv.get("free_end")
     return roll in rolls_done(out_dir, prefix)
@@ -257,10 +262,14 @@ def frame_path_110(out_dir: str, prefix: str, roll: int, tag: str,
 
 
 def film110_image_path(out_dir: str, prefix: str, roll: int, n: int,
-                       ir: bool = False) -> Path:
-    """Photograph path: <roll>/image<N>.tiff (or image<N>-ir.tiff)."""
+                       ir: bool = False, uncertain: bool = False) -> Path:
+    """Photograph path: <roll>/image<N>.tiff (or image<N>-ir.tiff); a copy
+    whose number the driver could not pin to the roll's grid is
+    image<N>-uncertain.tiff (and -uncertain-ir.tiff). N may be 0 or
+    negative: an image found before the roll's first-seen one."""
+    tag = "-uncertain" if uncertain else ""
     return roll_dir(out_dir, prefix, roll) / (
-        f"image{n}-ir.tiff" if ir else f"image{n}.tiff")
+        f"image{n}{tag}-ir.tiff" if ir else f"image{n}{tag}.tiff")
 
 
 def film110_placements_on_disk(rdir: Path) -> set[str]:
@@ -324,6 +333,6 @@ def delivered_image(records: list[dict], roll: int, prefix: str,
         if "roll" in r and (r.get("roll") != roll or r.get("prefix", "") != prefix):
             continue
         for e in r.get("images") or []:
-            if e.get("number") == n and e.get("main"):
+            if e.get("number") == n and e.get("main") and not e.get("uncertain"):
                 found = e
     return found

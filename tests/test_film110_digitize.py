@@ -27,7 +27,7 @@ import numpy as np
 
 from of135i import cli, digitize, film110
 from of135i.holder import FILM_110, STRIP
-from test_film110 import AIR, PLASTIC, _build_fixture
+from test_film110 import AIR, CLEAR, PLASTIC, _build_fixture
 
 DPI = 600
 PPM = DPI / 25.4
@@ -237,9 +237,13 @@ def test_two_pass_roll_end_to_end():
         assert [r["placement"] for r in recs] == ["A", "B"], recs
         assert [r["pass"] for r in recs] == [1, 2]
         assert digitize.roll_is_done(d, 1) is True
-        # A third run on a finished roll is refused before hardware.
+        # A third run on a finished roll is NOT refused (the bookkeeping
+        # never stops the operator): it scans, keeps every copy, changes
+        # nothing.
         rc, rec, scans, out, err = _run_b(d)
-        assert rc == 2 and scans == [] and "done" in err, (rc, scans, err)
+        assert rc == 0 and scans and rec["pass"] == 3, (rc, scans, err[-200:])
+        assert all(e["kept"] or not e["whole"] for e in rec["images"]), rec["images"]
+        assert digitize.roll_is_done(d, 1) is True
     print("test_two_pass_roll_end_to_end OK")
 
 
@@ -524,8 +528,10 @@ def test_turned_strip_is_recognised_and_its_products_are_rotated_back():
             # last one (its tail, now before the roll's first image): a
             # split prediction with number < 1 is the leader, ignored --
             # information, not a problem.
+            # (The hole beyond the turned strip's last image predicts a
+            # window in the clear leader; the detector drops it as clear
+            # film, so nothing reaches numbering.)
             assert rec["problems"] == [], rec["problems"]
-            assert "before the roll's first image: the strip's leader, ignored" in out, out
             imgs = _by_number(rec)
             # Photograph k is the one whose id is k: after the turn they run 4,3,2,1.
             ordered = sorted(imgs.values(), key=lambda e: e["position_mm"])
@@ -543,6 +549,32 @@ def test_turned_strip_is_recognised_and_its_products_are_rotated_back():
                 f"turned pass' image 2 does not look like pass 1's orientation: "
                 f"{r:.2f} against {wrong:.2f} unrotated")
     print("test_turned_strip_is_recognised_and_its_products_are_rotated_back OK")
+
+
+def test_pass_after_a_turned_pass_numbers_along_the_reversed_grid():
+    """Pass 3 after a turned pass 2: the reference record's grid runs
+    backwards along the holder, so a slide from it must count numbers
+    the other way (Test 104, load 2, pass 3 numbered a three-image
+    strip's middle image "4" and another's "2" twice)."""
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            s1 = _strip_spec(_starts(3.5, 3), "lo")
+            rc, r1, *_ = _run(d, _holder_apertures(s1, None))
+            assert rc == 0 and _shape(r1) == {1: "W", 2: "T", 3: "W"}, _shape(r1)
+            # Turned about 75: photographs 3, 2, 1 at 3.3, 28.8, 54.3 --
+            # 2 split again, so the roll is not done.
+            rc, r2, *_ = _run(d, _holder_apertures(_turn(s1, 75.0), None))
+            assert rc == 0 and r2["orientation"] == "turned", (rc, r2 and r2.get("orientation"))
+            assert _shape(r2) == {3: "W", 2: "T", 1: "W"} and r2["advice"]["missing"] == [2], (_shape(r2), r2["advice"])
+            # Pass 3: slid 12 mm further in, still turned: 2 whole at 40.8.
+            rc, r3, scans, out, err = _run(d, _holder_apertures(_turn(s1, 87.0), None))
+            assert rc == 0, (rc, err[-300:])
+            assert r3["orientation"] == "turned" and r3["numbering"] == "content", r3
+            ordered = sorted(_by_number(r3).values(), key=lambda e: e["position_mm"])
+            assert [e["number"] for e in ordered] == [3, 2, 1], [(e["number"], round(e["position_mm"], 1)) for e in ordered]
+            assert _images(r3)[2]["whole"] and _images(r3)[2]["main"], _images(r3)[2]
+            assert r3["problems"] == [] and r3["advice"]["missing"] == [], (r3["problems"], r3["advice"])
+    print("test_pass_after_a_turned_pass_numbers_along_the_reversed_grid OK")
 
 
 def test_turned_strip_with_other_pictures_is_exit_5():
@@ -775,6 +807,24 @@ def _piece(j, spec, seed):
         seed=seed, perforated_side=spec["side"], printed_border=True)
     _paint_content(arr, [(s - base, pid, col0, col1, spec["turned"])
                          for s, pid in zip(spec["starts"], spec["ids"])])
+    # The leader before the first hole and the tail after the last one are
+    # CLEAR film, not printed border (the builder fills the whole band with
+    # border): a window predicted there must read as clear film and be
+    # dropped, as on a real strip.
+    hs = _holes_of(spec)
+    if hs:
+        rim = int(round(0.6 * PPM))
+        lo_c, hi_c = (blo + rim, bhi) if spec["side"] == "lo" else (blo, bhi - rim)
+        # (Either way round: the first hole may lie after the first image.)
+        first_image = min(spec["starts"])
+        last_image_end = max(spec["starts"]) + ILEN
+        for a_mm, b_mm in ((spec["start"], min(min(h[0] for h in hs), first_image - 0.5)),
+                           (max(max(h[1] for h in hs), last_image_end + 0.5), spec["end"])):
+            ra = max(0, int(round((a_mm - base) * PPM)))
+            rb = min(arr.shape[0], int(round((b_mm - base) * PPM)))
+            if rb > ra:
+                for ci, key in enumerate(("R", "G", "B")):
+                    arr[ra:rb, lo_c:hi_c, ci] = CLEAR[key]
     r0 = max(0, int(round((spec["start"] - base) * PPM)))
     r1 = min(arr.shape[0], int(round((spec["end"] - base) * PPM)))
     mask = np.zeros(arr.shape[0], bool)
@@ -1035,6 +1085,37 @@ def test_image_seated_on_the_aperture_edge_is_a_leading_split_of_its_own():
     print("test_image_seated_on_the_aperture_edge_is_a_leading_split_of_its_own OK")
 
 
+def test_whole_image_before_the_first_seen_one_is_delivered_as_image0():
+    """The system serves the photographs: an earlier pass missed the
+    strip's first image (here: under the holder's end wall in pass 1);
+    when a later pass shows it whole it is number 0, delivered as
+    image0.tiff, certain (it fits the grid), not a problem; and the roll
+    is not done while the strip's start has never been seen."""
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            pitch = FILM_110.pitch_mm
+            # Pass 1: photograph 1 at -22 mm (under the wall), 2..4 visible.
+            rc, r1, *_ = _run(d, _holder_apertures(_starts_for(3.5 - pitch), None))
+            assert rc == 0 and sorted(_images(r1)) == [1, 2, 3], _shape(r1)
+            # Pass 2: slid one pitch in -- photograph 1 appears at 3.5 mm.
+            rc, r2, scans, out, err = _run(d, _holder_apertures(_starts_for(3.5), None))
+            assert rc == 0, (rc, err[-300:])
+            assert r2["numbering"] == "content" and r2["orientation"] == "same", r2
+            e0 = _images(r2)[0]
+            assert e0["whole"] and e0["main"] and not e0["uncertain"], e0
+            assert e0["main"].endswith("image0.tiff") and "image0.tiff" in _names(d), _names(d)
+            assert "lies before the roll's first image (number 0)" in out, out
+            assert r2["problems"] == [], r2["problems"]
+            # The others keep pass 1's numbers: photograph 2 ("1") is now
+            # split, 3 ("2") whole and new, 4 ("3") kept.
+            assert _shape(r2) == {0: "W", 1: "T", 2: "W", 3: "W"}, _shape(r2)
+            assert _images(r2)[3]["kept"] is True and _images(r2)[2]["main"]
+            # Done: photograph 1 now lies at the holder's end wall (nothing
+            # can be beyond it) and the strip's end was seen in aperture 3.
+            assert r2["advice"]["done"] is True and digitize.roll_is_done(d, 1) is True
+    print("test_whole_image_before_the_first_seen_one_is_delivered_as_image0 OK")
+
+
 def test_empty_slot_two_is_a_found_nothing_roll():
     with tempfile.TemporaryDirectory() as d:
         aps = _holder_apertures(_strip1("A"), None)
@@ -1239,6 +1320,7 @@ def main() -> int:
         test_either_rail_gives_the_same_numbering,
         test_slot_two_leading_split_is_image_one_and_slot_one_split_is_reported,
         test_image_seated_on_the_aperture_edge_is_a_leading_split_of_its_own,
+        test_whole_image_before_the_first_seen_one_is_delivered_as_image0,
         test_empty_slot_two_is_a_found_nothing_roll,
         test_empty_slot_one_labels_the_run_by_run_order,
         test_given_placement_covers_both_slots,
@@ -1260,6 +1342,7 @@ def main() -> int:
         test_later_pass_numbers_by_shift_at_any_seating,
         test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing,
         test_turned_strip_is_recognised_and_its_products_are_rotated_back,
+        test_pass_after_a_turned_pass_numbers_along_the_reversed_grid,
         test_turned_strip_with_other_pictures_is_exit_5,
         test_three_passes_have_their_own_prefixes_and_old_advice_keys,
         test_pattern_contents_are_distinct,

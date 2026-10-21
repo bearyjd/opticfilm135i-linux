@@ -761,6 +761,26 @@ turned pass are rotated back, so every `image<N>.tiff` of a roll has pass
 1's orientation; `orientation` (`same`/`turned`, cumulative against pass
 1) and `numbering` (`protocol`/`content`) are in the record.
 
+**The photographs come first** (Christian, Test 104). A whole image is
+never refused for its numbering. An image found before the roll's
+first-seen one — an earlier pass missed it, e.g. under another strip's
+cassette end — is numbered 0, −1, … and delivered as `image0.tiff`,
+`image-1.tiff`: the numbers are relative to pass 1's first sighting (the
+edge numbers printed on the film are the archive's truth). An image that
+does not fit the roll's grid by more than `SHIFT_RESIDUAL_MM` is
+delivered as `image<N>-uncertain.tiff` (`uncertain: true` on its entry, a
+`problems` line), and does not count as N. `advice.done` further requires
+that both ends of the strip were seen in some pass (`film_start_mm` /
+`film_end_mm`, slot 1 handing strip 2's start seen in its last aperture
+to slot 2), or that the strip's outermost image lies within a film pitch
+of a holder end wall; a strip whose end was hidden is never done. And
+"done" never refuses: a pass on a done roll scans, keeps every copy and
+changes nothing — the bookkeeping serves the operator. Numbers follow the
+photographs across any sequence of slides and turns (a pass after a turned
+pass counts along the reversed grid); `SHIFT_RESIDUAL_MM` (5 mm) separates
+a certain number from an uncertain one, since real film pitch runs
+24.85–25.5 mm against the model's 25.5.
+
 **The operator.** The hole edge either way but never hidden by a rail, both
 film edges visible (§12), then: *place the strips so that in two passes you maximise the
 support at the edge, and make sure every image gets one pass without a
