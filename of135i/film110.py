@@ -1117,6 +1117,11 @@ THUMB_INSET = 0.12              # fraction of each side cut off before binning: 
 ORIENT_MIN_CORR = 0.5           # the winning hypothesis' mean correlation at least ...
 ORIENT_MARGIN = 0.15            # ... and this far above the other one
 END_AGREE_MM = 3.0              # a slide must agree with a free film end seen in both runs
+RANGE_SLACK_MM = 3.0            # a hypothesis may put a recorded image this far outside the
+                                # slot's range (edge refinement and the wall's exact place:
+                                # Test 104, roll 6, a strip turned about its own centre put
+                                # photograph 4 at -17.7 mm against the range's -17.2 and the
+                                # true hypothesis was pruned)
 PATCH_PX_PER_MM = 8.0           # the working copy of a sighting kept for the content check
 OVERLAP_MIN_MM = 6.0            # two sightings of an image are compared on at least this much
 
@@ -1271,7 +1276,7 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
             lo, hi = pos_range
             moved = ([r + key for r in recorded] if kind == "same"
                      else [key - r - length for r in recorded])
-            if any(not (lo <= m <= hi) for m in moved):
+            if any(not (lo - RANGE_SLACK_MM <= m <= hi + RANGE_SLACK_MM) for m in moved):
                 return False
         if (end_shift is not None and kind == "same"
                 and abs(key - end_shift) > END_AGREE_MM):

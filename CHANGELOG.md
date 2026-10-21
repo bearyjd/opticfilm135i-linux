@@ -30,6 +30,10 @@ one exists; "offline" means implemented and tested without the scanner.
   model's 25.5: three pitches are 2 mm off by themselves). "Done" never
   refuses a run: a pass on a done roll keeps every copy and changes
   nothing ("roll 3 pass 4" must never stop a strip from being scanned).
+  Hypothesis pruning by the slot's range tolerates `RANGE_SLACK_MM`
+  (3 mm): a four-image strip turned about its own centre lands on the
+  same positions, and the true turn had been pruned by 0.5 mm, letting a
+  worse turn win and number the strip 5, 4, 3, 2 (roll 6).
 - Test 104, first pass (2026-10-22, two strips through the application,
   seated free in the channel): three detector corrections, each validated
   on the pass's frames and on all 24 archived real 110 apertures (identical

@@ -7378,3 +7378,14 @@ Remaining limitation: two strips overlapping into each other's slot (a
 strip reaching through the slot boundary) can put one strip's split image
 into the other roll's missing list. Christian's decision: one strip per
 load from now on.
+
+**Test 104, roll 6 (2026-10-22, one strip, edge numbers 9–12).** Pass 2
+after the operator turned the strip about its own centre: a four-image
+strip turned that way lands on the same positions (−1.2 mm), so the
+geometry fits a slide and a turn alike and only the pictures decide —
+rotated pairs correlated 0.80–0.96, the slide pairs ≈ 0. The true turn
+(about 76.5 mm) had been pruned by the slot-range check by 0.5 mm
+(photograph 4 mapped to −17.7 mm against the range's −17.2), a worse turn
+(about 101.9 mm) won, and the strip came out 5, 4, 3, 2. Fixed with a 3 mm
+slack; the harness on the roll's frames now gives 4, 3, 2, 1 with
+photograph 2 delivered and all four present.
