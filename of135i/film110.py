@@ -755,10 +755,15 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
             inset = RAIL_EDGE_INSET_MM * px_per_mm
             col_clamp = (lo + inset, hi - inset)
 
+            # Not whole = split, by the same margin: an image whose start
+            # (end) lies within WHOLE_MARGIN_MM of the aperture's edge has
+            # that edge under the bar as far as the product is concerned
+            # (Test 103: image 4 seated at +0.03 mm was "not whole" with
+            # no split side, and the hook reported it split by no bar).
             whole = (r_line0 >= whole_margin_px) and (r_line1 <= n_lines - whole_margin_px)
-            if r_line0 < 0:
+            if r_line0 < whole_margin_px:
                 split = "leading"
-            elif r_line1 > n_lines:
+            elif r_line1 > n_lines - whole_margin_px:
                 split = "trailing"
             else:
                 split = None

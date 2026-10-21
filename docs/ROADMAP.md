@@ -826,8 +826,10 @@ Image-side only: no motor, wait, calibration or geometry change
 5. `digitize --film 110 --strips 2`: two strips of up to four images in
    one load (strip 1 left, strip 2 right), two rolls per run, slot 2
    numbered from its first detected image — **implemented offline
-   2026-10-21, hardware check pending (Test 103)** (`docs/film-110.md`
-   §12).
+   2026-10-21; first hardware pass the same evening (Test 103, placement
+   A: detector and guard corrected, operator rule for the holes' side
+   recorded); placement B and the same-number check still pending**
+   (`docs/film-110.md` §12).
 
 Not in scope: a 110 FEEDL grid, 126 Instamatic, holder-ID detection.
 

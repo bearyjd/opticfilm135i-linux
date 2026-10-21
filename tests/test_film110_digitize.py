@@ -321,29 +321,39 @@ def test_nothing_found_keeps_x_stem_and_null_placement():
 def test_roll_is_done_semantics():
     with tempfile.TemporaryDirectory() as d:
         m = digitize.append_manifest
+        img = [{"number": 1, "whole": True}]
         m(d, {"roll": 1, "status": "ok", "film": "110", "placement": "A",
-              "advice": {"other_placement": "B", "images": [2]}})
+              "images": img, "advice": {"other_placement": "B", "images": [2]}})
         assert digitize.roll_is_done(d, 1) is False
         m(d, {"roll": 1, "status": "ok", "film": "110", "placement": "B",
-              "advice": {"other_placement": "A", "images": []}})
+              "images": img, "advice": {"other_placement": "A", "images": []}})
         assert digitize.roll_is_done(d, 1) is True          # last ok, nothing left
         # Nothing split in the first run: done after one run.
         m(d, {"roll": 2, "status": "ok", "film": "110", "placement": "A",
-              "advice": {"other_placement": "B", "images": []}})
+              "images": img, "advice": {"other_placement": "B", "images": []}})
         assert digitize.roll_is_done(d, 2) is True
         # A failed run, a run that found nothing: not done.
         m(d, {"roll": 3, "status": "failed", "film": "110", "placement": "A",
               "advice": {"other_placement": "B", "images": []}})
         m(d, {"roll": 4, "status": "ok", "film": "110", "placement": None,
-              "advice": {"other_placement": None, "images": []}})
+              "images": [], "advice": {"other_placement": None, "images": []}})
         assert digitize.roll_is_done(d, 3) is False
         assert digitize.roll_is_done(d, 4) is False
         # Both placements ok, even if the last advice lists something.
         m(d, {"roll": 5, "status": "ok", "film": "110", "placement": "A",
-              "advice": {"other_placement": "B", "images": [2]}})
+              "images": img, "advice": {"other_placement": "B", "images": [2]}})
         m(d, {"roll": 5, "status": "ok", "film": "110", "placement": "B",
-              "advice": {"other_placement": "A", "images": [3]}})
+              "images": img, "advice": {"other_placement": "A", "images": [3]}})
         assert digitize.roll_is_done(d, 5) is True
+        # A roll without a single image is never done, whatever its
+        # placement/advice say (Test 103: an unread strip in slot 2), in
+        # one run or in both.
+        m(d, {"roll": 7, "status": "ok", "film": "110", "placement": "A",
+              "images": [], "advice": {"other_placement": "B", "images": []}})
+        assert digitize.roll_is_done(d, 7) is False
+        m(d, {"roll": 7, "status": "ok", "film": "110", "placement": "B",
+              "images": [], "advice": {"other_placement": "A", "images": []}})
+        assert digitize.roll_is_done(d, 7) is False
         # 135 rolls keep the old rule.
         m(d, {"roll": 6, "status": "ok"})
         assert digitize.roll_is_done(d, 6) is True
@@ -418,6 +428,12 @@ PITCH = STRIP.pitch_mm
 LEAD = FILM_110.perforation_lead_mm
 ILEN = FILM_110.image_mm[0]
 FPITCH = FILM_110.pitch_mm
+# The hole's length along transport, consistent with the film model: one
+# pitch holds an image, the lead, the hole and the trail. (The real holes
+# of Test 103 measured ~2.3 mm; the earlier fixed 1.5 mm put the
+# detector's prediction of the image BEFORE a hole 1.1 mm off, so a real
+# leading split's end edge was never confirmed in these fixtures.)
+HOLE_MM = FPITCH - ILEN - LEAD - FILM_110.perforation_trail_mm
 S2_END = 5 * PITCH + APERTURE_MM - 0.6      # strip 2's last image ends here (A)
 B_SHIFT = FPITCH / 2
 BOTH_RUNS = (1, 2)
@@ -459,19 +475,31 @@ def _piece(j, spec, seed):
     if spec["side"] == "hi":
         col1 = 22.0 - FILM_110.image_lateral_offset_mm
         col0 = col1 - FILM_110.image_mm[1]
-    holes, imgs, dense = [], [], None
-    for s in spec["starts"]:
+    holes, imgs = [], []
+    # The film is perforated at every pitch, so there is a hole after the
+    # last image too, when the tail is long enough to hold it whole (a
+    # part of one would be a hole stub at the free end, not modelled).
+    hole_starts = list(spec["starts"])
+    after_last = spec["starts"][-1] + FPITCH
+    if after_last - LEAD <= spec["end"]:
+        hole_starts.append(after_last)
+    for s in hole_starts:
         local = s - base
         if 0 < local - LEAD < APERTURE_MM:
-            holes.append((local - LEAD - 1.5, local - LEAD))
+            holes.append((local - LEAD - HOLE_MM, local - LEAD))
+    for s in spec["starts"]:
+        local = s - base
         if local >= APERTURE_MM or local + ILEN <= 0:
             continue
-        if local < 0:
-            dense = local + ILEN
-        else:
-            imgs.append((local, local + ILEN, col0, col1))
+        # An image that started under the leading edge is painted like
+        # any other (the builder clips it at line 0): it has picture
+        # content and a visible END edge, as every real leading split
+        # had (Test 103). The earlier `leading_dense_to_mm` fill was
+        # painted over by the printed border, leaving a leading image
+        # indistinguishable from the strip's leader.
+        imgs.append((local, local + ILEN, col0, col1))
     arr, _p, blo, bhi = _build_fixture(
-        DPI, holes_mm=holes, images_mm=imgs, leading_dense_to_mm=dense,
+        DPI, holes_mm=holes, images_mm=imgs,
         seed=seed, perforated_side=spec["side"], printed_border=True)
     r0 = max(0, int(round((spec["start"] - base) * PPM)))
     r1 = min(arr.shape[0], int(round((spec["end"] - base) * PPM)))
@@ -693,6 +721,28 @@ def test_slot_two_leading_split_is_image_one_and_slot_one_split_is_reported():
     print("test_slot_two_leading_split_is_image_one_and_slot_one_split_is_reported OK")
 
 
+def test_image_seated_on_the_aperture_edge_is_a_leading_split_of_its_own():
+    """Test 103, strip 1: image 1 flush with aperture 1's edge (-0.1 mm)
+    and image 4 starting at +0.03 mm in aperture 3 with no trailing split
+    before it (its predecessor ended under aperture 2's bar). Both are
+    first sightings: numbered as leading splits (no product, the other
+    placement delivers them), not dropped as "already counted"."""
+    starts = [-0.1, 25.4, 50.9, 2 * PITCH + 0.03]
+    spec = _strip_spec(starts, "lo", tail=8.0)     # room for the hole after image 4
+    with tempfile.TemporaryDirectory() as d:
+        rc, (r1, r2), scans, out, err = _run2(d, _holder_apertures(spec, None))
+        assert rc == 0, (rc, err)
+        assert r1["placement"] == "A" and r1["problems"] == [], r1
+        assert _shape(r1) == {1: "L", 2: "T", 3: "W", 4: "L"}, _shape(r1)
+        assert _images(r1)[1]["aperture"] == 1 and _images(r1)[4]["aperture"] == 3
+        assert r1["advice"] == {"other_placement": "B", "images": [1, 2, 4]}, r1["advice"]
+        assert "split image 2 (already counted)" in out, out
+        # (The leader ghost needs the first hole inside the aperture: in A
+        # it lies before aperture 1; placement B exercises it in
+        # test_either_rail_gives_the_same_numbering.)
+    print("test_image_seated_on_the_aperture_edge_is_a_leading_split_of_its_own OK")
+
+
 def test_empty_slot_two_is_a_found_nothing_roll():
     with tempfile.TemporaryDirectory() as d:
         aps = _holder_apertures(_strip1("A"), None)
@@ -703,8 +753,8 @@ def test_empty_slot_two_is_a_found_nothing_roll():
         assert r2["film_found"] is False and r1["film_found"] is True
         assert r2["placement"] == "A" and r2["placement_source"] == "slot 1 inferred"
         assert r2["advice"]["images"] == []
-        # Counts as done, so the number is not reused ...
-        assert digitize.roll_is_done(d, 2) is True
+        # Not done (no image), yet the number is not reused ...
+        assert digitize.roll_is_done(d, 2) is False
         assert digitize.next_roll(d, "") == 3
         names = _names(d, 2)
         assert {"a-f4.overscan.tiff", "a-f5.overscan.tiff", "a-f6.overscan.tiff"} <= set(names), names
@@ -733,7 +783,7 @@ def test_empty_slot_one_labels_the_run_by_run_order():
         assert rc == 0, rc
         assert b1["placement"] == "B" and b1["placement_source"] == "run order", b1
         assert b2["placement"] == "B" and b2["placement_source"] == "run order", b2
-        assert digitize.roll_is_done(d, 1) and digitize.roll_is_done(d, 2)
+        assert not digitize.roll_is_done(d, 1) and digitize.roll_is_done(d, 2)
     print("test_empty_slot_one_labels_the_run_by_run_order OK")
 
 
@@ -851,6 +901,7 @@ def main() -> int:
         test_second_run_fills_both_rolls,
         test_either_rail_gives_the_same_numbering,
         test_slot_two_leading_split_is_image_one_and_slot_one_split_is_reported,
+        test_image_seated_on_the_aperture_edge_is_a_leading_split_of_its_own,
         test_empty_slot_two_is_a_found_nothing_roll,
         test_empty_slot_one_labels_the_run_by_run_order,
         test_given_placement_covers_both_slots,

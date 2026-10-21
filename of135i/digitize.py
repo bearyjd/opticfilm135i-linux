@@ -195,17 +195,24 @@ def roll_is_done(out_dir: str, roll: int, prefix: str = "") -> bool:
     a roll takes two runs, one per placement (docs/film-110.md §11), so it
     is done when the last record is 'ok', found a placement, and left
     nothing for the other placement (`advice.images` empty), or when both
-    placements have an 'ok' record. A run that found no image at all
-    (placement null) is not done: the strip is simply to be tried again."""
+    placements have an 'ok' record -- and in either case only when some
+    'ok' record numbered at least one image. A roll without a single
+    image is never done, whatever its records say about placement: the
+    strip was not read (Test 103: slot 2's strip with its holes against
+    the rail gave "ok, placement A, nothing left" and the roll counted as
+    done, so the other placement's run was refused). Its number is still
+    not reused (`next_roll` counts every record and directory)."""
     recs = roll_records(out_dir, roll, prefix)
     if recs and recs[-1].get("film") == "110":
+        oks = [r for r in recs
+               if r.get("film") == "110" and r.get("status") == "ok"]
+        if not any(r.get("images") for r in oks):
+            return False
         last = recs[-1]
         if (last.get("status") == "ok" and last.get("placement")
                 and not (last.get("advice") or {}).get("images")):
             return True
-        oks = {r.get("placement") for r in recs
-               if r.get("film") == "110" and r.get("status") == "ok"}
-        return {"A", "B"} <= oks
+        return {"A", "B"} <= {r.get("placement") for r in oks}
     return roll in rolls_done(out_dir, prefix)
 
 
