@@ -418,18 +418,30 @@ def _refine_lateral(profile: np.ndarray, predicted: float, px_per_mm: float,
 EDGE_TRANSITION_FRAC = 0.6      # green < this x air = film, scanning in from the air side
 EDGE_SEARCH_MM = 4.0            # per-line search zone either side of the median band edge
 EDGE_TRACK_WINDOW_MM = 10.0     # rolling-median window for the local edge (> 2 x HOLE_MAX_MM)
+RAIL_TRANSITION_MM = 0.5        # the rail's blurred edge, excluded from the edge tracker's zone
 HOLE_ZONE_FROM_MM = 0.3         # hole zone starts this far inside the per-line film edge ...
 HOLE_ZONE_TO_MM = 3.0           # ... and ends this far inside it
 HOLE_STUB_MIN_MM = 0.3          # a hole cut by the aperture boundary may be this short
 
 
 def _track_edge(green: np.ndarray, band_edge: int, air: float,
-                px_per_mm: float, edge_is_low: bool) -> np.ndarray:
+                px_per_mm: float, edge_is_low: bool,
+                outer_limit: "int | None" = None) -> np.ndarray:
     """Per-line column of the film's air-facing edge (float, NaN where no
-    film is seen in the search zone -- e.g. beyond a free strip end)."""
+    film is seen in the search zone -- e.g. beyond a free strip end).
+    `outer_limit` clips the search zone on the air side, short of the
+    rail (a strip lying free in the channel, air on both sides, has the
+    rail within EDGE_SEARCH_MM of its edge, and the rail and its blurred
+    edge are as dark as film -- Test 104's first pass tracked the rail as
+    the film edge and found no holes)."""
     n_lines, width = green.shape
     search = max(1, round(EDGE_SEARCH_MM * px_per_mm))
     z_lo, z_hi = max(0, band_edge - search), min(width, band_edge + search)
+    if outer_limit is not None:
+        if edge_is_low:
+            z_lo = max(z_lo, outer_limit)
+        else:
+            z_hi = min(z_hi, outer_limit)
     if z_hi <= z_lo:
         return np.full(n_lines, np.nan)
     zone = green[:, z_lo:z_hi]
@@ -462,7 +474,8 @@ def _rolling_nanmedian(x: np.ndarray, window: int) -> np.ndarray:
 
 
 def _hole_runs(green: np.ndarray, lo: int, hi: int, width: int, air: float,
-               film_present: np.ndarray, px_per_mm: float, edge_is_low: bool):
+               film_present: np.ndarray, px_per_mm: float, edge_is_low: bool,
+               outer_limit: "int | None" = None):
     """Candidate perforation runs on one lateral edge of the film band,
     as (start, end_inclusive) line runs, plus the per-line LOCAL film
     edge (rolling median of the tracked edge) used for lateral
@@ -471,7 +484,7 @@ def _hole_runs(green: np.ndarray, lo: int, hi: int, width: int, air: float,
     reaches air level."""
     n_lines = green.shape[0]
     band_edge = lo if edge_is_low else hi
-    edge = _track_edge(green, band_edge, air, px_per_mm, edge_is_low)
+    edge = _track_edge(green, band_edge, air, px_per_mm, edge_is_low, outer_limit)
     local = _rolling_nanmedian(edge, max(3, round(EDGE_TRACK_WINDOW_MM * px_per_mm)))
     ref = np.where(np.isnan(edge), local, edge)
     valid = ~np.isnan(ref)
@@ -490,9 +503,21 @@ def _hole_runs(green: np.ndarray, lo: int, hi: int, width: int, air: float,
     min_len = HOLE_MIN_MM * px_per_mm
     max_len = HOLE_MAX_MM * px_per_mm
     stub_len = HOLE_STUB_MIN_MM * px_per_mm
+    # A hole may be cut short by the aperture's boundary OR by the strip's
+    # own cut end (Test 104: a strip cut through a hole, starting inside
+    # the aperture): a stub touching either counts.
+    present_runs = _true_runs(film_present)
+    cut = {0, n_lines - 1}
+    for (ps, pe) in present_runs:
+        cut.update((ps, pe))
+    slack = max(1, round(HOLE_STUB_MIN_MM * px_per_mm))
+
+    def at_cut(s, e):
+        return any(abs(s - c) <= slack or abs(e - c) <= slack for c in cut)
+
     runs = [(s, e) for (s, e) in runs
             if (min_len <= (e - s + 1) <= max_len)
-            or ((s == 0 or e == n_lines - 1) and stub_len <= (e - s + 1) <= max_len)]
+            or (at_cut(s, e) and stub_len <= (e - s + 1) <= max_len)]
     return runs, local
 
 
@@ -502,6 +527,9 @@ def _hole_runs(green: np.ndarray, lo: int, hi: int, width: int, air: float,
 # (a hole at the strip's cut end predicts an image that is not there).
 IMAGE_DENSITY_FRAC = 0.85
 IMAGE_VARIATION_FRAC = 0.10       # std/mean of the profile inside a window that is image, not base
+PLAUSIBILITY_TRIM_MM = 1.0        # ... measured on the window's interior: its ends may hold the
+                                  # aperture edge or the next frame's border (Test 104: a clear
+                                  # leader passed as "varying" on its first dark lines alone)
 RAIL_GUARD_MM = 0.4             # lateral refinement stays this far from the rail-side band edge
 RIM_GUARD_MM = 1.0              # ... and this far inside the perforated film edge (rim 0.6 mm, hole 0.6-2.1 mm)
 PRODUCT_PAD_MM = 0.25           # the CLI grows a whole image's crop by this on every side
@@ -641,19 +669,34 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
                              "film band not adjacent to air; perforations hidden",
                              rail_hidden_mm)
 
-    # d. Perforations: resolve the perforated edge and its hole runs.
+    # d. Perforations: resolve the perforated edge and its hole runs. The
+    # edge tracker's zone stops at the first plastic column beyond the
+    # band on either side (a strip lying free in the channel has air AND
+    # the rail within reach of its edge).
+    # The edge tracker's zone must stop short of the rail: the rail is as
+    # dark as film, and so is its blurred edge, which begins about
+    # RAIL_TRANSITION_MM before the first column classed plastic. (It must
+    # NOT stop at the first non-air column: where a strip covers only
+    # part of the aperture's lines, the columns of its rim and holes are
+    # air in the median and the band ends short of the real film edge.)
+    plastic_cols = np.flatnonzero(is_plastic)
+    transition = int(round(RAIL_TRANSITION_MM * px_per_mm))
+    before = plastic_cols[plastic_cols < lo]
+    after = plastic_cols[plastic_cols >= hi]
+    limit_lo = int(before[-1]) + 1 + transition if before.size else None
+    limit_hi = int(after[0]) - transition if after.size else None
     edge_is_low = None
     runs: list = []
     local_edge = None
     if touches_air_lo and not touches_air_hi:
         edge_is_low = True
-        runs, local_edge = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, True)
+        runs, local_edge = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, True, limit_lo)
     elif touches_air_hi and not touches_air_lo:
         edge_is_low = False
-        runs, local_edge = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, False)
+        runs, local_edge = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, False, limit_hi)
     else:
-        runs_lo, local_lo = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, True)
-        runs_hi, local_hi = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, False)
+        runs_lo, local_lo = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, True, limit_lo)
+        runs_hi, local_hi = _hole_runs(green, lo, hi, width, air, film_present, px_per_mm, False, limit_hi)
         if runs_lo and not runs_hi:
             edge_is_low, runs, local_edge = True, runs_lo, local_lo
         elif runs_hi and not runs_lo:
@@ -697,7 +740,11 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
             # varies, clear film does not). The second test matters where
             # the aperture holds little clear film to estimate the base
             # from (a fogged leader plus one image, 2026-09-19 aperture 1).
-            seg = interior_profile[clo:chi]
+            trim = int(round(PLAUSIBILITY_TRIM_MM * px_per_mm))
+            if chi - clo > 4 * trim:
+                seg = interior_profile[clo + trim:chi - trim]
+            else:
+                seg = interior_profile[clo:chi]
             seg_mean = float(np.mean(seg))
             seg_std = float(np.std(seg))
             if (seg_mean >= IMAGE_DENSITY_FRAC * clear_base

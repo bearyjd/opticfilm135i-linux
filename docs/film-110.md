@@ -723,10 +723,13 @@ strip end free, then split — and a copy that is not better is `kept`
 (information on the image entry, not a problem). A roll is **done** when
 no number has only been seen split (`advice.missing` empty) and no
 delivered copy has the strip end free (`advice.free_end` empty); the
-operator may stop earlier. `advice.suggest` is a measured recommendation
-("image 2: move 5.7 mm further in", "image 4: no seating puts the strip
-end under plastic"), advice not a requirement; the old `advice.images` /
-`other_placement` keys stay one release for the application. Exit codes
+operator may stop earlier; `advice.done` says it outright (a roll that
+numbered no image is never done, and such a run prints "scanned, not
+done" with a suggestion to check the seating). `advice.suggest` is a
+measured recommendation ("image 2: move 5.7 mm further in", "image 4: no
+seating puts the strip end under plastic"), advice not a requirement; the
+old `advice.images` / `other_placement` keys stay one release for the
+application. Exit codes
 are unchanged (0, 2 refused before hardware, 4 coverage, 5 numbering could
 not be established — nothing written, the frame files kept).
 
@@ -764,9 +767,14 @@ never flipped over. A pass whose images cannot be recognised against the
 earlier ones stops without writing: seat the strip so that something seen
 before is seen again.
 
-**Detector note.** The plausibility test that drops a window of clear film
-(bright AND flat) now references the brightest film in the aperture
-(`CLEAR_BASE_PERCENTILE` 99, was 90): an aperture holding only printed
-border and pictures had read its brightest picture as the clear base and
-dropped a bright, flat picture. Identical results on all 24 archived real
-110 apertures.
+**Detector notes.** The plausibility test that drops a window of clear film
+(bright AND flat) references the brightest film in the aperture
+(`CLEAR_BASE_PERCENTILE` 99, was 90) and measures the window's interior
+(`PLAUSIBILITY_TRIM_MM`): an aperture holding only printed border and
+pictures had read its brightest picture as the clear base, and a clear
+leader next to the aperture edge had passed as "varying" (Test 104). A
+strip lying free in the channel (air on both sides) is read since Test
+104: the edge tracker's zone stops short of the rail
+(`RAIL_TRANSITION_MM`), and a hole cut by the strip's own end counts as a
+stub. Identical results on all 24 archived real 110 apertures, except that
+Test 103's "image 4 at +0.03 mm" — the leader — is no longer reported.

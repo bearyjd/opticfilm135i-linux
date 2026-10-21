@@ -1570,6 +1570,11 @@ def _film110_suggest(state: Film110State, prior: list, missing: list,
     over by the pass's shift when only an earlier pass saw the number)."""
     from . import film110
     if not missing and not free_end:
+        if not state.images and not any(r.get("images") for r in (prior or [])):
+            return ("no image found: check that the strip's holes are visible "
+                    "(a gap between the hole edge and the rail) and that the "
+                    "film lies in the apertures, then seat it again and run "
+                    "the roll again")
         return "nothing missing; every delivered image is supported"
     pos = {}
     ref = state.ref
@@ -1671,8 +1676,13 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
             free_end.append(n)
     other = (None if state.placement in (None, "free") else
              "B" if state.placement == "A" else "A")
+    # `done`: what digitize.roll_is_done will say once this record is
+    # appended -- at least one image numbered in some pass, nothing
+    # missing, nothing with the strip end free. A roll that found no
+    # image is never done, whatever the empty lists say.
     record["advice"] = {"missing": missing, "free_end": free_end,
                         "suggest": _film110_suggest(state, prior, missing, free_end),
+                        "done": bool(numbers) and not missing and not free_end,
                         "images": sorted(set(missing) | set(free_end)),
                         "other_placement": other}
     if state.strips == 2:
@@ -2094,10 +2104,14 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                        f"Suggestion: {adv['suggest']}. Re-seat the strip (slide "
                        f"or turn it) and run 'of135i digitize --film 110 "
                        f"--roll {roll}' again, or stop here.")
-            else:
+            elif adv.get("done"):
                 nxt = (f"Nothing missing, nothing with the strip end free. "
                        f"Next strip: roll {roll + 1}.")
-            print(f"roll {roll} done (110, placement {pl}): {len(per_frame)} "
+            else:
+                nxt = (f"No image numbered. {adv['suggest']}; run "
+                       f"'of135i digitize --film 110 --roll {roll}' again.")
+            word = "done" if adv.get("done") else "scanned, not done"
+            print(f"roll {roll} {word} (110, placement {pl}): {len(per_frame)} "
                   f"frames, {sum(1 for e in state.images if e['main'])} "
                   f"photograph(s) -> {rdir}{note}. {nxt}")
         else:
@@ -2132,11 +2146,15 @@ def _film110_print_pair_summary(args: argparse.Namespace, ctxs: list,
     for c in ctxs:
         adv = c.record["advice"]
         got = sum(1 for e in c.state.images if e["main"])
-        found = "" if c.record.get("film_found") else " (no film found)"
-        need = (f"missing {adv['missing']}, strip end free {adv['free_end']}; "
-                f"{adv['suggest']}"
-                if adv["images"] else "nothing missing")
-        wants = wants or bool(adv["images"])
+        found = ("" if c.record.get("film_found") else " (no film found)")
+        if adv["images"]:
+            need = (f"missing {adv['missing']}, strip end free {adv['free_end']}; "
+                    f"{adv['suggest']}")
+        elif adv.get("done"):
+            need = "nothing missing"
+        else:
+            need = f"no image numbered; {adv['suggest']}"
+        wants = wants or bool(adv["images"]) or not adv.get("done")
         lines.append(f"  roll {c.roll} (slot {c.slot}): {got} photograph(s) -> "
                      f"{c.rdir}{found}; {need}")
     if wants:
