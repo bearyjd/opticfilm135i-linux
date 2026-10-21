@@ -571,8 +571,9 @@ def test_three_passes_have_their_own_prefixes_and_old_advice_keys():
             assert {"p1-f1.tiff", "p2-f1.tiff", "p3-f1.tiff"} <= set(names), names
             for rec in (rec2, rec3):
                 adv = rec["advice"]
-                assert set(adv) == {"missing", "free_end", "suggest", "images",
-                                    "other_placement"}, adv
+                assert set(adv) == {"missing", "free_end", "suggest", "done",
+                                    "images", "other_placement"}, adv
+                assert adv["done"] is (not adv["missing"] and not adv["free_end"])
                 assert adv["images"] == sorted(set(adv["missing"]) | set(adv["free_end"]))
             assert rec3["advice"]["missing"] == [] and rec3["advice"]["free_end"] == []
             assert digitize.roll_is_done(d, 1) is True
@@ -1226,7 +1227,7 @@ def test_strips_one_is_unchanged():
         assert rc == 0 and scans == [1, 2, 3, 4, "eject"]
         for k in ("strips", "slot", "companion_roll", "film_found", "placement_source"):
             assert k not in rec, (k, rec)
-        assert "roll 1 done (110, placement A)" in out, out
+        assert "roll 1 scanned, not done (110, placement A)" in out, out
     print("test_strips_one_is_unchanged OK")
 
 

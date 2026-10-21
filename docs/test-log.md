@@ -7198,9 +7198,10 @@ on the staging directory (`t103_accept.py`, private):
   content of each number's crop correlates A against B (0.74–0.96)
   clearly above its correlation against any other number (≤ 0.52).
 - *Delivered.* Strip 1: 1 (A, free end), 3 (A), 4 (B, supported copy
-  replaced A's free-end one). Strip 2: 1 (B, supported, replaced), 2 (A),
-  3 (B), 4 (A, free end). Strip 1's image 2 was split in both runs
-  (trailing in A, leading in B by 0.46 mm) and is missing.
+  replaced A's free-end one; a real photograph, checked by eye on
+  2026-10-22). Strip 2: 1 (B, supported, replaced), 2 (A), 3 (B), 4 (A,
+  free end). Strip 1's image 2 was split in both runs (trailing in A,
+  leading in B by 0.46 mm) and is missing.
 - *Why image 2 is missing — seating, not the driver.* The strips were
   moved 10.6 and 11.3 mm instead of 12.75, and strip 1 lay 1.6 mm short
   of the holder's end in A. The numbering tolerated it (±6 mm) but the
@@ -7225,3 +7226,71 @@ problem on a normal second run (it is information); an explicit list of
 numbers whose delivered copy is still a free-end one; a third run that
 replaces free-end copies only (today refused: the roll is done after
 A + B); the visual rule for B in §3/§12 and the application.
+
+**Correction (2026-10-22).** The "image 4 seated at +0.03 mm in aperture
+3" of the first Test 103 evening (roll-001 a-f3, finding 3 above and the
+offline re-detection) was not a photograph: the frame shows the strip's
+clear leader with its printed start marker and the marker's hole, seen by
+eye on 2026-10-22. The plausibility test kept it because its window
+reached the aperture's dark edge lines, which made a flat leader look
+"varying"; measured on the window's interior it is 0.98 of the clear base
+and flat (std/mean 0.005). The edge-seated rule itself (an image within
+0.3 mm of an aperture edge is a split) stands; its real-data example is
+gone and the synthetic test remains.
+
+### Test 104, first pass: two strips seated free in the channel (2026-10-22, through the application) — detector corrected offline
+
+**Setup.** Through the application built on the free-pass contract
+(`docs/film-110.md` §13), project `Testigen`, two strips in the holder but
+the application set to one strip (`digitize --film 110`, frames 1–4, no
+`--strips 2`), both strips laid with the hole edge free of the rails.
+Exit 0, but every aperture reported "no perforation found near either
+film edge": no image, no placement, and the closing line said "done,
+nothing missing".
+
+**What the frames showed (read-only).** The strips lay FREE in the
+channel: air on both sides of the film (6 mm on one side, 3 mm on the
+other in apertures 1–3; strip 2 in aperture 4 about 1 and 7 mm), the
+holes plainly visible at one film edge. Strip 1 is a roll start: clear
+leader with the printed start marker and its hole in aperture 1, then
+photograph 1 (split by the bar), photograph 2 whole in aperture 2, a
+third photograph in aperture 3 followed by the cut end. Strip 2 begins
+inside aperture 4, cut through a hole.
+
+**Findings and fixes, validated on these frames and on all 24 archived
+real 110 apertures (Tests 86, 87, 103):**
+
+1. *The edge tracker took the rail for the film edge.* Its search zone
+   (±4 mm around the band edge) reached the rail, which is as dark as
+   film, so the "film edge" was tracked at the rail and the hole zone
+   fell in the air gap — every line read as hole, none as a run. Fixed:
+   the zone stops `RAIL_TRANSITION_MM` (0.5 mm) short of the first
+   column classed plastic. (A first version that stopped at the first
+   non-air column broke a fixture where the film covers only part of
+   the aperture's lines: the rim and hole columns are air in the median
+   there, and the band ends short of the real edge.)
+2. *A clear leader passed the plausibility test.* The test's window
+   included the aperture's dark edge lines (and in Test 103 the next
+   frame's border), so a flat leader looked "varying". Fixed: the
+   window's outer 1.0 mm is trimmed before the mean/std are taken.
+   Consequence for Test 103: its "image 4 at +0.03 mm" was this
+   leader (correction above).
+3. *A hole cut by the strip's own end was not a stub.* Strip 2 was cut
+   through a hole, which left a 0.7 mm stub at the film's start inside
+   aperture 4 — shorter than a whole hole and not at the aperture
+   boundary, so it was dropped and the strip's first image went unseen.
+   Fixed: a stub touching a film-present boundary counts, as one at the
+   aperture boundary already did.
+4. *The closing line.* A run that numbers nothing said "done … nothing
+   missing"; `digitize.roll_is_done` was right (not done), the text and
+   `advice.suggest` were not. Fixed: `advice.done` (bool), "scanned, not
+   done", and a suggestion to check the seating.
+
+**After the fixes, on the pass's frames:** aperture 1 photograph 1 as a
+trailing split (the leader dropped), aperture 2 the tail of 1 and
+photograph 2 whole, aperture 4 strip 2's first image whole with the free
+end near. Aperture 3's photograph has no hole in the same aperture (the
+one before it lies under the bar, the one after it does not exist: the
+strip is cut right after the picture) and is left for another pass — the
+free-pass protocol's purpose. Not re-run on hardware yet; the next pass of
+Test 104 is the hardware check of these corrections.

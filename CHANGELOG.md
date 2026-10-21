@@ -6,6 +6,24 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- Test 104, first pass (2026-10-22, two strips through the application,
+  seated free in the channel): three detector corrections, each validated
+  on the pass's frames and on all 24 archived real 110 apertures (identical
+  results except where a correction applies). (1) The edge tracker's zone
+  now stops short of the rail (`RAIL_TRANSITION_MM`): a strip lying free
+  with air on both sides has the rail within 4 mm of its edge, and the
+  rail is as dark as film, so the tracker took the rail as the film edge
+  and the hole zone fell in air ("no perforation found" on every
+  aperture). (2) The plausibility test that drops a clear-film window
+  measures the window's interior (`PLAUSIBILITY_TRIM_MM`): the aperture
+  edge or the next frame's border at the window's ends made a clear
+  leader look "varying" -- Test 103's "image 4 at +0.03 mm" was that
+  strip's leader with its start marker, not a photograph (corrected in
+  the test log). (3) A hole cut short by the strip's own cut end counts
+  as a stub, as one cut by the aperture boundary already did.
+  `advice.done` (bool) says whether the roll is done after this run; a
+  run that numbered nothing prints "scanned, not done" and a suggestion
+  to check the seating instead of "done, nothing missing".
 - `digitize --film 110` runs until the roll is done, at any seating (offline,
   fixtures; no hardware yet): every run on an existing roll is a numbered
   pass (`p1-`, `p2-`, ... frame files, `pass` in the record) accepted
