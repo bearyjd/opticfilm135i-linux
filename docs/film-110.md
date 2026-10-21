@@ -561,13 +561,14 @@ once, so one load, one calibration and one eject can carry both.
   length and leader).
 - **Placement B:** both strips moved half a film pitch (12.75 mm) towards
   the middle, strip 1 to the right and strip 2 to the left, by eye.
-- **The edge with the small holes faces the aperture's open side**, away
-  from the rail the strip lies against. Holes against the rail are hidden
-  and the aperture reads "no perforation found" — nothing is numbered
-  (Test 103: one strip lay right and one wrong in each pass; the wrong one
-  gave nothing). To turn a strip, turn it in its plane (the images then
-  run the other way along the holder and the numbers count from the
-  other short side); never flip it over.
+- **The edge with the small holes may lie either way, but never pressed
+  against or under a rail: a gap must show between the hole edge and the
+  plastic.** The detector reads the holes against either rail; what it
+  cannot read is a hole edge hidden by the rail — the aperture then says
+  "no perforation found" and nothing is numbered (Test 103: one strip lay
+  right and one wrong in each pass; the wrong one gave nothing). To turn
+  a strip, turn it in its plane (the images then run the other way along
+  the holder); never flip it over.
 - **Both film edges stay visible.** A strip pushed under the rail is
   accepted while no more than `film110.RAIL_HIDDEN_MAX_MM` (3.0 mm) of it
   is hidden (`ApertureFind.rail_hidden_mm`; Test 103 measured 0.6–2.1 mm),
@@ -754,8 +755,8 @@ turned pass are rotated back, so every `image<N>.tiff` of a roll has pass
 1's orientation; `orientation` (`same`/`turned`, cumulative against pass
 1) and `numbering` (`protocol`/`content`) are in the record.
 
-**The operator.** Holes towards the open side, both film edges visible
-(§12), then: *place the strips so that in two passes you maximise the
+**The operator.** The hole edge either way but never hidden by a rail, both
+film edges visible (§12), then: *place the strips so that in two passes you maximise the
 support at the edge, and make sure every image gets one pass without a
 bar across it* (the application's instruction, same words). Between passes
 a strip may be slid by any amount or turned end for end in its plane;
