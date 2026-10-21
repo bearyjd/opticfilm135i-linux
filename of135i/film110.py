@@ -1034,24 +1034,9 @@ def image_number_anchored(line0_mm_global: float, anchor_mm: float,
 # shift is only known modulo the film pitch from positions alone, so the
 # shift is never taken from positions: it is the one at which the images
 # LOOK like the recorded ones (`decide_orientation`, below), and a run in
-# which no image can be recognised is refused rather than guessed. The
-# window below only bounds the moves the driver SUGGESTS (`pick_shift`).
-SHIFT_INWARD_SLACK_MM = 1.0     # extra room beyond +/- pitch/2 towards the middle
+# which no image can be recognised is refused rather than guessed.
 SHIFT_AGREE_MM = 2.0            # pairings within this of each other are one shift
 SHIFT_RESIDUAL_MM = 2.0         # an image this far off the shifted grid is refused
-
-
-def shift_window(slot: int = 1, film: Film = FILM_110) -> tuple:
-    """(lo, hi) in mm: the shifts (global positions, signed) a run may have
-    moved the strip by since an earlier run. "Further in" is towards the
-    holder's middle: positive for slot 1 (its strip lies against the left
-    end), negative for slot 2. The window is one film pitch wide, half a
-    pitch either side of no move, widened by SHIFT_INWARD_SLACK_MM on the
-    inward side."""
-    half = film.pitch_mm / 2
-    if slot == 2:
-        return (-half - SHIFT_INWARD_SLACK_MM, half - SHIFT_INWARD_SLACK_MM)
-    return (-half + SHIFT_INWARD_SLACK_MM, half + SHIFT_INWARD_SLACK_MM)
 
 
 def number_by_shift(position_mm: float, shift_mm: float, recorded,
@@ -1102,14 +1087,6 @@ def bar_centering_shifts(position_mm: float, bars, film: Film = FILM_110) -> lis
             out.append(c - (position_mm + length + gap / 2))
             out.append(c - (position_mm - gap / 2))
     return out
-
-
-def pick_shift(candidates, slot: int = 1, film: Film = FILM_110):
-    """The candidate shift of least magnitude that lies inside the slot's
-    shift window, or None."""
-    lo, hi = shift_window(slot, film)
-    ok = [s for s in candidates if lo <= s < hi]
-    return min(ok, key=abs) if ok else None
 
 
 # ------------------------------------------- slid or turned? (image content)

@@ -839,7 +839,7 @@ def test_cli_hook_is_noop_for_film_135():
     print("test_cli_hook_is_noop_for_film_135 OK")
 
 
-def test_number_by_shift_and_shift_window():
+def test_number_by_shift():
     pitch = FILM_110.pitch_mm
     rec = [(1, 3.5), (3, 3.5 + 2 * pitch), (4, 3.5 + 3 * pitch)]
     now = [3.5 + 10.6 + k * pitch for k in range(4)]
@@ -849,11 +849,7 @@ def test_number_by_shift_and_shift_window():
     # Before the roll's first image: number < 1 (the caller refuses it).
     num, _res = film110.number_by_shift(3.5 + 10.6 - pitch, 10.6, rec)
     assert num == 0, num
-    # The suggestion window is one pitch wide and leans towards the
-    # holder's middle: +12.75 is "further in" for slot 1, -12.75 for slot 2.
-    assert film110.shift_window(1) == (-pitch / 2 + 1.0, pitch / 2 + 1.0)
-    assert film110.shift_window(2) == (-pitch / 2 - 1.0, pitch / 2 - 1.0)
-    print("test_number_by_shift_and_shift_window OK")
+    print("test_number_by_shift OK")
 
 
 def test_thumbnail_and_decide_orientation():
@@ -945,12 +941,13 @@ def test_bar_centering_shifts_put_the_bar_in_the_gap():
     assert film110.bar_spans_mm(2, 2)[0][0] > 100.0        # slot 2: no end wall
     # Image 1 seated at the end wall (0.0 mm, Test 104): a move of about
     # a gap's half plus half a bar further in frees it.
-    s0 = film110.pick_shift(film110.bar_centering_shifts(0.0, bars), slot=1)
-    assert s0 is not None and 2.5 < s0 < 4.5, s0
+    c0 = film110.bar_centering_shifts(0.0, bars)
+    s0 = min((c for c in c0 if c > 0), key=abs)
+    assert 2.5 < s0 < 4.5, (s0, c0)
     # Image 2 of placement A (29.0 .. 46.2 mm) is split by the first bar.
     cands = film110.bar_centering_shifts(29.0, bars)
     assert len(cands) == 2, cands
-    s = film110.pick_shift(cands, slot=1)
+    s = min(cands, key=abs)
     centre = (bars[1][0] + bars[1][1]) / 2
     gap = FILM_110.pitch_mm - FILM_110.image_mm[0]
     new_start = 29.0 + s
@@ -961,7 +958,6 @@ def test_bar_centering_shifts_put_the_bar_in_the_gap():
     assert abs(s - 12.2) < 0.2, s
     # No image under a bar: nothing to centre.
     assert film110.bar_centering_shifts(10.0, bars) == []
-    assert film110.pick_shift([30.0, -30.0], slot=1) is None
     print("test_bar_centering_shifts_put_the_bar_in_the_gap OK")
 
 
@@ -996,7 +992,7 @@ def main() -> int:
         test_cli_hook_refuses_the_ambiguous_position_then_decides_later,
         test_explicit_placement_overrides_inference,
         test_cli_hook_is_noop_for_film_135,
-        test_number_by_shift_and_shift_window,
+        test_number_by_shift,
         test_thumbnail_and_decide_orientation,
         test_bar_centering_shifts_put_the_bar_in_the_gap,
         test_cli_scan_parser_defaults_to_135,

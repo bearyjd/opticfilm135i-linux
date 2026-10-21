@@ -1593,17 +1593,38 @@ def _film110_suggest(state: Film110State, prior: list, missing: list,
         return (f"{abs(d):.1f} mm further in" if d >= 0
                 else f"{abs(d):.1f} mm back out")
 
-    lo, hi = film110.shift_window(state.slot)
+    # A move is offered when every known image (and the strip's seen ends)
+    # stays inside the slot; both directions when both do -- the driver
+    # cannot know whether the strip already rests against an end wall
+    # (Test 104: "back out" was offered to a strip against the wall, the
+    # 13.8 mm inward move being 0.05 mm outside an earlier fixed window).
+    lo_r, hi_r = film110.slot_position_range(state.slot, state.strips)
+    known = list(pos.values())
+    known += [x for x in (state.film_start_mm, state.film_end_mm) if x is not None]
+
+    def feasible(s):
+        return all(lo_r <= x + s <= hi_r for x in known)
+
+    def directions(cands):
+        ins = [s for s in cands if feasible(s) and s * inward > 0]
+        outs = [s for s in cands if feasible(s) and s * inward < 0]
+        parts = []
+        if ins:
+            parts.append(move(min(ins, key=abs)))
+        if outs:
+            parts.append(move(min(outs, key=abs)))
+        return parts
+
     texts = []
     for n in missing:
         if n not in pos:
             texts.append(f"image {n}: not seen in the latest pass, position unknown")
             continue
-        s = film110.pick_shift(film110.bar_centering_shifts(pos[n], bars), state.slot)
-        if s is None:
-            texts.append(f"image {n}: no move within half a film pitch frees it")
+        parts = directions(film110.bar_centering_shifts(pos[n], bars))
+        if not parts:
+            texts.append(f"image {n}: no move keeps every image inside the slot")
         else:
-            texts.append(f"image {n}: move {move(s)}")
+            texts.append(f"image {n}: move " + " or ".join(parts))
     for n in free_end:
         p = pos.get(n)
         length = film110.FILM_110.image_mm[0]
@@ -1621,7 +1642,7 @@ def _film110_suggest(state: Film110State, prior: list, missing: list,
         elif p is None or (end is None and start is None):
             texts.append(f"image {n}: strip end free, no leader/tail measured")
             continue
-        if s is not None and lo <= s < hi:
+        if s is not None and feasible(s):
             texts.append(f"image {n}: moving {move(s)} puts the strip end under a "
                          f"bar (may split other images)")
         else:
