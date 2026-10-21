@@ -711,7 +711,10 @@ anchor, `film110_check.py --edge-check` clean on the products.
 ## 13. Free passes — any seating, slide or turn (2026-10-22, offline)
 
 *Implemented offline after Test 103 (Christian's decision: "utred fri
-placering hellre än mm-instruktion"); hardware check pending (Test 104).*
+placering hellre än mm-instruktion"); hardware-verified 2026-10-22 (Test
+104: two strips seated free in the channel, three passes, one strip turned
+between passes, every photograph delivered whole and supported except one
+free-end edge image the operator accepted).*
 
 **The contract.** Every `digitize --film 110 [--strips 2] --roll N` run on
 an existing roll is a *pass* (`pass` in the record; frame files

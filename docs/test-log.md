@@ -7294,3 +7294,39 @@ one before it lies under the bar, the one after it does not exist: the
 strip is cut right after the picture) and is left for another pass — the
 free-pass protocol's purpose. Not re-run on hardware yet; the next pass of
 Test 104 is the hardware check of these corrections.
+
+**Test 104, passes 1–3 with the corrected code (2026-10-22, through the
+application, project `Nastatestigen`) — PASS.** Two strips seated free in
+the channel, three passes, free re-seating, one strip turned end for end
+between passes 1 and 2.
+
+- *Pass 1* (both strips read): strip 1 — image 1 at the end wall
+  (leading split), 2 under bar 1, 3 whole, delivered; strip 2 — 1 whole,
+  2 under the bar, 3 whole, 4 whole with the strip end free. Advice for
+  strip 1's image 1 said "no move within half a film pitch frees it":
+  the holder's end wall was not among the bars the advice can centre —
+  fixed (it is one bar wide before aperture 1; "move 3.2 mm further
+  in").
+- *Pass 2* (`numbering: content` on both rolls): strip 1 slid, images 1
+  (free end) and 2 delivered, 3 kept from pass 1 — complete. Strip 2 was
+  TURNED by the operator: recognised as `orientation: turned`, numbered
+  4, 3, 2, 1 along the holder, nothing rewritten (1, 3, 4 already as
+  good) — the content check worked on real pictures, rotation included.
+  Image 2 happened to land under a bar again; the advice said "11.6 mm
+  back out" while the strip already rested against the end wall: the
+  13.8 mm move further in that frees it lay 0.05 mm outside the advice's
+  fixed window. Fixed: every direction that keeps the strip inside the
+  slot is offered ("13.9 mm further in or 11.6 mm back out"), the
+  operator picks.
+- *Pass 3*: strip 2 moved 13.8 mm further in (not turned): image 2 whole
+  (new), 4 whole and supported (replaced the free-end copy), 3 split
+  (kept), 1 kept — `advice.done: true`, all four photographs delivered
+  whole and supported. Strip 1 was out of the holder (film_found false;
+  its image 1 keeps the free-end copy: no leader to support it — the
+  operator accepted and stopped).
+
+**Verdict.** PASS: the free-pass contract (§13) holds on hardware —
+numbering by recognising the roll's own images across slides and a turn,
+best copy wins, done when nothing is missing and nothing is free-ended,
+measured advice (after the two corrections above). Production follows
+with about ten more strips, two per load, reported per pass.

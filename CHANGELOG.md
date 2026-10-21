@@ -24,8 +24,9 @@ one exists; "offline" means implemented and tested without the scanner.
   `advice.done` (bool) says whether the roll is done after this run; a
   run that numbered nothing prints "scanned, not done" and a suggestion
   to check the seating instead of "done, nothing missing".
-- `digitize --film 110` runs until the roll is done, at any seating (offline,
-  fixtures; no hardware yet): every run on an existing roll is a numbered
+- `digitize --film 110` runs until the roll is done, at any seating
+  (hardware-verified 2026-10-22, Test 104: three passes, a turned strip,
+  every photograph delivered): every run on an existing roll is a numbered
   pass (`p1-`, `p2-`, ... frame files, `pass` in the record) accepted
   unless the roll is done; the placement is recorded (A, B or `free`) and
   never refuses. From pass 2 the strip may be slid -- by any amount -- or
