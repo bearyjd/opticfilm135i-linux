@@ -839,6 +839,96 @@ def test_cli_hook_is_noop_for_film_135():
     print("test_cli_hook_is_noop_for_film_135 OK")
 
 
+def test_match_shift_and_number_by_shift():
+    pitch = FILM_110.pitch_mm
+    rec = [(1, 3.5), (3, 3.5 + 2 * pitch), (4, 3.5 + 3 * pitch)]
+    now = [3.5 + 10.6 + k * pitch for k in range(4)]
+    shift, n = film110.match_shift(now, rec)
+    assert abs(shift - 10.6) < 1e-9 and n >= 3, (shift, n)
+    for k, want in enumerate((1, 2, 3, 4)):
+        num, res = film110.number_by_shift(now[k], shift, rec)
+        assert num == want and abs(res) < 1e-9, (k, num, res)
+    # The window is one pitch wide and leans towards the holder's middle:
+    # +12.75 is "further in" for slot 1, -12.75 for slot 2.
+    assert abs(film110.match_shift([3.5 + 12.75], rec, slot=1)[0] - 12.75) < 1e-9
+    assert abs(film110.match_shift([3.5 - 12.75], rec, slot=2)[0] + 12.75) < 1e-9
+    assert film110.shift_window(1) == (-pitch / 2 + 1.0, pitch / 2 + 1.0)
+    assert film110.shift_window(2) == (-pitch / 2 - 1.0, pitch / 2 - 1.0)
+    # Nothing to pair with, or pairings that disagree by more than 2 mm.
+    assert film110.match_shift([], rec) is None
+    assert film110.match_shift([3.5], []) is None
+    assert film110.match_shift([3.5 + 4.0, 3.5 + 8.0], [(1, 3.5)]) is None
+    assert film110.match_shift([3.5 + 4.0, 3.5 + 5.0], [(1, 3.5)]) is not None
+    # Before the roll's first image: number < 1 (the caller refuses it).
+    num, _res = film110.number_by_shift(3.5 + 10.6 - pitch, 10.6, rec)
+    assert num == 0, num
+    print("test_match_shift_and_number_by_shift OK")
+
+
+def test_thumbnail_and_decide_orientation():
+    rng = np.random.default_rng(7)
+
+    def picture(seed):
+        r = np.random.default_rng(seed)
+        base = r.normal(size=(12, 9))
+        return np.kron(base, np.ones((40, 40)))[:480, :360]
+
+    pics = {k: picture(k) for k in (1, 2, 3, 4)}
+    th = {k: film110.thumbnail(v) for k, v in pics.items()}
+    assert th[1].shape == film110.THUMB_SIZE
+    assert abs(float(th[1].mean())) < 1e-5 and abs(float(th[1].std()) - 1) < 1e-4
+    assert film110.thumb_correlation(th[1], th[1]) > 0.999
+    assert abs(film110.thumb_correlation(th[1], th[2])) < 0.5
+    # The thumbnail does not depend on the scan resolution.
+    half = film110.thumbnail(pics[1][::2, ::2])
+    assert film110.thumb_correlation(th[1], half) > 0.98
+    assert float(film110.thumbnail(np.full((200, 200), 5.0)).std()) == 0.0
+    pitch = FILM_110.pitch_mm
+    old = [(k, 3.5 + (k - 1) * pitch, th[k]) for k in (1, 2, 3, 4)]
+    # Slid by +10.6 mm: same pictures, same orientation.
+    new = [(3.5 + 10.6 + (k - 1) * pitch, th[k]) for k in (1, 2, 3, 4)]
+    dec = film110.decide_orientation(new, old)
+    assert dec["orientation"] == "same" and dec["basis"] == "content", dec
+    assert abs(dec["key"] - 10.6) < 1e-6 and dec["mean"] > 0.99, dec
+    # Turned: reverse order, each picture rotated 180 degrees; the photograph
+    # that started at r now starts at C - r (C = 100 here).
+    turned = [(100.0 - old[k - 1][1], th[k][::-1, ::-1]) for k in (1, 2, 3, 4)]
+    dec = film110.decide_orientation(turned, old)
+    assert dec["orientation"] == "turned" and dec["mean"] > 0.99, dec
+    num, res = film110.number_turned(100.0 - old[1][1], dec["key"], [(n, r) for n, r, _t in old])
+    assert num == 2 and abs(res) < 1e-6, (num, res)
+    # Other pictures altogether: cannot tell.
+    other = [(3.5 + 10.6 + (k - 1) * pitch, film110.thumbnail(picture(50 + k)))
+             for k in (1, 2, 3, 4)]
+    assert film110.decide_orientation(other, old) is None
+    # A geometric slide with nothing whole to verify it stands on geometry.
+    dec = film110.decide_orientation(
+        [], old, new_all=[3.5 + 10.6], old_all=[(n, r) for n, r, _t in old])
+    assert dec["orientation"] == "same" and dec["basis"] == "geometry", dec
+    print("test_thumbnail_and_decide_orientation OK")
+
+
+def test_bar_centering_shifts_put_the_bar_in_the_gap():
+    bars = film110.bar_spans_mm(1, 1)
+    assert abs(bars[0][0] - STRIP.aperture_mm) < 1e-9
+    # Image 2 of placement A (29.0 .. 46.2 mm) is split by the first bar.
+    cands = film110.bar_centering_shifts(29.0, bars)
+    assert len(cands) == 2, cands
+    s = film110.pick_shift(cands, slot=1)
+    centre = (bars[0][0] + bars[0][1]) / 2
+    gap = FILM_110.pitch_mm - FILM_110.image_mm[0]
+    new_start = 29.0 + s
+    # The bar's centre ends up in the middle of a gap beside the image.
+    before = new_start - gap / 2
+    after = new_start + FILM_110.image_mm[0] + gap / 2
+    assert min(abs(before - centre), abs(after - centre)) < 1e-6, (s, new_start)
+    assert abs(s - 12.2) < 0.2, s
+    # No image under a bar: nothing to centre.
+    assert film110.bar_centering_shifts(10.0, bars) == []
+    assert film110.pick_shift([30.0, -30.0], slot=1) is None
+    print("test_bar_centering_shifts_put_the_bar_in_the_gap OK")
+
+
 def test_cli_scan_parser_defaults_to_135():
     parser = cli.build_parser()
     args = parser.parse_args(["scan", "-o", "/tmp/x.tiff"])
@@ -870,6 +960,9 @@ def main() -> int:
         test_cli_hook_refuses_the_ambiguous_position_then_decides_later,
         test_explicit_placement_overrides_inference,
         test_cli_hook_is_noop_for_film_135,
+        test_match_shift_and_number_by_shift,
+        test_thumbnail_and_decide_orientation,
+        test_bar_centering_shifts_put_the_bar_in_the_gap,
         test_cli_scan_parser_defaults_to_135,
         test_validate_film110_args,
     ]

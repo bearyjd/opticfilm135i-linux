@@ -6,6 +6,22 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- `digitize --film 110` runs until the roll is done, at any seating (offline,
+  fixtures; no hardware yet): every run on an existing roll is a numbered
+  pass (`p1-`, `p2-`, ... frame files, `pass` in the record) accepted
+  unless the roll is done; the placement is recorded (A, B or `free`) and
+  never refuses. From pass 2 the strip may be slid or turned 180 degrees in
+  its plane: numbering waits for the end of the strip and is taken from the
+  roll's own earlier images, the image content (thumbnail correlation)
+  deciding slide against turn (`orientation`, `numbering` in the record;
+  products of a turned pass are rotated back; exit 5 when it cannot tell
+  and nothing is written). Image entries gain `position_mm`, `crop` and
+  `kept` (a copy as good or better exists: information, no longer a
+  problem); `advice` is `missing` / `free_end` / `suggest` plus the old
+  `images` / `other_placement`; a roll is done when nothing is missing and
+  no delivered copy has the strip end free. `--force` starts a new epoch of
+  the roll's records (`forced`). `film110.match_shift`, `number_by_shift`,
+  `decide_orientation`, `thumbnail`.
 - Test 103 (2026-10-21), the first hardware pass of `digitize --film 110
   --strips 2` (two strips, placement A twice; placement B not yet run),
   and what it corrected: a film band narrower than 16 mm is accepted when
