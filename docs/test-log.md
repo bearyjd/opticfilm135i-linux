@@ -7330,3 +7330,51 @@ numbering by recognising the roll's own images across slides and a turn,
 best copy wins, done when nothing is missing and nothing is free-ended,
 measured advice (after the two corrections above). Production follows
 with about ten more strips, two per load, reported per pass.
+
+**Test 104, load 2 (2026-10-22 afternoon, project `Testigen` rolls 3–4,
+three passes) — numbering and "done" corrected offline, verified on the
+load's own frames.** Two strips: strip 1 an outer part of its roll whose
+cassette end lay OVER strip 2's start, covering most of strip 2's first
+photograph (edge number 9); strip 2 with edge numbers 9–12, strip 1 with
+22–24. Christian's principle for all of it: *the system serves the
+photographs, not the other way round; if the system refuses although the
+picture worked, the system is wrong.*
+
+What went wrong on the merged code, and the corrections (all verified
+by running the load's p1/p2/p3 frames through the digitize path offline):
+
+1. Pass 1 saw strip 2's photograph 9 only as a dark square under the
+   cassette end; its first-seen image became "1" (= 10). Pass 2 (turned)
+   showed 9 whole, numbered 0 — and refused it ("number 0"); the roll
+   was declared done with three of four delivered. Now: a WHOLE image is
+   never refused for its numbering — before the first-seen image it is
+   numbered 0, −1, … and delivered (`image0.tiff` = photograph 9); off
+   the grid it is delivered as `image<N>-uncertain.tiff`, flagged. And
+   `done` requires the strip's ends to have been seen (or to lie under a
+   holder end wall).
+2. Strip 1, turned in pass 2 and reaching through aperture 3 into slot
+   2's first aperture: its image 2, whole in aperture 3 with both edges
+   confirmed, was dropped as "no strip lies there" (the two-strip ghost
+   rule). Now a doubly confirmed image survives that rule; the harness
+   delivers image 2 in pass 2.
+3. Pass 3 after the turned pass 2 numbered strip 1's middle image "4"
+   and strip 2's "2" twice: the reference record's grid runs backwards
+   along the holder when that record was itself turned, and the numbering
+   counted forwards. Now `direction` follows the reference's orientation;
+   the harness gives stable numbers over all three passes (strip 1: 1, 2,
+   3; strip 2: 0, 1, 2, 3).
+4. A content cluster was scored by its mean: a 6 mm split sighting that
+   correlated with nothing vetoed the right cluster. Now by its best
+   pair. The grid tolerance for a certain number is 5 mm (was 2): the
+   real pitch measured 24.85–25.5 mm, three pitches are 2 mm off alone.
+5. Pass 4 on roll 3 with a single strip re-seated: exit 5, correctly
+   (nothing recognisable), but the operator had to abort. "Done" no
+   longer refuses a run either. Lesson recorded with the application:
+   rolls and passes are the system's bookkeeping, never the operator's
+   problem; the edge numbers printed on the film are the photograph's
+   identity (OCR of them is a candidate, docs/ROADMAP.md).
+
+Remaining limitation: two strips overlapping into each other's slot (a
+strip reaching through the slot boundary) can put one strip's split image
+into the other roll's missing list. Christian's decision: one strip per
+load from now on.

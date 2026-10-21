@@ -881,7 +881,7 @@ def test_thumbnail_and_decide_orientation():
     new = [(3.5 + 10.6 + (k - 1) * pitch, 0.0, L, pp[k]) for k in (1, 2, 3, 4)]
     dec = film110.decide_orientation(new, old)
     assert dec["orientation"] == "same", dec
-    assert abs(dec["key"] - 10.6) < 1e-6 and dec["mean"] > 0.99, dec
+    assert abs(dec["key"] - 10.6) < 1e-6 and dec["corr"] > 0.99, dec
     # Slid by a whole aperture and a bit (38 mm): positions alone would read
     # it as 12.5 mm (one pitch less) and number every image one too high;
     # the pictures say 38.
@@ -900,7 +900,7 @@ def test_thumbnail_and_decide_orientation():
     part = [(3.5 + 10.6 + pitch, 0.0, 9.0, pp[2][:n2])]
     dec = film110.decide_orientation(part, old)
     assert dec["orientation"] == "same" and abs(dec["key"] - 10.6) < 1e-6, dec
-    assert dec["mean"] > 0.95, dec
+    assert dec["corr"] > 0.95, dec
     # Too little overlap (4 mm): no pair, no decision.
     n4 = int(round(pp[2].shape[0] * 4.0 / L))
     assert film110.decide_orientation([(3.5 + 10.6 + pitch, 0.0, 4.0, pp[2][:n4])], old) is None
@@ -908,14 +908,14 @@ def test_thumbnail_and_decide_orientation():
     # that started at r now starts at C - r (C = 100 here).
     turned = [(100.0 - old[k - 1][1], 0.0, L, pp[k][::-1, ::-1]) for k in (1, 2, 3, 4)]
     dec = film110.decide_orientation(turned, old)
-    assert dec["orientation"] == "turned" and dec["mean"] > 0.99, dec
+    assert dec["orientation"] == "turned" and dec["corr"] > 0.99, dec
     num, res = film110.number_turned(100.0 - old[1][1], dec["key"], rec)
     assert num == 2 and abs(res) < 1e-6, (num, res)
     # A turned strip's leading split shows the END of the picture (its
     # last 9 mm) rotated: paired on that part.
     tail = pp[3][pp[3].shape[0] - n2:][::-1, ::-1]
     dec = film110.decide_orientation([(100.0 - old[2][1], 0.0, 9.0, tail)], old)
-    assert dec["orientation"] == "turned" and dec["mean"] > 0.95, dec
+    assert dec["orientation"] == "turned" and dec["corr"] > 0.95, dec
     # Other pictures altogether: cannot tell.
     other = [(3.5 + 10.6 + (k - 1) * pitch, 0.0, L, film110.patch(picture(50 + k), 480 / L))
              for k in (1, 2, 3, 4)]
