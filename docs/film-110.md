@@ -1097,3 +1097,26 @@ a product), not an image; a blank may reach 1 mm past the aperture's lines.
 Real-data A/B (98 stored apertures, 143 hole frames): identical except two
 apertures whose "image" was an unexposed frame (Nastatestigen roll 1 p1-f1,
 Testigen roll 2 p1-f1), now blank.
+
+### 15.8 Recognising a pass on a strip of near-duplicate shots (Test 106 pass 3)
+
+`decide_orientation` still decides slide against turn by what the pictures
+look like, never by positions alone. Its acceptance now weighs **evidence**:
+for each cluster of (new sighting, recorded sighting) pairs that agree on one
+shift, evidence = the sum over DISTINCT new sightings of each one's best
+correlation inside the cluster (a sighting that correlates with nothing adds
+about 0 and vetoes nothing; each sighting counts once). The winner is the
+cluster with the most evidence (ties: more pairs at or above
+`ORIENT_MIN_CORR`, then the best pair). It is accepted when its best pair is at
+least `ORIENT_MIN_CORR` AND either its best pair is `ORIENT_MARGIN` (0.15)
+above every rival's best pair OR its evidence is `ORIENT_EVIDENCE_MARGIN`
+(1.0) above the best rival's evidence (a rival = a cluster of the other kind
+or another shift). Test 106 pass 3: the true slide (+22.4 mm) had four
+distinct new sightings at 0.91-0.96 (evidence 3.75); the competing slide (-3.0
+mm, one pitch off) 0.84, 0.71, 0.10 (evidence 1.65) because the strip holds
+near-duplicate consecutive shots; 0.96 - 0.84 = 0.12 refused it. One new
+sighting at 0.96 against 0.84 is still refused. On every stored multi-pass roll
+the harness reaches (Testigen rolls 5-8 and Test 106 pass 2) the decision is
+unchanged (orientation and key); the two-strip rolls (Testigen 3-4,
+Nastatestigen, Test 103) cannot be replayed by `--from-frames` and are not
+covered by that check.

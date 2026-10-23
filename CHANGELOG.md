@@ -6,6 +6,11 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- Test 106 pass 3 (2026-10-23, offline): `decide_orientation` accepts a
+  cluster on evidence (sum of each distinct new sighting's best correlation)
+  as well as on the best-pair margin, so a strip of near-duplicate shots is
+  recognised (+22.4 mm slide, 0.96 against 0.84); every earlier stored decision
+  is unchanged (docs/film-110.md §15.8).
 - Test 105/106 (2026-10-23, offline): gap detection robust to scratches and
   dust (median filter, level-step cuts, extension) and a clear frame is never
   an image when a prediction runs into the gap (it is a blank). A **near-whole**

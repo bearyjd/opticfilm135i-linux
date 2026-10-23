@@ -1550,10 +1550,13 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
     must still lie inside it after the move -- and by the strip's own
     free end when one was seen in both runs (`end_shift` = its move, mm:
     a slide must agree with it within END_AGREE_MM; a turn is not
-    checked against it). Among the clusters left, the best -- most pairs
-    with a usable correlation, then best correlation -- wins when its
-    best pair is at least ORIENT_MIN_CORR and ORIENT_MARGIN above every
-    other remaining cluster's best pair, of either kind. No window on the shift: a move of
+    checked against it). Among the clusters left, the best -- most
+    evidence (the sum over distinct new sightings of each one's best
+    correlation in the cluster), then most usable pairs, then best
+    correlation -- wins when its best pair is at least ORIENT_MIN_CORR
+    and either ORIENT_MARGIN above every other remaining cluster's best
+    pair, of either kind, or ORIENT_EVIDENCE_MARGIN above the best
+    rival's evidence. No window on the shift: a move of
     more than half a pitch, or of whole apertures, is told from a smaller
     one by the pictures (and the free end), which positions alone cannot
     do -- the film is periodic. Returns {"orientation": "same"|"turned",
