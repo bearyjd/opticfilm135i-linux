@@ -6,6 +6,22 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- Test 104 follow-up (2026-10-23, offline): **the holes are never a gate.**
+  The printed border between pictures (a flat, dark ~8 mm gap along
+  transport) now locates images independently of the perforation holes
+  (`film110.detect`, docs/film-110.md §8 step 9): in every aperture that
+  has a film band, also when no hole is readable or the band is "not
+  adjacent to air". Hole-located frames are unchanged; frame-located ones
+  go through the same refinement code and are added when no hole image
+  matches (`located_by` `"holes"` / `"frame"` / `"holes+frame"`, in
+  `FrameFind` and in every manifest `images` entry). Tuned on Testigen
+  rolls 3-7: five apertures whose holes read nothing now yield images.
+- `digitize --film 110 --roll N --from-frames` (offline, docs/film-110.md
+  §14): rebuild a roll's numbering, photographs and manifest records from
+  its stored `p<k>-f<N>.tiff` frames without a scanner, through the same
+  code as a live pass; the old `image*.tiff` files are moved to
+  `superseded-<UTC>/`, never deleted. Exit 5 when a pass cannot be
+  recognised, 2 when refused (nothing touched).
 - Test 104, roll 7 (2026-10-22 evening): a strip whose hole edge rests
   flush against the rail -- no air outside the film, the holes still
   reading as air inside the band -- was "no perforation found" on every

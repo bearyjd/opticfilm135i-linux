@@ -285,6 +285,43 @@ survey and the 3600 dpi production frames alike:
    around a correctly found edge (§9.1), not a correction for a biased
    one.
 
+9. **The frame locator (the holes are never a gate).** A second,
+   independent locator runs in every aperture that has a film band, also
+   when no hole could be read and also when the band is "not adjacent to
+   air; perforations hidden". Between two pictures the band-interior
+   profile (step 3's per-line median, divided by air) reads a *flat* run
+   of ~8 mm (6.5–9.5) at 0.06–0.08 x air — the printed border — with a
+   rolling standard deviation (0.5 mm window) below 0.003 x air (measured
+   ~0.0003), while pictures read 0.13–0.36 and vary; flat patches inside a
+   picture (sky, 0.09–0.13) are at most ~5 mm, and a dense leader reads
+   0.03 flat for 11 mm. A *full* gap (both ends inside the aperture and not
+   at a free film end) must be 6.5–9.5 mm long; the aperture's **border
+   level** is the lowest full-gap level at or above 0.04 x air, and every
+   gap must agree with it within ±30 % (this rejects the 0.03 leader and
+   the picture halves that happen to be flat). A *partial* gap touching
+   line 0, the last line or a free film end counts from 1.0 mm if its
+   level agrees with the border level (with no full gap in the aperture:
+   from 3.0 mm and a level of 0.03–0.16 x air, the weaker rule). Each
+   accepted gap predicts the image before it and the image after it (not
+   on a side that touches the boundary); predictions closer than half a
+   pitch merge. The candidates then go through **exactly** the code of
+   steps 5–8 (plausibility, edge refinement, lateral prediction and
+   refinement, whole/split, `free_end_near`); with no hole the picture is
+   centred on the band and both lateral edges are searched 1.0 mm inside
+   both band edges, with holes the hole path's lateral prediction is used.
+   Combination: the hole locator's frames stand **unchanged**; a frame
+   located image within 3 mm of a hole image *is* that image (`located_by`
+   `"holes+frame"`); any other is added as `"frame"` (`perforation_line`
+   None, `orientation` "unknown") unless it overlaps an accepted image by
+   more than 2 mm (two pictures never overlap; on disagreement the holes
+   stand). `located_by` is in every manifest `images` entry. The hole-based
+   ghost rules of the CLI do not apply to a frame-located image; the
+   leader ghost (leading split without a confirmed end edge), the
+   film-start rule and the trailing split towards the next strip do.
+   Tuned on Testigen rolls 3–7 (3600 dpi): the holes and the frame agree
+   on nearly every image, and the frame locator alone finds the images of
+   five apertures where the holes read nothing.
+
 ## 9. Results on the real strip (offline, 22 apertures, 2026-09-19)
 
 `tools/film110_check.py` over every aperture-registered frame of Test
@@ -413,10 +450,15 @@ are kept beside them as evidence.
   ±0.3 mm of model error, not ±1 mm. Test 87 — a second strip through
   the full protocol with no manual cropping — is the acceptance step
   before "110 support" is claimed anywhere public.
-- **The perforated edge must face the open side of the aperture** (it
-  does when the strip lies against the lower rail as in Test 86). With
-  the holes under the rail the detector reports "perforations hidden"
-  and writes no 110 products; the aperture products are unaffected.
+- **The holes are no longer a gate.** With the holes unreadable (under a
+  rail, a band not adjacent to air, a cut hole) the frame locator (§8
+  step 9) locates the images from the printed border between pictures.
+  What it needs instead: a visible border gap (6.5–9.5 mm, flat, dark)
+  on one side of the picture; a picture with no gap in view (the whole
+  aperture inside one picture) is not located by it, and a leader read as
+  an image by the gap before it is removed by the CLI's leader rule only
+  when its end edge is not confirmed. Film with no printed border (not
+  seen on any 110 strip yet) has no gaps; the holes carry it as before.
 - **Edge safety is 0.25 mm of border, n = 1 strip.** After the
   2026-09-20 fix the refined edge lies within 0.06 mm of the measured
   foot on all 16 production edges; the pad is a margin, not a
@@ -800,3 +842,43 @@ strip lying free in the channel (air on both sides) is read since Test
 (`RAIL_TRANSITION_MM`), and a hole cut by the strip's own end counts as a
 stub. Identical results on all 24 archived real 110 apertures, except that
 Test 103's "image 4 at +0.03 mm" — the leader — is no longer reported.
+
+## 14. Rebuild a roll from its stored frames — `--from-frames` (offline)
+
+Every pass keeps its frame files (`p<k>-f<N>.tiff`, `p<k>-f<N>-ir.tiff`,
+the same arrays the 110 code was given, rotated by `--rotate` when that was
+non-zero). A driver correction must never cost the operator a new pass, so
+
+    of135i digitize --film 110 --roll N --from-frames -o DIR [--prefix P]
+
+rebuilds the roll **without a scanner** (it never opens one and never
+touches USB):
+
+1. The passes are the roll's current epoch (`p<k>` records) plus any `p<k>`
+   frame tag on disk without a record (a crash). They are replayed in
+   order, each pass's apertures in frame order, through the same
+   `Film110State` / `_film110_process_aperture` / `_film110_finalize` /
+   `_film110_fill_record` code as a live pass, so numbering from pass 2 is
+   the content recognition of §13 against the rebuilt earlier pass.
+   dpi, ir, rotate, no-clean and the placement label come from the stored
+   records, never from the command line; flags that only steer hardware
+   (`--park`, `--assume-loaded`, ...) are ignored.
+2. Before anything is written the roll's `image*.tiff` files (including
+   `-ir` and `-uncertain`) are **moved**, not deleted, into
+   `roll-NNN/superseded-<UTC yyyymmddThhmmssZ>/`. The `p<k>` frame files,
+   overscan files and diag sidecars are never touched.
+3. Each replayed pass appends a manifest record like a live pass plus
+   `"source": "frames"`, `"from_pass": k`, `"rebuilt_utc"`; the first one
+   carries `"forced": true`, so it starts a new epoch (`roll_is_done`,
+   `film110_next_pass` and the next live pass see only the rebuild). The
+   next live pass is K+1 and cannot collide with the stored frames.
+4. Output lines of a replayed pass are prefixed `rebuild pass k:`; the
+   usual roll summary ends the run.
+
+Exit codes: 0 ok; 2 refused before anything was touched (not `--film 110`,
+no `--roll`, `--strips 2` — a two-strip rebuild is not supported in this
+version —, no 110 records, no stored frame file, records that disagree on
+dpi or ir); 5 when a pass cannot be recognised against the rebuilt
+earlier ones: that pass writes no photograph, its record (status `failed`,
+`images` empty, `stop_reason`) is appended, the rebuild stops, and the
+earlier passes' products and records stay.
