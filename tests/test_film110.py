@@ -1111,6 +1111,59 @@ def test_frame_locator_with_the_band_hidden_under_rails():
         print(f"test_frame_locator_with_the_band_hidden_under_rails OK ({dpi} dpi)")
 
 
+
+def _blank_fixture(dpi, **kw):
+    """Pictures one and three of a strip with an unexposed (clear film)
+    frame position between them; returns (arr, ppm, lo, hi, imgs, window)."""
+    L = FILM_110.image_mm[0]
+    arr, ppm, lo, hi, imgs = _frame_fixture(dpi, n_images=3, aperture_length_mm=78.0, **kw)
+    window = imgs[1][:2]
+    a = arr.astype(np.float64)
+    l0, l1 = int(round(window[0] * ppm)), int(round(window[1] * ppm))
+    for ci, key in enumerate(CHANNELS):
+        a[l0:l1, lo + int(round(0.6 * ppm)):hi, ci] = 0.98 * CLEAR[key]
+    return np.clip(a, 0, 65535).astype(np.uint16), ppm, lo, hi, [imgs[0], imgs[2]], window
+
+
+def test_blank_window_between_gaps_is_reported_and_is_no_image():
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs, window = _blank_fixture(dpi)
+        find = film110.detect(arr, dpi=dpi)
+        assert find.reason == "", (dpi, find.reason)
+        assert len(find.frames) == 2, (dpi, [(f.line0 / ppm, f.line1 / ppm) for f in find.frames])
+        assert len(find.blanks) == 1, (dpi, find.blanks)
+        b0, b1 = find.blanks[0]
+        assert abs(b0 / ppm - window[0]) <= 0.4 and abs(b1 / ppm - window[1]) <= 0.4, (dpi, b0 / ppm, b1 / ppm, window)
+        assert all(abs(f.line0 / ppm - w[0]) <= 0.3 for f, w in zip(find.frames, imgs))
+        print(f"test_blank_window_between_gaps_is_reported_and_is_no_image OK ({dpi} dpi)")
+
+
+def test_blank_is_not_reported_where_the_film_ends_inside_the_window():
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs, window = _blank_fixture(dpi)
+        a = arr.copy()
+        a[int(round((window[0] + 8.0) * ppm)):, lo:hi, :] = int(AIR)    # the film ends inside the window
+        find = film110.detect(a, dpi=dpi)
+        assert find.blanks == [], (dpi, find.blanks)
+        print(f"test_blank_is_not_reported_where_the_film_ends_inside_the_window OK ({dpi} dpi)")
+
+
+def test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none():
+    for dpi in DPIS:
+        # a clear leader before the first gap, film starting inside the aperture
+        arr, ppm, lo, hi, imgs = _frame_fixture(dpi, n_images=2, first_mm=20.0, aperture_length_mm=70.0)
+        a = arr.copy()
+        a[:int(round(4.0 * ppm)), lo:hi, :] = int(AIR)                    # the film begins at 4 mm
+        for ci, key in enumerate(CHANNELS):
+            a[int(round(4.0 * ppm)):int(round(10.0 * ppm)), lo:hi, ci] = int(0.98 * CLEAR[key])
+        find = film110.detect(a, dpi=dpi)
+        assert find.blanks == [], (dpi, find.blanks)
+        # and a plain strip of pictures reports none either
+        plain = film110.detect(_frame_fixture(dpi, n_images=2)[0], dpi=dpi)
+        assert plain.blanks == []
+        print(f"test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none OK ({dpi} dpi)")
+
+
 def main() -> int:
     tests = [
         test_whole_and_trailing_split,
@@ -1144,6 +1197,9 @@ def main() -> int:
         test_frame_locator_finds_the_image_after_a_cut_hole,
         test_frame_locator_ignores_sky_and_dense_leader,
         test_frame_locator_with_the_band_hidden_under_rails,
+        test_blank_window_between_gaps_is_reported_and_is_no_image,
+        test_blank_is_not_reported_where_the_film_ends_inside_the_window,
+        test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none,
     ]
     passed = 0
     for t in tests:

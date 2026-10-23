@@ -6,6 +6,24 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- Test 104 follow-up (2026-10-23, offline): **the pass report speaks the
+  holder's language, with ONE next placement, and numbers count frame
+  positions from the strip's front end** (docs/film-110.md §15). Records
+  carry `pass_report` (per sighting: number, where = aperture / bar / end
+  wall, state, outcome, located_by), `blanks`, `number_basis`
+  (`"strip_start"` / `"provisional"`) and `advice.next` (one joint slide of
+  the whole strip in quarter image lengths, "towards aperture 1/6"; null when
+  nothing is needed or no placement helps) with `advice.not_done`,
+  `advice.unseen`, `advice.frame_positions`; `advice.suggest` carries the
+  text, the older keys stay one release. Every printed report starts with the
+  one-line convention legend (the unconfirmed "aperture 1 = the end that
+  enters first" is the single constant `film110_report.APERTURE_1_END`).
+  Unexposed frame positions (`ApertureFind.blanks`) consume a number and make
+  no file. When a later pass first sees the strip's front end the roll is
+  renumbered in-process from its stored frames (the old photographs move to
+  `superseded-*/`). The closing text never says "No image numbered" when
+  images were numbered. A predicted image before a lone strip's film start
+  (the leader) or past its end (the tail) is dropped and reported as such.
 - Test 104 follow-up (2026-10-23, offline): **the holes are never a gate.**
   The printed border between pictures (a flat, dark ~8 mm gap along
   transport) now locates images independently of the perforation holes

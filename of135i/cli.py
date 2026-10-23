@@ -511,7 +511,6 @@ class Film110State:
         self.number_shift = 0
         self.shift_decided = False
         self.shift_forced = False
-        self.anchored_before = False       # an earlier pass already saw the front end
 
 
 def _film110_ref_entries(ref: dict) -> list:
@@ -2013,7 +2012,7 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                        "roll again")
         elif missing or free_end or unseen:
             wanted = sorted(set(missing) | set(free_end) | set(unseen))
-            suggest = ("no placement of the strip brings "
+            suggest = ("No placement of the strip brings "
                        + ", ".join(f"image {n}" for n in wanted)
                        + " into an aperture without losing another: accept the "
                          "copies delivered, or stop")
