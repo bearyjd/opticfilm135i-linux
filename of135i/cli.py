@@ -732,6 +732,7 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
         vb = [int(x) for x in film110.product_bounds(
             fr, dpi=args.dpi, pad_mm=0.0, shape=vis_crop.shape)]
         it["vis_bounds"] = vb
+        it["n_lines"] = int(vis_crop.shape[0])
         it["extent"] = [(vb[0] - fr.line0) / px_per_mm, (vb[1] - fr.line0) / px_per_mm]
 
         def crops(fr=fr):
@@ -755,7 +756,7 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
             vb = it["vis_bounds"]
             if vb[1] > vb[0] and vb[3] > vb[2]:
                 it["patch"] = film110.patch(vis_crop[vb[0]:vb[1], vb[2]:vb[3]], px_per_mm)
-            if it["fr"].whole:
+            if it["fr"].whole or it["fr"].cut_mm is not None:
                 v, i = it["crops"]()
                 v = _np.ascontiguousarray(v)
                 i = _np.ascontiguousarray(i) if i is not None else None
@@ -835,7 +836,7 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
     """Number and write the images of one aperture (the filtered `items`).
     Pass 1 numbers by the protocol; a later pass by the numbering that
     `_film110_finalize` fixed (`state.numbering`)."""
-    from . import film110
+    from . import film110, film110_report as rep
 
     parts = list(parts)
     anchored = state.strips == 2 and state.slot == 2
@@ -849,6 +850,7 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
             parts.append(it["msg"])
             continue
         fr = it["fr"]
+        deliver = bool(fr.whole or fr.cut_mm is not None)   # near-whole is delivered
         pos_mm = fr.line0 / px_per_mm
         note = ""
         g = film110.global_position_mm(aperture, fr.line0, args.dpi)
@@ -870,7 +872,7 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
                 n, residual = film110.number_by_shift(g, nm["key"], nm["entries"],
                                                       direction=nm["direction"])
             uncertain = abs(residual) > film110.SHIFT_RESIDUAL_MM
-            if (n < 1 or uncertain) and not fr.whole:
+            if (n < 1 or uncertain) and not (fr.whole or fr.cut_mm is not None):
                 # A split prediction before the roll's first image (the
                 # leader, on this side after a turn) or off the grid:
                 # nothing a product could be made of anyway, ignored.
@@ -971,11 +973,23 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
                  "uncertain": bool(uncertain),
                  "size_mm": ([round(float(fr.size_mm[0]), 2),
                               round(float(fr.size_mm[1]), 2)]
-                             if fr.whole else None),
+                             if deliver else None),
                  "replaced_free_end_copy": False}
+        if fr.cut_mm is not None:
+            entry["cut_mm"] = round(float(fr.cut_mm), 2)
+        if fr.end_gap_mm is not None:
+            entry["end_gap_mm"] = round(float(fr.end_gap_mm), 2)
+        if not fr.whole:
+            # How much of the image lies under the plastic (predicted edge
+            # against the aperture boundary) and which plastic it is.
+            n_lines = it.get("n_lines")
+            hid = (max(0.0, -fr.line0) if fr.split == "leading"
+                   else max(0.0, fr.line1 - n_lines) if n_lines else 0.0)
+            entry["hidden_mm"] = round(float(hid) / px_per_mm, 2)
+            entry["under"] = rep.under_text(rep.split_where(entry))
         state.images.append(entry)
 
-        if fr.whole:
+        if deliver:
             res = emit(n, fr, it["crops"], uncertain=uncertain)
             entry["main"] = res.get("main")
             entry["ir"] = res.get("ir")
@@ -987,8 +1001,8 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
                 state.problems.append(res["refused"])
                 continue
             parts.append(note + res.get("message",
-                         f"image {n} whole ({fr.size_mm[0]:.1f} x "
-                         f"{fr.size_mm[1]:.1f} mm)"))
+                         f"image {n} {'whole' if fr.whole else 'near-whole'} "
+                         f"({fr.size_mm[0]:.1f} x {fr.size_mm[1]:.1f} mm)"))
         else:
             # The image runs under a bar: not written. A later pass with
             # the strip seated differently delivers it.
@@ -1678,8 +1692,9 @@ def _film110_digitize_emit(args: argparse.Namespace, state: Film110State,
                        digitize.roll_records_current(args.out, roll, args.prefix))
             records.append({"images": state.images[:-1]})
             prev = digitize.delivered_image(records, roll, args.prefix, n)
-            if (prev is not None and prev.get("free_end_near")
-                    and not fr.free_end_near):
+            from . import film110_report as rep
+            mine = {"whole": fr.whole, "cut_mm": fr.cut_mm, "free_end_near": fr.free_end_near}
+            if prev is not None and rep.copy_rank(mine) > rep.copy_rank(prev):
                 replaced = True
             else:
                 return {"kept": True,
@@ -1709,7 +1724,7 @@ def _film110_digitize_emit(args: argparse.Namespace, state: Film110State,
                   f"16-bit, 110 image {n} IR channel)")
         return {"main": str(vis_path), "ir": ir_out,
                 "replaced_free_end_copy": replaced,
-                "message": f"image {n} whole ({fr.size_mm[0]:.1f} x "
+                "message": f"image {n} {'whole' if fr.whole else 'near-whole'} ({fr.size_mm[0]:.1f} x "
                            f"{fr.size_mm[1]:.1f} mm)"
                            f"{' [replaced the free-end copy]' if replaced else ''}"}
 
@@ -1891,6 +1906,12 @@ def _film110_plan(state: Film110State, prior: list, report: list, missing: list,
         e, w = end_beyond.get(n), known.get(n)
         gaps[n] = (None if e is None or w is None
                    else (e - (w + L) if e >= w + L else w - e))
+        for r in reversed(recs):                      # measured in the pass that saw it
+            m = next((x.get("end_gap_mm") for x in r.get("images") or []
+                      if x.get("number") == n and x.get("end_gap_mm") is not None), None)
+            if m is not None:
+                gaps[n] = float(m)
+                break
     return rep.plan_next_pass(known, needed, ends, end_beyond, now, extra), gaps
 
 
@@ -1951,6 +1972,13 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
     unseen: list = []
     nxt = None
     not_done: list = []
+    # The measured distance from a free strip end to the image beside it (the
+    # newest measurement of each number).
+    end_gaps: dict = {}
+    for r in records:
+        for e in r.get("images") or []:
+            if e.get("number") is not None and e.get("end_gap_mm") is not None:
+                end_gaps[str(e["number"])] = e["end_gap_mm"]
     positions_total: list = list(numbers)
     positions_have: list = [n for n in numbers if n not in missing]
     if state.strips == 1:
@@ -2026,7 +2054,7 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                 g = gaps.get(n)
                 if g is None:
                     why_none.append(("free_end_unmeasured", n, None))
-                elif g < rep.SUGGEST_MARGIN_MM:
+                elif g < rep.FREE_END_EDGE_MIN_MM:
                     why_none.append(("free_end_too_close", n, g))
                 else:
                     why_none.append(("no_placement", n, None))
@@ -2049,13 +2077,12 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
             bits = []
             for code, n, g in why_none:
                 if code == "free_end_too_close":
-                    bits.append(f"image {n} lies only {g:.1f} mm from the strip's end, "
-                                f"closer than the {rep.SUGGEST_MARGIN_MM:g} mm a bar "
-                                f"needs; no placement keeps it whole with the end "
-                                f"resting on plastic")
+                    bits.append(f"image {n} begins {g:.1f} mm from the strip's end: no "
+                                f"placement keeps it whole with the end resting on plastic")
                 elif code == "free_end_unmeasured":
-                    bits.append(f"the strip's end beyond image {n} has not been seen, "
-                                f"so no placement can be judged for it")
+                    bits.append(f"the strip's end beyond image {n} was always under "
+                                f"plastic, so its distance is not known; a pass with "
+                                f"that end visible in an aperture will measure it")
                 else:
                     bits.append(f"no placement within the holder brings image {n} "
                                 f"whole into one aperture")
@@ -2096,6 +2123,7 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                         "next": ({k: v for k, v in nxt.items() if k != "text"}
                                  if nxt else None),
                         "not_done": not_done,
+                        "end_gaps": end_gaps,
                         "frame_positions": {"delivered": len(positions_have),
                                             "of": len(positions_total),
                                             "needed": sorted(set(positions_total) - set(positions_have))},

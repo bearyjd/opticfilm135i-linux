@@ -1041,3 +1041,59 @@ reported as such, not as a problem (before, a hole-found leading split on a
 strip that starts inside aperture 1 was reported as "not at the placement's
 phase"). Holder-end positions are used here only as geometry; the identity
 of a photograph is still decided by content.
+
+### 15.6 Near-whole copies, measured amounts, the gap to the strip's end (Test 106)
+
+**Near-whole.** An image that is not `whole` only because ONE along-transport
+edge lies within `[-EDGE_CUT_MAX_MM (0.5), WHOLE_MARGIN_MM (0.3))` of the
+aperture boundary, with its other edge inside and confirmed by the data, is a
+*near-whole* copy (`FrameFind.cut_mm` = how much is hidden under the plastic,
+`>= 0`; `whole` and `split` keep their meaning). The CLI delivers it (the crop
+is clamped to the aperture, never padded into the plastic). Test 106 pass 1:
+the strip lay against the end wall at aperture 1 and image 1 began at -0.1 mm;
+the owner judges that supported copy better than a whole copy with the strip
+end free. Ranking of copies of one number (`film110_report.copy_rank`; the best
+wins, the others are `kept`): whole & supported > near-whole & supported >
+whole & free end > near-whole & free end > split. A near-whole copy counts as
+delivered for `missing` and `done`; a supported one needs nothing more, so the
+joint suggestion never proposes a pass only to replace it. `pass_report` state
+`near_whole` (with `cut_mm`) sits under its aperture.
+
+**Measured amounts.** Every split or near-whole row carries `hidden_mm` (how
+much lies under the plastic: the predicted edge against the aperture boundary)
+and `under` (`"bar N"` / `"end wall at aperture N"`): "bar 1: image 2 split,
+7.9 mm under bar 1"; "aperture 1: image 1 near-whole, 0.2 mm under the end wall
+at aperture 1 (delivered, strip end supported)".
+
+**The gap to the strip's end.** Whenever a free strip end lies within one film
+pitch of an image, the entry records `end_gap_mm` (end to the image's nearest
+edge; also `advice.end_gaps`, newest measurement per number). A free-end rescue
+is feasible iff the image's edge on the end's side can lie at least
+`FREE_END_EDGE_MIN_MM` (0.6 = WHOLE_MARGIN 0.3 + a placement tolerance 0.3) inside
+the aperture with the end at least 0.1 mm inside the plastic (bar or end wall);
+the planner prefers the end well inside the plastic and the smaller move. Its
+visual target names the plastic and says not to push: "… lies inside aperture 1,
+about 2.3 mm of the dark border beside it towards aperture 1 in view, and the
+strip's end just under the end wall at aperture 1 (do not push the strip against
+it)" (`targets[].end_on`, `border_mm`, `border_side`). When no rescue exists the
+text quotes the gap ("image 1 begins 0.1 mm from the strip's end: no placement
+keeps it whole with the end resting on plastic") or, when the end was always
+under plastic, says that a pass with that end visible in an aperture will
+measure it (`not_done` reasons `free_end_too_close`, `free_end_unmeasured`).
+Test 106 pass 2: film start 13.7 mm, image 1 at 16.99 mm, `end_gap_mm` 3.3.
+
+### 15.7 Gap detection (scratches, dust) and blank classification
+
+The printed-border gap is judged on the profile median-filtered over 0.3 mm (a
+0.05 mm bright line or a few specks no longer break its flatness), flat runs are
+cut at every level step (the camera-gate halo that used to mark steps is
+removed by the filter) and each accepted run is extended outward (at most 2 mm)
+while the filtered level stays within `FRAME_LEVEL_TOL` of the run's level, so
+the gap's ends land on the real step. A candidate window's clear-film test
+leaves out the gap lines within 2.5 mm of its ends (only windows that lie on
+film): a hole- or frame-located window that runs a millimetre or two into the
+gap is judged on the clear part and is a **blank** (`ApertureFind.blanks`, never
+a product), not an image; a blank may reach 1 mm past the aperture's lines.
+Real-data A/B (98 stored apertures, 143 hole frames): identical except two
+apertures whose "image" was an unexposed frame (Nastatestigen roll 1 p1-f1,
+Testigen roll 2 p1-f1), now blank.

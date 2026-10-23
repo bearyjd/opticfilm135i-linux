@@ -6,6 +6,15 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- Test 105/106 (2026-10-23, offline): gap detection robust to scratches and
+  dust (median filter, level-step cuts, extension) and a clear frame is never
+  an image when a prediction runs into the gap (it is a blank). A **near-whole**
+  copy (one edge within 0.5 mm of the boundary, the other confirmed) is
+  delivered and ranked: whole & supported > near-whole & supported > whole &
+  free end > near-whole & free end > split. Report rows carry `hidden_mm` /
+  `under` / `end_gap_mm`; a free-end rescue uses the measured gap and names the
+  plastic the end must just reach under; the impossible case quotes the gap
+  (docs/film-110.md §15.6, §15.7).
 - Test 104 follow-up (2026-10-23, offline): **the pass report speaks the
   holder's language, with ONE next placement, and numbers count frame
   positions from the strip's front end** (docs/film-110.md §15). Records

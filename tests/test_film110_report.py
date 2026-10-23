@@ -79,7 +79,7 @@ def test_pass_report_is_ordered_along_the_holder_and_carries_outcomes():
     assert r[0]["located_by"] == "holes+frame"
     lines = rep.format_pass_report(r)
     assert lines[0].startswith("  aperture 1: image 1 whole (delivered)"), lines
-    assert any(ln.startswith("  bar 1: image 2 is split here") for ln in lines), lines
+    assert any(ln.startswith("  bar 1: image 2 split, ") for ln in lines), lines
     assert any("frame position 3 is blank" in ln for ln in lines), lines
     print("test_pass_report_is_ordered_along_the_holder_and_carries_outcomes OK")
 
@@ -183,7 +183,7 @@ def test_free_end_rescue_names_the_plastic_the_end_rests_on():
     # end wall at aperture 1: image whole at 10 mm, the strip's end 3 mm before it
     nxt = rep.plan_next_pass({1: 10.0}, {1: "free_end"}, [7.0], {1: 7.0}, {})
     assert nxt is not None and nxt["targets"][0]["end_on"] == "end wall at aperture 1", nxt
-    assert nxt["direction"] == "towards aperture 1" and "end against the end wall at aperture 1" in nxt["text"]
+    assert nxt["direction"] == "towards aperture 1" and "just under the end wall at aperture 1" in nxt["text"]
     e = 7.0 + nxt["shift_mm"]
     assert -2.1 <= e <= 0.0, e
     # a bar: image in aperture 3 with the end 3 mm beyond it
@@ -194,8 +194,49 @@ def test_free_end_rescue_names_the_plastic_the_end_rests_on():
         eo = nxt["targets"][0]["end_on"]
         assert eo.startswith("bar ") or eo.startswith("end wall at aperture "), eo
         if eo.startswith("bar "):
-            assert f"the strip's end rests on {eo}" in nxt["text"], nxt["text"]
+            assert f"just under {eo}" in nxt["text"], nxt["text"]
     print("test_free_end_rescue_names_the_plastic_the_end_rests_on OK")
+
+
+def test_copy_ranking_and_report_rows_for_near_whole():
+    whole_sup = {"whole": True, "free_end_near": False}
+    near_sup = {"whole": False, "cut_mm": 0.1, "free_end_near": False}
+    whole_free = {"whole": True, "free_end_near": True}
+    near_free = {"whole": False, "cut_mm": 0.2, "free_end_near": True}
+    split = {"whole": False, "split": "leading", "free_end_near": False}
+    ranks = [rep.copy_rank(x) for x in (whole_sup, near_sup, whole_free, near_free, split)]
+    assert ranks == sorted(ranks, reverse=True) and len(set(ranks)) == 5, ranks
+    images = [
+        {"number": 1, "aperture": 1, "whole": False, "split": "leading", "cut_mm": 0.1,
+         "hidden_mm": 0.1, "under": "end wall at aperture 1", "free_end_near": False,
+         "position_mm": -0.1, "main": "x", "located_by": "holes"},
+        {"number": 2, "aperture": 1, "whole": False, "split": "trailing", "free_end_near": False,
+         "hidden_mm": 7.9, "under": "bar 1", "position_mm": 25.2, "main": None,
+         "located_by": "holes+frame", "end_gap_mm": 3.3},
+    ]
+    r = rep.build_pass_report(images, [])
+    assert r[0]["state"] == "near_whole" and r[0]["where"] == {"kind": "aperture", "index": 1}
+    assert r[0]["cut_mm"] == 0.1 and r[0]["hidden_mm"] == 0.1 and r[0]["under"] == "end wall at aperture 1"
+    assert r[0]["outcome"] == "new"
+    assert r[1]["state"] == "split" and r[1]["hidden_mm"] == 7.9 and r[1]["under"] == "bar 1"
+    assert r[1]["end_gap_mm"] == 3.3 and r[1]["outcome"] == "not_delivered"
+    lines = rep.format_pass_report(r)
+    assert lines[0] == ("  aperture 1: image 1 near-whole, 0.1 mm under the end wall at aperture 1 "
+                        "(delivered, strip end supported)"), lines
+    assert "bar 1: image 2 split, 7.9 mm under bar 1, the strip's end is 3.3 mm from it" in lines[1], lines
+    print("test_copy_ranking_and_report_rows_for_near_whole OK")
+
+
+def test_free_end_rescue_uses_the_measured_gap_and_hides_the_end_just_under_the_plastic():
+    # Test 106 pass 2: film start 13.7 mm, image 1 at 16.99 mm (end gap 3.3 mm).
+    nxt = rep.plan_next_pass({1: 16.99}, {1: "free_end"}, [13.7], {1: 13.7}, {1: "now whole, with the strip end free"})
+    t = nxt["targets"][0]
+    assert nxt["direction"] == "towards aperture 1" and abs(nxt["shift_mm"] + 14.7) <= 1.0, nxt
+    assert t["end_on"] == "end wall at aperture 1" and 1.5 <= t["border_mm"] <= 3.0, t
+    assert "just under the end wall at aperture 1" in nxt["text"] and "do not push" in nxt["text"], nxt["text"]
+    # an end too close to the image (0.3 mm) cannot rest on plastic with the image whole
+    assert rep.plan_next_pass({1: 16.99}, {1: "free_end"}, [16.69], {1: 16.69}, {}) is None
+    print("test_free_end_rescue_uses_the_measured_gap_and_hides_the_end_just_under_the_plastic OK")
 
 
 def main() -> int:
@@ -211,6 +252,8 @@ def main() -> int:
         test_planner_prefers_the_smaller_move_when_margins_are_comfortable,
         test_planner_shift_is_exact_and_the_text_names_the_target,
         test_free_end_rescue_names_the_plastic_the_end_rests_on,
+        test_copy_ranking_and_report_rows_for_near_whole,
+        test_free_end_rescue_uses_the_measured_gap_and_hides_the_end_just_under_the_plastic,
     ]
     for t in tests:
         t()

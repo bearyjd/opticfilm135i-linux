@@ -26,6 +26,8 @@ APERTURE_1_END = "the holder end that enters the scanner first"
 
 N_APERTURES = STRIP.frames
 SUGGEST_MARGIN_MM = 2.0            # a rescued image keeps this far from both aperture edges
+FREE_END_EDGE_MIN_MM = 0.6         # WHOLE_MARGIN_MM (0.3) + a placement tolerance (0.3): the edge of a free-end image on the end's side
+END_REST_MIN_MM = 0.1              # the strip's end must lie at least this far inside the plastic
 SUGGEST_COMFORT_MM = 5.0           # margins above this count as equal when two placements are compared (else a 50 mm move beats a 15 mm one for 1 mm more margin)
 SUGGEST_RANGE_MM = 60.0
 SUGGEST_STEP_MM = 0.5
@@ -90,12 +92,25 @@ def where_text(where: dict) -> str:
     return f"the end wall at aperture {where['index']}"
 
 
+def split_where(entry: dict) -> dict:
+    """The bar or end wall an image that is not whole lies under (the side
+    `split` names), whatever its state."""
+    k = int(entry["aperture"])
+    if entry.get("split") == "leading":
+        return ({"kind": "end_wall", "index": 1} if k == 1
+                else {"kind": "bar", "index": k - 1})
+    return ({"kind": "end_wall", "index": N_APERTURES} if k == N_APERTURES
+            else {"kind": "bar", "index": k})
+
+
 def where_of_entry(entry: dict) -> dict:
     """Holder location of one manifest `images` entry (or a blank): a whole
-    image (and a blank) is in its aperture; a split one is at the bar or end
-    wall that splits it."""
+    or near-whole image (and a blank) is in its aperture; a split one is at
+    the bar or end wall that splits it."""
     k = int(entry["aperture"])
     split = entry.get("split")
+    if entry.get("cut_mm") is not None:
+        return {"kind": "aperture", "index": k}
     if entry.get("whole") is False or split:
         if split == "leading":
             return ({"kind": "end_wall", "index": 1} if k == 1
@@ -135,8 +150,26 @@ def quarter_images(shift_mm: float) -> float:
 # ---------------------------------------------------------------- pass report
 
 
+def copy_rank(e: dict) -> int:
+    """How good a delivered copy is (the best wins, the others are `kept`):
+    whole & supported 4 > near-whole & supported 3 > whole & free end 2 >
+    near-whole & free end 1 > split 0. "Supported" = not `free_end_near`."""
+    free = bool(e.get("free_end_near"))
+    if e.get("whole") is True:
+        return 2 if free else 4
+    if e.get("cut_mm") is not None:
+        return 1 if free else 3
+    return 0
+
+
+def under_text(where: dict) -> str:
+    """The plastic an image lies under: "bar 2" / "end wall at aperture 1"."""
+    return (f"bar {where['index']}" if where["kind"] == "bar"
+            else f"end wall at aperture {where['index']}")
+
+
 def _outcome(e: dict) -> str:
-    if e.get("whole") is not True or e.get("refused"):
+    if (e.get("whole") is not True and e.get("cut_mm") is None) or e.get("refused"):
         return "not_delivered"
     if e.get("kept"):
         return "kept"
@@ -149,7 +182,7 @@ def _outcome(e: dict) -> str:
 
 def _state(e: dict) -> str:
     if e.get("whole") is not True:
-        return "split"
+        return "near_whole" if e.get("cut_mm") is not None else "split"
     return "whole_free_end" if e.get("free_end_near") else "whole_supported"
 
 
@@ -168,6 +201,15 @@ def build_pass_report(images: list, blanks: list) -> list:
                "position_mm": e.get("position_mm")}
         if e.get("uncertain"):
             row["uncertain"] = True
+        if e.get("free_end_near"):
+            row["free_end"] = True
+        if row["state"] in ("split", "near_whole"):
+            row["hidden_mm"] = e.get("hidden_mm", 0.0)
+            row["under"] = e.get("under") or under_text(row["where"])
+        if row["state"] == "near_whole":
+            row["cut_mm"] = e["cut_mm"]
+        if e.get("end_gap_mm") is not None:
+            row["end_gap_mm"] = e["end_gap_mm"]
         rows.append(row)
     for b in blanks:
         rows.append({"number": b["number"],
@@ -205,13 +247,25 @@ def format_pass_report(report: list) -> list:
         parts = []
         for r in groups[key]:
             unc = " (number uncertain)" if r.get("uncertain") else ""
+            gap = (f", the strip's end is {r['end_gap_mm']:g} mm from it"
+                   if r.get("end_gap_mm") is not None else "")
+            under = ""
+            if r["state"] in ("split", "near_whole"):
+                u = r.get("under") or ""
+                under = (f"{r.get('hidden_mm', 0):g} mm under "
+                         + (f"the {u}" if u.startswith("end wall") else u))
             if r["state"] == "blank":
                 parts.append(f"frame position {r['number']} is blank (no picture, no file)")
             elif r["state"] == "split":
-                parts.append(f"image {r['number']} is split here{unc} ({_OUTCOME_WORDS[r['outcome']]})")
+                parts.append(f"image {r['number']} split, {under}{gap}{unc} "
+                             f"({_OUTCOME_WORDS[r['outcome']]})")
+            elif r["state"] == "near_whole":
+                sup = "strip end free" if r.get("free_end") else "strip end supported"
+                word = _OUTCOME_WORDS[r["outcome"]]
+                parts.append(f"image {r['number']} near-whole, {under}{gap}{unc} ({word}, {sup})")
             else:
                 free = ", strip end free" if r["state"] == "whole_free_end" else ""
-                parts.append(f"image {r['number']} whole{free}{unc} ({_OUTCOME_WORDS[r['outcome']]})")
+                parts.append(f"image {r['number']} whole{free}{gap}{unc} ({_OUTCOME_WORDS[r['outcome']]})")
         lines.append(f"  {where_text({'kind': key[0], 'index': key[1]})}: " + "; ".join(parts))
     return lines
 
@@ -324,26 +378,41 @@ def plan_next_pass(known: dict, needed: dict, ends: list,
             if p is None:
                 continue
             x0, x1 = p + s, p + s + L
+            e = end_beyond.get(n) if kind == "free_end" else None
+            if kind == "free_end" and e is None:
+                continue
+            # A free-end image keeps only FREE_END_EDGE_MIN_MM of margin on the
+            # side the strip's end lies (the dark border before the picture
+            # may be thin: the end must still be under plastic); every other
+            # margin is the usual one.
+            end_low = e is not None and e < p + L / 2
+            need_lo = FREE_END_EDGE_MIN_MM if (kind == "free_end" and end_low) else SUGGEST_MARGIN_MM
+            need_hi = FREE_END_EDGE_MIN_MM if (kind == "free_end" and not end_low) else SUGGEST_MARGIN_MM
             hit = None
             for k in range(1, N_APERTURES + 1):
                 a0, a1 = aperture_span(k)
-                m = min(x0 - a0, a1 - x1)
-                if m >= SUGGEST_MARGIN_MM:
-                    hit = (k, m)
+                if x0 - a0 >= need_lo and a1 - x1 >= need_hi:
+                    hit = (k, min(x0 - a0, a1 - x1), (x0 - a0) if end_low else (a1 - x1))
                     break
             if hit is None:
                 continue
             if kind == "free_end":
-                e = end_beyond.get(n)
-                span = None if e is None else next(
-                    ((kd, ix) for kd, ix, a, b in plastic_spans() if a <= e + s <= b), None)
-                if span is None:
+                found = next(((kd, ix, min(e + s - a, b - (e + s)))
+                              for kd, ix, a, b in plastic_spans()
+                              if a <= e + s <= b and min(e + s - a, b - (e + s)) >= END_REST_MIN_MM), None)
+                if found is None:
                     continue
                 rescued.append(n)
-                margins.append(hit[1])
+                # robustness: the picture's margin and how deep the end is hidden
+                # (a margin of 2 mm and an end 0.5 mm inside the plastic are
+                # enough: beyond that the smaller move wins)
+                margins.append(min(hit[1], 2.0, 4.0 * found[2]))
                 targets.append({"number": n, "aperture": hit[0],
-                                "end_on": (f"bar {span[1]}" if span[0] == "bar"
-                                           else f"end wall at aperture {span[1]}")})
+                                "end_on": (f"bar {found[1]}" if found[0] == "bar"
+                                           else f"end wall at aperture {found[1]}"),
+                                "border_mm": round(float(hit[2]), 1),
+                                "border_side": ("towards aperture 1" if end_low
+                                                else "towards aperture 6")})
                 continue
             rescued.append(n)
             margins.append(hit[1])
@@ -366,9 +435,11 @@ def plan_next_pass(known: dict, needed: dict, ends: list,
         bit = (f"image {n} ({now.get(n, 'not yet delivered')}) lies "
                f"{'in the middle of' if centred else 'inside'} aperture {t['aperture']}")
         if t.get("end_on"):
-            bit += (f" with the strip's end against the {t['end_on']}"
-                    if t["end_on"].startswith("end wall")
-                    else f" and the strip's end rests on {t['end_on']}")
+            plastic_name = ("the " + t["end_on"]) if t["end_on"].startswith("end wall") else t["end_on"]
+            bit += (f", about {t['border_mm']:g} mm of the dark border beside it "
+                    f"{t['border_side']} in view, "
+                    f"and the strip's end just under {plastic_name} "
+                    f"(do not push the strip against it)")
         bits.append(bit)
     if s == 0:
         text = ("Next pass: keep the strip where it is; " + " and ".join(bits) + ".")

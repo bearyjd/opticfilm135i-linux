@@ -618,7 +618,7 @@ def test_three_passes_have_their_own_prefixes_and_old_advice_keys():
                 # the old keys stay for one release; the holder-language ones are new
                 assert set(adv) == {"missing", "free_end", "suggest", "done",
                                     "images", "other_placement", "unseen", "next",
-                                    "not_done", "frame_positions"}, adv
+                                    "not_done", "frame_positions", "end_gaps"}, adv
                 assert adv["done"] is (not adv["missing"] and not adv["free_end"])
                 assert adv["images"] == sorted(set(adv["missing"]) | set(adv["free_end"]))
             assert rec3["advice"]["missing"] == [] and rec3["advice"]["free_end"] == []
@@ -1089,9 +1089,14 @@ def test_image_seated_on_the_aperture_edge_is_a_leading_split_of_its_own():
         assert r1["placement"] == "A" and r1["problems"] == [], r1
         assert _shape(r1) == {1: "L", 2: "T", 3: "W", 4: "L"}, _shape(r1)
         assert _images(r1)[1]["aperture"] == 1 and _images(r1)[4]["aperture"] == 3
+        # Near-whole (owner's decision, Test 106): an image within the cut
+        # tolerance of the boundary with its other edge confirmed IS delivered.
+        im = _images(r1)
+        assert im[1]["cut_mm"] is not None and abs(im[1]["cut_mm"] - 0.1) <= 0.1, im[1]
+        assert im[1]["main"] and im[4]["main"] and im[1]["whole"] is False, (im[1], im[4])
+        assert im[2]["main"] is None and "cut_mm" not in im[2]
         adv = r1["advice"]
-        assert (adv["missing"], adv["free_end"], adv["images"], adv["other_placement"]) \
-            == ([1, 2, 4], [], [1, 2, 4], "B"), adv
+        assert adv["missing"] == [2], adv
         assert "split image 2 (already counted)" in out, out
         # (The leader ghost needs the first hole inside the aperture: in A
         # it lies before aperture 1; placement B exercises it in
@@ -1607,12 +1612,12 @@ def test_report_fields_text_and_the_joint_suggestion():
         assert rep[0]["where"] == {"kind": "aperture", "index": 1}
         assert rep[1]["where"] == {"kind": "bar", "index": 1} and rep[1]["outcome"] == "not_delivered"
         # The text is derived from the fields.
-        assert "bar 1: image 2 is split here" in out, out
+        assert "bar 1: image 2 split, " in out and " mm under bar 1" in out, out
         assert "Delivered after this pass: 3 of 4 frame positions; still needed: image 2." in out, out
         nxt = rec["advice"]["next"]
         assert nxt["direction"] in ("towards aperture 6", "towards aperture 1")
         assert nxt["rescues"] and 2 in nxt["rescues"]
-        assert all(set(t) in ({"number", "aperture"}, {"number", "aperture", "end_on"}) for t in nxt["targets"])
+        assert all(set(t) in ({"number", "aperture"}, {"number", "aperture", "end_on", "border_mm", "border_side"}) for t in nxt["targets"])
         assert rec["advice"]["suggest"].startswith("Next pass: slide the strip ")
         assert "(about " in rec["advice"]["suggest"] and "mm)" in rec["advice"]["suggest"]
         assert rec["advice"]["not_done"], rec["advice"]
@@ -1709,16 +1714,54 @@ def test_impossible_free_end_rescue_says_why_in_geometry():
         state.images = [{"number": 4, "aperture": 3, "whole": True, "split": None,
                          "free_end_near": True, "position_mm": pos, "main": "x",
                          "kept": False, "located_by": "holes", "uncertain": False}]
-        state.film_end_mm = pos + ILEN + 1.0
+        state.film_end_mm = pos + ILEN + 0.3
         rec = {"roll": 1, "prefix": ""}
         cli._film110_fill_record(rec, state, Path(d), [])
         adv = rec["advice"]
         assert adv["next"] is None and adv["free_end"] == [4], adv
         reasons = {r["reason"]: r["numbers"] for r in adv["not_done"]}
         assert reasons.get("free_end_too_close") == [4], adv["not_done"]
-        assert "lies only 1.0 mm from the strip's end" in adv["suggest"], adv["suggest"]
+        assert "begins 0.3 mm from the strip's end: no placement keeps it whole with the end resting on plastic" in adv["suggest"], adv["suggest"]
         assert "without losing" not in adv["suggest"]
     print("test_impossible_free_end_rescue_says_why_in_geometry OK")
+
+
+def test_near_whole_copy_is_delivered_and_a_deeper_cut_is_split():
+    """Owner's decision (Test 106): an image within EDGE_CUT_MAX_MM of the
+    boundary with its other edge confirmed is delivered (near-whole,
+    cut_mm); at -1.5 mm it is split and not delivered, with hidden_mm and
+    the plastic it lies under reported."""
+    with _content():
+        for start, near in ((-0.1, True), (-1.5, False)):
+            with tempfile.TemporaryDirectory() as d:
+                spec = _strip_spec([start, start + FPITCH, start + 2 * FPITCH, start + 3 * FPITCH],
+                                   "lo", tail=8.0)
+                rc, rec, scans, out, err = _run(d, _holder_apertures(spec, None), placement="A")
+                assert rc == 0, (rc, err[-300:])
+                e = {x["number"]: x for x in rec["images"]}[1]
+                assert e["whole"] is False and e["split"] == "leading", e
+                if near:
+                    assert e.get("cut_mm") is not None and e["cut_mm"] <= 0.5 and e["main"], e
+                    assert "image1.tiff" in _names(d)
+                    row = [r for r in rec["pass_report"] if r["number"] == 1][0]
+                    assert row["state"] == "near_whole" and row["cut_mm"] == e["cut_mm"]
+                    assert 1 not in rec["advice"]["missing"] and "near-whole" in out, out
+                else:
+                    assert "cut_mm" not in e and e["main"] is None, e
+                    assert abs(e["hidden_mm"] - 1.5) <= 0.3 and e["under"] == "end wall at aperture 1", e
+                    assert "image1.tiff" not in _names(d) and 1 in rec["advice"]["missing"]
+    print("test_near_whole_copy_is_delivered_and_a_deeper_cut_is_split OK")
+
+
+def test_free_end_images_record_the_measured_gap_to_the_strip_end():
+    with tempfile.TemporaryDirectory() as d:
+        rc, rec, *_ = _run_a(d)
+        im = {x["number"]: x for x in rec["images"]}
+        assert im[4]["free_end_near"] and im[4]["end_gap_mm"] is not None and 0 <= im[4]["end_gap_mm"] < 8, im[4]
+        assert rec["advice"]["end_gaps"].get("4") == im[4]["end_gap_mm"], rec["advice"]["end_gaps"]
+        row = [r for r in rec["pass_report"] if r["number"] == 4][0]
+        assert row["end_gap_mm"] == im[4]["end_gap_mm"]
+    print("test_free_end_images_record_the_measured_gap_to_the_strip_end OK")
 
 
 def main() -> int:
@@ -1766,6 +1809,8 @@ def main() -> int:
         test_blank_frame_position_consumes_a_number_and_makes_no_file,
         test_front_end_first_seen_in_a_later_pass_renumbers_the_roll,
         test_impossible_free_end_rescue_says_why_in_geometry,
+        test_near_whole_copy_is_delivered_and_a_deeper_cut_is_split,
+        test_free_end_images_record_the_measured_gap_to_the_strip_end,
     ]
     for t in tests:
         t()

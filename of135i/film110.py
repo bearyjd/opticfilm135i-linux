@@ -85,6 +85,7 @@ LEVEL_NEAR_MM = 0.3             # the inside/outside levels that decide an edge'
 LEVEL_FAR_MM = 1.0              # ... are medians over this band either side of the predicted edge
 LEVEL_MIN_CONTRAST = 0.08       # below this relative level difference nothing is refined (real 110 edges: > 0.6)
 WHOLE_MARGIN_MM = 0.3
+EDGE_CUT_MAX_MM = 0.5            # a near-whole copy hides at most this much under the plastic
 LEADING_CONTINUATION_MM = 1.0
 LEADING_CONTINUATION_FRAC = 0.8
 CLEAR_BASE_PERCENTILE = 99.0
@@ -138,6 +139,15 @@ class FrameFind:
     orientation: str
     col_clamp: "tuple | None" = None   # (lo, hi): the film band minus RAIL_EDGE_INSET_MM; `crop` never pads past it
     located_by: str = "holes"          # "holes" | "frame" (printed border only) | "holes+frame"
+    # Near-whole: not `whole` only because ONE along-transport edge lies within
+    # [-EDGE_CUT_MAX_MM, WHOLE_MARGIN_MM) of the aperture boundary (the other
+    # confirmed): `cut_mm` is how much of the image is hidden under the plastic
+    # (boundary minus predicted edge, >= 0). None = not near-whole. The CLI
+    # delivers such a copy (docs/film-110.md section 15.6).
+    cut_mm: "float | None" = None
+    # Distance (mm) from a free strip end seen in this aperture to this image's
+    # nearest edge, when the end lies within a film pitch of the image.
+    end_gap_mm: "float | None" = None
 
 
 @dataclass
@@ -933,13 +943,27 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
         else:
             split = None
 
+        # Near-whole: one edge within the cut tolerance of the boundary, the
+        # other inside and confirmed by the data.
+        cut_mm = None
+        cut_px = EDGE_CUT_MAX_MM * px_per_mm
+        if (not whole and split == "leading" and r_line0 >= -cut_px
+                and r_line1 <= n_lines - whole_margin_px and ok_l1):
+            cut_mm = max(0.0, -r_line0) / px_per_mm
+        elif (not whole and split == "trailing" and r_line1 <= n_lines + cut_px
+                and r_line0 >= whole_margin_px and ok_l0):
+            cut_mm = max(0.0, r_line1 - n_lines) / px_per_mm
+
         free_end_near = False
-        for fend in (film_line_start, film_line_end):
+        end_gap_mm = None
+        for fend, is_start in ((film_line_start, True), (film_line_end, False)):
             if fend is None:
                 continue
             if abs(r_line0 - fend) <= pitch_px or abs(r_line1 - fend) <= pitch_px:
                 free_end_near = True
-                break
+                gap = ((r_line0 - fend) if is_start else (fend - r_line1)) / px_per_mm
+                if gap >= -EDGE_CUT_MAX_MM and (end_gap_mm is None or gap < end_gap_mm):
+                    end_gap_mm = max(0.0, gap)
 
         size_mm = ((r_line1 - r_line0) / px_per_mm, (r_col1 - r_col0) / px_per_mm)
         return FrameFind(
@@ -953,6 +977,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
             size_mm=size_mm,
             orientation=orientation,
             col_clamp=col_clamp,
+            cut_mm=cut_mm, end_gap_mm=end_gap_mm,
         ), score
 
     # d. Perforations: resolve the perforated edge and its hole runs. The
