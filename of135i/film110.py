@@ -1415,7 +1415,11 @@ THUMB_INSET = 0.12              # fraction of each side cut off before binning: 
                                 # are the same on every image and would make any
                                 # two images correlate; only the picture decides
 ORIENT_MIN_CORR = 0.5           # the winning hypothesis' mean correlation at least ...
-ORIENT_MARGIN = 0.15            # ... and this far above the other one
+ORIENT_MARGIN = 0.15            # ... and this far above the other one, OR
+ORIENT_EVIDENCE_MARGIN = 1.0    # ... its evidence (the sum over DISTINCT new sightings of each one's
+                                # best correlation in the cluster) this far above the runner-up's: a strip
+                                # of near-duplicate shots (Test 106: 0.96 against 0.84) is decided by how
+                                # many different pictures agree, not by one pair
 END_AGREE_MM = 3.0              # a slide must agree with a free film end seen in both runs
 RANGE_SLACK_MM = 3.0            # a hypothesis may put a recorded image this far outside the
                                 # slot's range (edge refinement and the wall's exact place:
@@ -1556,16 +1560,16 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
     "key": mm, "corr": r, "other": r, "pairs": n} or None when no two
     sightings overlap or the pictures do not decide it. Pure."""
     slide, turned = [], []
-    for item in new:
+    for ni, item in enumerate(new):
         p = item[0]
         for oitem in old:
             r = oitem[1]
             c = pair_correlation(item, oitem, "same", film)
             if c is not None:
-                slide.append((p - r, c))
+                slide.append((p - r, c, ni))
             c = pair_correlation(item, oitem, "turned", film)
             if c is not None:
-                turned.append((p + r, c))
+                turned.append((p + r, c, ni))
     if not slide and not turned:
         return None
     length = film.image_mm[0]
@@ -1586,9 +1590,9 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
     tol = SHIFT_AGREE_MM / 2
     clusters = []
     for kind, pairs in (("same", slide), ("turned", turned)):
-        for key0, _c in pairs:
-            members = [(k, c) for k, c in pairs if abs(k - key0) <= tol]
-            keys = sorted(k for k, _c in members)
+        for key0, _c, _i in pairs:
+            members = [(k, c, i) for k, c, i in pairs if abs(k - key0) <= tol]
+            keys = sorted(k for k, _c, _i in members)
             key = keys[len(keys) // 2]
             if not possible(kind, key):
                 continue
@@ -1596,20 +1600,29 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
             # a few millimetres of flat overlap correlates with nothing,
             # and must not drag down the cluster its geometry puts it in
             # (Test 104, load 2: 0.84 and -0.19 in the true cluster).
-            best = max(c for _k, c in members)
-            good = sum(1 for _k, c in members if c >= ORIENT_MIN_CORR)
-            clusters.append(((good, best), kind, key, best, len(members)))
+            best = max(c for _k, c, _i in members)
+            good = sum(1 for _k, c, _i in members if c >= ORIENT_MIN_CORR)
+            # Evidence: each DISTINCT new sighting counts once, by its best
+            # correlation in the cluster; a member that correlates with
+            # nothing adds nothing (never subtracts).
+            per_new: dict = {}
+            for _k, c, i in members:
+                per_new[i] = max(per_new.get(i, 0.0), c)
+            evidence = sum(max(0.0, v) for v in per_new.values())
+            clusters.append(((evidence, good, best), kind, key, best, len(members), evidence))
     if not clusters:
         return None
     clusters.sort(key=lambda x: x[0], reverse=True)
-    _score, kind, key, best, n = clusters[0]
-    others = [c[3] for c in clusters[1:]
-              if c[1] != kind or abs(c[2] - key) > tol]
-    other = max(others) if others else -1.0
-    if best < ORIENT_MIN_CORR or best - other < ORIENT_MARGIN:
+    _score, kind, key, best, n, evidence = clusters[0]
+    rivals = [c for c in clusters[1:] if c[1] != kind or abs(c[2] - key) > tol]
+    other = max((c[3] for c in rivals), default=-1.0)
+    runner_up = max((c[5] for c in rivals), default=0.0)
+    if best < ORIENT_MIN_CORR:
+        return None
+    if best - other < ORIENT_MARGIN and evidence - runner_up < ORIENT_EVIDENCE_MARGIN:
         return None
     return {"orientation": kind, "key": key, "corr": best, "other": other,
-            "pairs": n}
+            "pairs": n, "evidence": evidence, "runner_up_evidence": runner_up}
 
 
 def slot_position_range(slot: int = 1, strips: int = 1, film: Film = FILM_110,

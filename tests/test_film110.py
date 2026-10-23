@@ -1213,6 +1213,49 @@ def test_blank_frame_is_not_an_image_when_a_prediction_runs_into_the_gap():
         print(f"test_blank_frame_is_not_an_image_when_a_prediction_runs_into_the_gap OK ({dpi} dpi)")
 
 
+
+def test_orientation_is_decided_by_evidence_over_near_duplicate_shots():
+    """Test 106 pass 3: the true slide (22.4 mm) has four distinct new
+    sightings agreeing (0.91-0.96); a competing slide (-3.0 mm, one pitch
+    off) has 0.84, 0.71, 0.10 because the strip holds near-duplicate shots.
+    Best pair 0.96 - 0.84 = 0.12 < ORIENT_MARGIN, yet the evidence (3.75
+    against 1.65) decides. One new sighting alone does not."""
+    old_p = [0.0, 25.5, 51.0, 76.5]
+    new_p = [r + 22.4 for r in old_p]
+    true = {(0, 0): 0.91, (1, 1): 0.93, (2, 2): 0.95, (3, 3): 0.96}
+    other = {(0, 1): 0.84, (1, 2): 0.71, (2, 3): 0.10}
+    table = {**true, **other}
+
+    def stub(item, oitem, kind, film=FILM_110):
+        if kind != "same":
+            return None
+        return table.get((item[3], oitem[4]))
+
+    saved = film110.pair_correlation
+    film110.pair_correlation = stub
+    try:
+        new = [(p, 0.0, 17.2, i) for i, p in enumerate(new_p)]
+        old = [(j + 1, r, 0.0, 17.2, j) for j, r in enumerate(old_p)]
+        dec = film110.decide_orientation(new, old)
+        assert dec is not None and dec["orientation"] == "same", dec
+        assert abs(dec["key"] - 22.4) <= 1.0, dec
+        assert dec["evidence"] - dec["runner_up_evidence"] >= film110.ORIENT_EVIDENCE_MARGIN, dec
+        assert dec["corr"] - dec["other"] < film110.ORIENT_MARGIN, dec     # the old rule would refuse
+        # a member that correlates with nothing adds nothing and vetoes nothing
+        table[(2, 2)] = -0.19
+        dec = film110.decide_orientation(new, old)
+        assert dec is not None and abs(dec["key"] - 22.4) <= 1.0, dec
+        table[(2, 2)] = 0.95
+        # ONE new sighting: 0.96 against 0.84 is still not enough
+        table.clear()
+        table.update({(0, 0): 0.96, (0, 1): 0.84})
+        dec = film110.decide_orientation(new[:1], old)
+        assert dec is None, dec
+    finally:
+        film110.pair_correlation = saved
+    print("test_orientation_is_decided_by_evidence_over_near_duplicate_shots OK")
+
+
 def main() -> int:
     tests = [
         test_whole_and_trailing_split,
@@ -1251,6 +1294,7 @@ def main() -> int:
         test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none,
         test_gap_survives_a_thin_scratch_and_dust,
         test_blank_frame_is_not_an_image_when_a_prediction_runs_into_the_gap,
+        test_orientation_is_decided_by_evidence_over_near_duplicate_shots,
     ]
     passed = 0
     for t in tests:
