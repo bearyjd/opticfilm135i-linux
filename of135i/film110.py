@@ -611,6 +611,7 @@ FRAME_FLAT_MAX_STD = 0.003         # (tuned) rolling std / air; real gaps ~0.000
 FRAME_FLAT_DEV = 0.0015            # a gap is flat when 95 % of a 0.5 mm window lies this close (x air) to its median (real gaps 0.0003, picture grain 0.003)
 FRAME_OUTLIER = 0.01               # a line this far (x air) from the 0.3 mm median is a scratch or speck, not texture
 FRAME_BORDER_MAX_FRAC = 0.16       # a gap reads below this x air
+FRAME_BORDER_BASE_FRAC = 0.5       # a gap reads below this fraction of the aperture's clear film base
 FRAME_BORDER_MIN_FRAC = 0.04       # (tuned) a full gap below this x air (dense leader 0.03) never sets the border level
 FRAME_GAP_MIN_MM = 6.5
 FRAME_GAP_MAX_MM = 9.5
@@ -628,7 +629,7 @@ BLANK_EDGE_TOL_MM = 1.0            # a blank window may reach this far past the 
 
 
 def _frame_gaps(rel: np.ndarray, film_present: np.ndarray, px_per_mm: float,
-                image_len_mm: float, n_lines: int) -> list:
+                image_len_mm: float, n_lines: int, base_rel: "float | None" = None) -> list:
     """The printed-border gaps along transport. `rel` is the band-interior
     profile divided by air. Returns [(start, end, touches_start,
     touches_end)] in line units (end exclusive); a gap that touches the
@@ -656,6 +657,11 @@ def _frame_gaps(rel: np.ndarray, film_present: np.ndarray, px_per_mm: float,
     all_present = (cp[starts + w] - cp[starts]) == w
     flat_win = (all_present & (dev < FRAME_FLAT_DEV)
                 & (med < FRAME_BORDER_MAX_FRAC))
+    if base_rel:
+        # the printed border is dark against the film's clear base (real
+        # strips 0.1-0.15, fixtures 0.42); a flat stretch at more than half
+        # the base is a picture's smooth region, not a border
+        flat_win &= med < FRAME_BORDER_BASE_FRAC * base_rel
     # a line is flat when any flat window covers it
     diff = np.zeros(n_lines + 1, dtype=np.int64)
     for s in np.flatnonzero(flat_win):
@@ -833,7 +839,8 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
     # clear frame it is, and is never taken for a picture because of the dark
     # gap lines in it.
     gaps = (_frame_gaps(interior_profile / air, film_present, px_per_mm,
-                        film.image_mm[0], n_lines) if FRAME_LOCATOR_ENABLED else [])
+                        film.image_mm[0], n_lines, clear_base / air)
+            if FRAME_LOCATOR_ENABLED else [])
     gap_mask = np.zeros(n_lines, dtype=bool)
     for (g0, g1, _t0, _t1) in gaps:
         gap_mask[max(0, int(np.floor(g0))):min(n_lines, int(np.ceil(g1)))] = True
