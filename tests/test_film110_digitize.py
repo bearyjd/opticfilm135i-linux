@@ -118,7 +118,7 @@ def _run(d, strip, *, roll=1, force=False, placement=None, frames="1-4",
 
     args = argparse.Namespace(
         out=d, prefix="", roll=roll, force=force, assume_loaded=True,
-        dpi=DPI, positive=False, rotate=0, ir=True, no_clean=True,
+        dpi=DPI, positive=False, rotate=flags.pop("rotate", 0), ir=True, no_clean=True,
         no_diag=False, park="verbatim", warmup_budget=None, frames=frames,
         film="110", placement=placement, **flags)
     orig = cli._run_writing_session
@@ -1312,6 +1312,199 @@ def test_strips_one_is_unchanged():
     print("test_strips_one_is_unchanged OK")
 
 
+# --------------------------------------------------- --from-frames (rebuild)
+
+
+def _rebuild(d, roll=1, extra=(), *, expect_scanner=False):
+    """`digitize --film 110 --roll N --from-frames` through the real parser.
+    A Scanner / the writing session / the load flow raise if anything
+    reaches for them (I-B2). Returns (rc, stdout, stderr)."""
+    from of135i import loadflow
+
+    def boom(*a, **k):
+        raise AssertionError("the rebuild must never open a scanner")
+
+    args = cli.build_parser().parse_args(
+        ["digitize", "-o", d, "--film", "110", "--roll", str(roll),
+         "--from-frames", *extra])
+    saved = (cli.Scanner, cli._run_writing_session, loadflow.run)
+    cli.Scanner, cli._run_writing_session, loadflow.run = boom, boom, boom
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli._cmd_digitize(args)
+    finally:
+        cli.Scanner, cli._run_writing_session, loadflow.run = saved
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _products(d, roll=1):
+    import tifffile
+    rd = digitize.roll_dir(d, "", roll)
+    return {p.name: tifffile.imread(str(p)) for p in sorted(rd.iterdir())
+            if cli._FILM110_PRODUCT_RE.match(p.name)}
+
+
+def _tree(d):
+    return {str(p.relative_to(d)): p.read_bytes() for p in sorted(Path(d).rglob("*"))
+            if p.is_file()}
+
+
+def _entries(rec):
+    return {e["number"]: (e["whole"], e["split"], bool(e["main"]), e["kept"])
+            for e in rec["images"]}
+
+
+def _three_pass_roll(d, **flags):
+    """Pass 1; pass 2 turned about its centre; pass 3 turned and slid."""
+    s1 = _strip_spec(_starts(3.5, 3), "lo")
+    recs = []
+    for spec in (s1, _turn(s1, 75.0), _turn(s1, 87.0)):
+        rc, rec, scans, out, err = _run(d, _holder_apertures(spec, None), **flags)
+        assert rc == 0, (rc, err[-300:])
+        recs.append(rec)
+    return recs
+
+
+def test_rebuild_reproduces_a_three_pass_roll_offline():
+    """I-B1 (numbers, whole/split, orientation, pixel-identical products),
+    I-B2 (no scanner), I-B3 (old products moved byte-identical, nothing
+    deleted) and the manifest contract (forced epoch, next pass K+1)."""
+    import tifffile
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            live = _three_pass_roll(d)
+            before = _products(d)
+            rd = digitize.roll_dir(d, "", 1)
+            old_bytes = {n: (rd / n).read_bytes() for n in before}
+            rc, out, err = _rebuild(d)
+            assert rc == 0, (rc, err[-400:], out[-400:])
+            assert "rebuild pass 1:" in out and "rebuild pass 3:" in out, out
+            recs = [r for r in digitize.roll_records_current(d, 1)]
+            assert len(recs) == 3 and recs[0].get("forced") is True, recs
+            assert all(r["source"] == "frames" for r in recs)
+            assert [r["from_pass"] for r in recs] == [1, 2, 3]
+            assert [r["pass"] for r in recs] == [1, 2, 3]
+            assert all(r.get("rebuilt_utc") for r in recs)
+            for lv, rb in zip(live, recs):
+                assert _entries(lv).keys() == _entries(rb).keys(), (_entries(lv), _entries(rb))
+                for n in _entries(lv):
+                    assert _entries(lv)[n][:2] == _entries(rb)[n][:2], (n, _entries(lv), _entries(rb))
+                assert lv["orientation"] == rb["orientation"], (lv["orientation"], rb["orientation"])
+                assert lv["numbering"] == rb["numbering"]
+                assert lv["advice"]["missing"] == rb["advice"]["missing"]
+            after = _products(d)
+            assert sorted(after) == sorted(before), (sorted(after), sorted(before))
+            for n in before:
+                assert np.array_equal(before[n], after[n]), n
+            # I-B3: every old product sits byte-identical in superseded-*/.
+            sup = sorted(p for p in rd.iterdir() if p.name.startswith("superseded-"))
+            assert len(sup) == 1, sup
+            for n, data in old_bytes.items():
+                assert (sup[0] / n).read_bytes() == data, n
+            # The next live pass is K+1 and cannot collide with p1..p3.
+            assert digitize.film110_next_pass(d, "", 1) == 4
+            assert digitize.roll_is_done(d, 1) == live[-1]["advice"]["done"]
+    print("test_rebuild_reproduces_a_three_pass_roll_offline OK")
+
+
+def test_rebuild_after_rotate_90_gives_identical_products():
+    """I-B4."""
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            _three_pass_roll(d, rotate=90)
+            before = _products(d)
+            rc, out, err = _rebuild(d)
+            assert rc == 0, (rc, err[-400:])
+            after = _products(d)
+            assert sorted(after) == sorted(before)
+            for n in before:
+                assert np.array_equal(before[n], after[n]), n
+            assert all(r["rotate"] == 90 for r in digitize.roll_records_current(d, 1))
+    print("test_rebuild_after_rotate_90_gives_identical_products OK")
+
+
+def test_rebuild_refusals_touch_nothing():
+    """I-B5."""
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            rc, *_ = _run(d, _holder_apertures(_strip_spec(_starts(3.5, 3), "lo"), None))
+            assert rc == 0
+            snap = _tree(d)
+
+            def refused(extra, roll=1, needle=""):
+                rc, out, err = _rebuild(d, roll, extra)
+                assert rc == 2 and needle in err, (rc, err)
+                assert _tree(d) == snap, "a refused rebuild touched files"
+
+            refused(["--strips", "2"], needle="--strips 2")
+            refused([], roll=7, needle="no 110 records")
+            # not --film 110
+            args = cli.build_parser().parse_args(
+                ["digitize", "-o", d, "--roll", "1", "--from-frames"])
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                assert cli._cmd_digitize(args) == 2
+            assert "--film 110" in err.getvalue() and _tree(d) == snap
+            # records that disagree on dpi
+            m = Path(d) / "manifest.jsonl"
+            first = json.loads(m.read_text().splitlines()[0])
+            first2 = dict(first, dpi=1200, **{"pass": 2})
+            with open(m, "a") as f:
+                f.write(json.dumps(first2) + "\n")
+            snap2 = _tree(d)
+            rc, out, err = _rebuild(d)
+            assert rc == 2 and "disagree on dpi" in err, (rc, err)
+            assert _tree(d) == snap2
+    # no stored frame files
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            assert _run(d, _holder_apertures(_strip_spec(_starts(3.5, 3), "lo"), None))[0] == 0
+            for p in digitize.roll_dir(d, "", 1).glob("p1-f*"):
+                p.unlink()
+            snap = _tree(d)
+            rc, out, err = _rebuild(d)
+            assert rc == 2 and "no stored frame files" in err, (rc, err)
+            assert _tree(d) == snap
+    print("test_rebuild_refusals_touch_nothing OK")
+
+
+def test_rebuild_stops_at_a_pass_it_cannot_recognise():
+    """I-B6: pass 2 shows other pictures -> exit 5, pass 1's products stay,
+    the stopped pass writes no photograph and its record claims no image."""
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            rc, rec1, *_ = _run(d, _holder_apertures(_starts_for(3.5), None))
+            assert rc == 0
+            other = _strip_spec(_starts(3.5 + 6.4, 4), "lo", ids=[5, 6, 7, 8])
+            rc, rec2, *_ = _run(d, _holder_apertures(other, None))
+            assert rc == 5
+            rc, out, err = _rebuild(d)
+            assert rc == 5 and "STOPPED" in err and "pass 2" in err, (rc, err[-400:])
+            recs = digitize.roll_records_current(d, 1)
+            assert [r["from_pass"] for r in recs] == [1, 2], recs
+            assert recs[0]["status"] == "ok" and recs[0]["images"], recs[0]
+            assert recs[1]["status"] == "failed" and recs[1]["images"] == []
+            products = _products(d)
+            assert {1, 3, 4} <= {int(n[5:].split(".")[0].split("-")[0]) for n in products}
+            assert digitize.film110_next_pass(d, "", 1) == 3
+    print("test_rebuild_stops_at_a_pass_it_cannot_recognise OK")
+
+
+def test_frame_located_image_reaches_the_manifest():
+    """A pass whose holes cannot be read still delivers the image the
+    printed frame locates; the manifest says how (located_by)."""
+    import numpy as _np
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            spec = _strip_spec(_starts(3.5, 3), "lo")
+            aps = _holder_apertures(spec, None)
+            rc, rec, *_ = _run(d, aps)
+            assert rc == 0
+            assert all(e["located_by"] in ("holes", "holes+frame") for e in rec["images"]), rec["images"]
+    print("test_frame_located_image_reaches_the_manifest OK")
+
+
 def main() -> int:
     tests = [
         test_slot_constants_and_anchored_numbering,
@@ -1346,6 +1539,11 @@ def main() -> int:
         test_turned_strip_with_other_pictures_is_exit_5,
         test_three_passes_have_their_own_prefixes_and_old_advice_keys,
         test_pattern_contents_are_distinct,
+        test_rebuild_reproduces_a_three_pass_roll_offline,
+        test_rebuild_after_rotate_90_gives_identical_products,
+        test_rebuild_refusals_touch_nothing,
+        test_rebuild_stops_at_a_pass_it_cannot_recognise,
+        test_frame_located_image_reaches_the_manifest,
     ]
     for t in tests:
         t()

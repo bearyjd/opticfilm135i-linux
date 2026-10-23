@@ -26,9 +26,11 @@ cycle instruction and exits -- it never sends a recovery command.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -1840,6 +1842,231 @@ def _film110_run_order_placement(args: argparse.Namespace, roll: int) -> str:
     return "B" if recs else "A"
 
 
+def _film110_set_pass(state: Film110State, pass_index: int, prior: list) -> None:
+    """Which pass of the roll `state` is, and the record it is numbered
+    against (the newest of `prior` that numbered an image). Shared by the
+    live digitize run and the rebuild from stored frames."""
+    state.pass_index = pass_index
+    state.ref = _film110_pick_ref(prior)
+
+
+def _film110_feed_aperture(args: argparse.Namespace, state: Film110State,
+                           frame: int, vis, irr, emit) -> None:
+    """One aperture-registered crop into the shared 110 code. `irr` is the
+    IR crop or None; it is only used with --ir. The live digitize hook and
+    the rebuild (`--from-frames`) both come through here."""
+    _film110_process_aperture(args, state, frame, vis,
+                              irr if args.ir else None, emit)
+
+
+def _film110_print_roll_summary(roll: int, state: Film110State, per_frame: list,
+                                rdir, adv: dict, note: str = "") -> None:
+    """The closing line of a single-strip 110 run (live or rebuilt)."""
+    pl = state.placement or "undecided"
+    if adv["images"]:
+        nxt = (f"Missing {adv['missing']}, strip end free {adv['free_end']}. "
+               f"Suggestion: {adv['suggest']}. Re-seat the strip (slide "
+               f"or turn it) and run 'of135i digitize --film 110 "
+               f"--roll {roll}' again, or stop here.")
+    elif adv.get("done"):
+        nxt = (f"Nothing missing, nothing with the strip end free. "
+               f"Next strip: roll {roll + 1}.")
+    else:
+        nxt = (f"No image numbered. {adv['suggest']}; run "
+               f"'of135i digitize --film 110 --roll {roll}' again.")
+    word = "done" if adv.get("done") else "scanned, not done"
+    print(f"roll {roll} {word} (110, placement {pl}): {len(per_frame)} "
+          f"frames, {sum(1 for e in state.images if e['main'])} "
+          f"photograph(s) -> {rdir}{note}. {nxt}")
+
+
+class _LinePrefixer:
+    """A write-only text stream that prefixes every line with `prefix`
+    (used to mark a rebuilt pass's output)."""
+
+    def __init__(self, target, prefix: str):
+        self._t, self._p, self._at_start = target, prefix, True
+
+    def write(self, text: str) -> int:
+        for part in text.splitlines(keepends=True):
+            if self._at_start:
+                self._t.write(self._p)
+            self._t.write(part)
+            self._at_start = part.endswith("\n")
+        return len(text)
+
+    def flush(self) -> None:
+        self._t.flush()
+
+
+_FILM110_PRODUCT_RE = re.compile(r"^image-?\d+(-uncertain)?(-ir)?\.tiff$")
+
+
+def _film110_move_products(rdir: Path, stamp: str) -> "tuple[Path | None, list]":
+    """Move every photograph product (image<N>[-uncertain][-ir].tiff) of the
+    roll into <rdir>/superseded-<stamp>/ (os.replace, same filesystem).
+    Nothing is deleted. Returns (the directory or None, the names moved)."""
+    names = sorted(p.name for p in Path(rdir).iterdir()
+                   if p.is_file() and _FILM110_PRODUCT_RE.match(p.name))
+    if not names:
+        return None, []
+    dest = Path(rdir) / f"superseded-{stamp}"
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = Path(rdir) / f"superseded-{stamp}-{n}"
+    dest.mkdir()
+    for name in names:
+        os.replace(Path(rdir) / name, dest / name)
+    return dest, names
+
+
+def _digitize_from_frames(args: argparse.Namespace) -> int:
+    """`digitize --film 110 --roll N --from-frames`: rebuild a roll's
+    photographs, numbering and manifest records from its stored frame files
+    (p<k>-f<N>.tiff, -ir.tiff) without scanning (docs/film-110.md §14).
+    Every stored pass is replayed in order through the SAME 110 code a live
+    pass uses; the roll's current photographs are first MOVED into
+    superseded-<UTC>/ (never deleted). Opens no Scanner, touches no USB.
+
+    Exit 0 ok, 2 refused (nothing touched), 5 when a pass cannot be
+    recognised (that pass writes nothing, earlier passes stay)."""
+    import numpy as _np
+    import tifffile
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from . import digitize
+
+    def refuse(msg: str) -> int:
+        print(f"error: {msg}", file=sys.stderr)
+        return 2
+
+    if getattr(args, "film", "135") != "110":
+        return refuse("--from-frames only applies with --film 110")
+    if args.roll is None:
+        return refuse("--from-frames needs --roll N")
+    if int(getattr(args, "strips", 1) or 1) != 1:
+        return refuse("--from-frames does not support --strips 2 in this "
+                      "version (a two-strip load cannot be rebuilt offline yet)")
+    roll = args.roll
+    rdir = digitize.roll_dir(args.out, args.prefix, roll)
+    recs = [r for r in digitize.roll_records_current(args.out, roll, args.prefix)
+            if r.get("film") == "110"]
+    if not recs:
+        return refuse(f"roll {roll} has no 110 records in {args.out}")
+    if any((r.get("strips") or 1) != 1 for r in recs):
+        return refuse(f"roll {roll} was recorded as part of a two-strip load; "
+                      f"--from-frames does not support --strips 2 in this version")
+    for key in ("dpi", "ir"):
+        vals = {(bool(r.get(key)) if key == "ir" else r.get(key)) for r in recs}
+        if len(vals) != 1 or None in vals:
+            return refuse(f"roll {roll}'s stored records disagree on {key} "
+                          f"({sorted(map(str, vals))}); a rebuild needs one value")
+    dpi, ir = recs[0]["dpi"], bool(recs[0].get("ir"))
+
+    by_pass: dict = {}
+    for r in recs:
+        k = r.get("pass")
+        if isinstance(k, int):
+            by_pass[k] = r              # the newest record of a pass wins
+    for tag in digitize.film110_placements_on_disk(rdir):
+        if len(tag) > 1 and tag[0] == "p" and tag[1:].isdigit():
+            by_pass.setdefault(int(tag[1:]), None)   # a crash left frames, no record
+    plan = []
+    for k in sorted(by_pass):
+        frames = [f for f in digitize.FRAMES
+                  if digitize.frame_path_110(args.out, args.prefix, roll,
+                                             f"p{k}", f).is_file()]
+        if frames:
+            plan.append((k, by_pass[k], frames))
+    if not plan:
+        return refuse(f"roll {roll} has no stored frame files (p<k>-f<N>.tiff) "
+                      f"in {rdir}; nothing to rebuild from")
+
+    # ---- validated: from here on files move and records are written.
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    print(f"=== rebuild roll {roll} from stored frames -> {rdir} "
+          f"(passes {', '.join(str(k) for k, _r, _f in plan)}) ===")
+    dest, moved = _film110_move_products(rdir, stamp)
+    if moved:
+        print(f"moved {len(moved)} existing photograph file(s) to {dest.name}/ "
+              f"(nothing is deleted)")
+
+    prior: list = []                    # the rebuilt records so far (a new epoch)
+    last = None                         # (state, record, per_frame)
+    default_rec = recs[0]
+    for k, rec, frames in plan:
+        src = rec or default_rec
+        rotate = int(src.get("rotate") or 0)
+        pargs = SimpleNamespace(**vars(args))
+        pargs.dpi, pargs.ir, pargs.rotate = dpi, ir, rotate
+        pargs.no_clean = bool(src.get("no_clean"))
+        pargs.film, pargs.strips, pargs.frames = "110", 1, None
+        placement = (rec.get("placement") if rec and rec.get("placement_given")
+                     and rec.get("placement") in ("A", "B") else
+                     getattr(args, "placement", None))
+        state = Film110State(placement, slot=1, strips=1)
+        _film110_set_pass(state, k, prior)
+        emit = _film110_digitize_emit(pargs, state, roll)
+        started = datetime.now(timezone.utc).isoformat()
+        per_frame = []
+        out = _LinePrefixer(sys.stdout, f"rebuild pass {k}: ")
+        with contextlib.redirect_stdout(out):
+            for frame in frames:
+                path = digitize.frame_path_110(args.out, args.prefix, roll,
+                                               f"p{k}", frame)
+                vis = tifffile.imread(str(path))
+                if rotate:
+                    vis = _np.ascontiguousarray(_np.rot90(vis, -(rotate // 90)))
+                irr = None
+                irp = path.with_name(path.stem + "-ir.tiff")
+                if ir and irp.is_file():
+                    irr = tifffile.imread(str(irp))
+                    if irr.ndim == 3:
+                        irr = irr[:, :, 0]      # stored as the IR channel stacked x3
+                    if rotate:
+                        irr = _np.ascontiguousarray(_np.rot90(irr, -(rotate // 90)))
+                _film110_feed_aperture(pargs, state, frame, vis, irr, emit)
+                per_frame.append({"frame": frame, "main": str(path),
+                                  "ir": str(irp) if irr is not None else None,
+                                  "stage": None})
+                del vis, irr
+                if state.aborted:
+                    print(f"stopping: {state.aborted}")
+                    break
+            if not state.aborted:
+                _film110_finalize(pargs, state, roll, emit)
+        if rec and rec.get("per_frame"):
+            per_frame = [dict(e) for e in rec["per_frame"]]
+        now = datetime.now(timezone.utc).isoformat()
+        record = {"roll": roll, "prefix": args.prefix, "dir": str(rdir),
+                  "started_utc": started, "dpi": dpi,
+                  "positive": bool(src.get("positive")), "ir": ir,
+                  "frames": frames, "no_clean": pargs.no_clean, "rotate": rotate}
+        if not prior:
+            record["forced"] = True        # a new epoch: only the rebuild counts
+        _film110_fill_record(record, state, rdir, prior)
+        ok = not state.aborted
+        record.update(per_frame=per_frame, finished_utc=now,
+                      status="ok" if ok else "failed",
+                      stage=None if ok else "rebuild",
+                      source="frames", from_pass=k, rebuilt_utc=now)
+        if not ok:
+            record["stop_reason"] = state.aborted
+        digitize.append_manifest(args.out, record)
+        if not ok:
+            print(f"rebuild pass {k}: STOPPED -- {state.aborted}. Passes "
+                  f"{[p for p, _r, _f in plan if p < k]} are rebuilt; this "
+                  f"pass wrote no photograph.", file=sys.stderr)
+            return 5
+        prior.append(record)
+        last = (state, record, per_frame)
+
+    state, record, per_frame = last
+    _film110_print_roll_summary(roll, state, per_frame, rdir, record["advice"])
+    return 0
+
+
 def _cmd_digitize(args: argparse.Namespace) -> int:
     """Bulk-digitise one film strip into a resumable staging tree
     (of135i.digitize): pick the roll number, load the magazine, scan
@@ -1859,6 +2086,10 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     from datetime import datetime, timezone
     from types import SimpleNamespace
     from . import digitize, film110 as _film110, loadflow
+
+    if getattr(args, "from_frames", False):
+        # Offline: never reaches the load flow or a Scanner.
+        return _digitize_from_frames(args)
 
     strips = int(getattr(args, "strips", 1) or 1)
     # --frames decides the strip length. The default stays 1-4: most
@@ -1899,9 +2130,9 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                  [x for x in digitize.roll_records_current(args.out, r, args.prefix)
                   if x.get("film") == "110"]) if film110 else []
         if film110:
-            st.pass_index = (1 if args.force else
-                             digitize.film110_next_pass(args.out, args.prefix, r))
-            st.ref = _film110_pick_ref(prior)
+            _film110_set_pass(st, (1 if args.force else
+                                   digitize.film110_next_pass(args.out, args.prefix, r)),
+                              prior)
         ctxs.append(SimpleNamespace(
             slot=i + 1, roll=r, rdir=digitize.roll_dir(args.out, args.prefix, r),
             state=st, frames=frames_i, per_frame=[], record={}, prior=prior,
@@ -2077,9 +2308,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             entry["stage"] = "write"
             if film110:
                 def hook(vis, irr, frame=frame, state=state, emit=emits[c.slot]):
-                    _film110_process_aperture(
-                        args, state, frame, vis, irr if args.ir else None,
-                        emit)
+                    _film110_feed_aperture(args, state, frame, vis, irr, emit)
                 main, irf, prev, cleaned, cov = _finish_digitize_frame(
                     args, raw, width, out, dual, progress=entry, film110=hook)
             else:
@@ -2197,24 +2426,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         if film110 and strips == 2:
             _film110_print_pair_summary(args, ctxs, note)
         elif film110:
-            state, per_frame, rdir = c0.state, c0.per_frame, c0.rdir
-            adv = c0.record["advice"]
-            pl = state.placement or "undecided"
-            if adv["images"]:
-                nxt = (f"Missing {adv['missing']}, strip end free {adv['free_end']}. "
-                       f"Suggestion: {adv['suggest']}. Re-seat the strip (slide "
-                       f"or turn it) and run 'of135i digitize --film 110 "
-                       f"--roll {roll}' again, or stop here.")
-            elif adv.get("done"):
-                nxt = (f"Nothing missing, nothing with the strip end free. "
-                       f"Next strip: roll {roll + 1}.")
-            else:
-                nxt = (f"No image numbered. {adv['suggest']}; run "
-                       f"'of135i digitize --film 110 --roll {roll}' again.")
-            word = "done" if adv.get("done") else "scanned, not done"
-            print(f"roll {roll} {word} (110, placement {pl}): {len(per_frame)} "
-                  f"frames, {sum(1 for e in state.images if e['main'])} "
-                  f"photograph(s) -> {rdir}{note}. {nxt}")
+            _film110_print_roll_summary(roll, c0.state, c0.per_frame, c0.rdir,
+                                        c0.record["advice"], note)
         else:
             print(f"roll {roll} done: {len(c0.per_frame)} frames -> {c0.rdir}{note}. "
                   f"Next: insert the next strip and run 'of135i digitize' again "
@@ -2511,6 +2724,14 @@ def build_parser() -> argparse.ArgumentParser:
              f"1-6 for a full-length strip, or 1,3-4. The holder holds "
              f"{holder.DEFAULT.frames}; the default stays 1-4 so a "
              f"shorter strip does not scan empty apertures.")
+    p_dig.add_argument("--from-frames", action="store_true",
+        help="--film 110 --roll N only: rebuild the roll offline from its "
+             "stored frame files (p<k>-f<N>.tiff): every pass is replayed in "
+             "order through the same code a live pass uses, photographs are "
+             "renumbered and rewritten, the old image<N>.tiff files are MOVED "
+             "to superseded-<UTC>/ (never deleted), new manifest records "
+             "follow. No scanner is touched; dpi/ir/rotate come from the "
+             "stored records (docs/film-110.md §14)")
     p_dig.add_argument("--assume-loaded", action="store_true",
         help="skip the load flow (the magazine is already latched)")
     p_dig.add_argument("--dpi", type=int, default=3600, choices=SUPPORTED_DPIS,
