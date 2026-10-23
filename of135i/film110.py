@@ -153,6 +153,10 @@ class ApertureFind:
     reason: str = ""
     rail_hidden_mm: float = 0.0        # film width hidden under a rail (0 = fully visible)
     film_runs: list = field(default_factory=list)   # [(first_line, last_line)] of film present
+    # Unexposed frame positions the frame locator saw: [(line0, line1)] of a
+    # window between printed-border gaps that reads as clear film (plausibility
+    # test failed), lying wholly on film. They consume a number, never a product.
+    blanks: list = field(default_factory=list)
 
 
 # ------------------------------------------------------------- small helpers
@@ -801,7 +805,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
         seg_std = float(np.std(seg))
         if (seg_mean >= IMAGE_DENSITY_FRAC * clear_base
                 and seg_std < IMAGE_VARIATION_FRAC * max(seg_mean, 1.0)):
-            return None, 0
+            return None, -1        # reads as clear film (a blank, for the frame locator)
 
         r_line0, ok_l0 = _refine_edge(interior_profile, line0, px_per_mm, outward=-1)
         r_line1, ok_l1 = _refine_edge(interior_profile, line1, px_per_mm, outward=+1)
@@ -946,6 +950,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
                       else "no perforation found in the film band")
 
     frames_out: list = []
+    blanks_out: list = []
     lateral_known = None
     if runs:
         perforated_edge_col = lo if edge_is_low else hi
@@ -1002,10 +1007,13 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
         match_px = FRAME_MATCH_MM * px_per_mm
         overlap_px = FRAME_MAX_OVERLAP_MM * px_per_mm
         found = []
+        blank_windows = []
         for (line0, line1) in merged:
             fr, sc = _refine_candidate(line0, line1, None, "unknown", lateral_known)
             if fr is not None:
                 found.append((sc, fr))
+            elif sc < 0:
+                blank_windows.append((line0, line1))
         found.sort(key=lambda t: (-t[0], t[1].line0))   # the better-confirmed first
         added = []
         for _sc, fr in found:
@@ -1026,11 +1034,24 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
             frames_out = sorted(frames_out + added, key=lambda f: f.line0)
             for i, f in enumerate(frames_out):
                 f.index = i + 1
-    if frames_out:
+        # Blank frame positions: a window the gaps predict that is clear film,
+        # lying wholly on film (the clear leader beyond a free film end is not
+        # one: that window reaches lines without film) and not on top of an
+        # image that was found.
+        for (b0, b1) in blank_windows:
+            if b0 < 0 or b1 > n_lines:
+                continue
+            i0, i1 = int(np.ceil(b0)), int(np.floor(b1))
+            if i1 <= i0 or not bool(film_present[i0:i1].all()):
+                continue
+            if any(min(b1, o.line1) - max(b0, o.line0) > overlap_px for o in frames_out):
+                continue
+            blanks_out.append((float(b0), float(b1)))
+    if frames_out or blanks_out:
         reason = ""
     return ApertureFind(False, (lo, hi), film_line_start, film_line_end,
                          leading_continuation, frames_out, reason, rail_hidden_mm,
-                         film_runs=film_runs_out)
+                         film_runs=film_runs_out, blanks=blanks_out)
 
 
 def product_bounds(find: FrameFind, *, dpi: float | None = None, pad_mm: float = 0.0,
