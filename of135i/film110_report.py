@@ -315,8 +315,17 @@ def plan_next_pass(known: dict, needed: dict, ends: list,
     plastic = [(a, b) for _k, _i, a, b in plastic_spans()]
     best = None
     steps = int(round(SUGGEST_RANGE_MM / SUGGEST_STEP_MM))
+    quarter = FILM_110.pitch_mm / 4
+    tried = set()
     for i in range(-steps, steps + 1):
-        s = i * SUGGEST_STEP_MM
+        # The instruction is given in quarter image lengths ("about"), so the
+        # placement is judged at the quarter-image value it names: a rescue
+        # that only holds at an exact millimetre the operator cannot seat
+        # (a strip end on a 2 mm bar) is not offered.
+        s = round(i * SUGGEST_STEP_MM / quarter) * quarter
+        if s in tried:
+            continue
+        tried.add(s)
         if not _inside_limits(points, s, lo, hi):
             continue
         rescued, margins, targets = [], [], []

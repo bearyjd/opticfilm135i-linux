@@ -612,6 +612,16 @@ def _film110_filter_frames(args: argparse.Namespace, state: Film110State,
                         "the strip's leader lies here (the film begins inside "
                         "this aperture): not an image, ignored"})
             continue
+        if (not two and find.film_line_end is not None
+                and fr.line1 > find.film_line_end
+                + film110.FILM_START_TOLERANCE_MM * px_per_mm):
+            # The mirror of the rule above: the film ENDS inside this aperture
+            # and the predicted image reaches past it (the last hole predicts
+            # an image after itself). On a lone strip it is the clear tail or,
+            # on a turned strip, the leader at the front end.
+            out.append({"msg": "the strip's tail lies here (the film ends inside "
+                               "this aperture): not an image, ignored"})
+            continue
         if fr.split == "leading" and not fr.refined.get("line1"):
             # Every hole predicts BOTH its neighbours, so the strip's
             # first hole also predicts an image before itself: the
@@ -666,22 +676,6 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
     if find.empty:
         print(f"110: aperture {aperture} — empty")
         return
-    if not find.frames and not getattr(find, "blanks", None):
-        print(f"110: aperture {aperture} — {find.reason or 'no images predicted'}")
-        return
-
-    px_per_mm = args.dpi / film110.MM_PER_INCH
-    parts = []
-    if find.rail_hidden_mm:
-        # The strip's far edge lies under the rail; the picture's own
-        # margin on that side is width - lateral offset - image width.
-        margin = (_holder.FILM_110.width_mm - _holder.FILM_110.image_lateral_offset_mm
-                  - _holder.FILM_110.image_mm[1])
-        clip = max(0.0, find.rail_hidden_mm - margin)
-        parts.append(f"film edge {find.rail_hidden_mm:.1f} mm under the rail"
-                     + (f" -> picture clipped by {clip:.1f} mm on that side; "
-                        f"nudge the strip towards the open side" if clip > 0.05
-                        else ""))
     # Where the strip's own ends lie (for the advice of a later pass, and
     # for "done": no room for an unseen image).
     if find.film_line_end is not None and state.film_end_mm is None:
@@ -703,6 +697,22 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
         state.next_strip_start_mm = film110.global_position_mm(
             aperture, runs[-1][0], args.dpi)
 
+    if not find.frames and not getattr(find, "blanks", None):
+        print(f"110: aperture {aperture} — {find.reason or 'no images predicted'}")
+        return
+
+    px_per_mm = args.dpi / film110.MM_PER_INCH
+    parts = []
+    if find.rail_hidden_mm:
+        # The strip's far edge lies under the rail; the picture's own
+        # margin on that side is width - lateral offset - image width.
+        margin = (_holder.FILM_110.width_mm - _holder.FILM_110.image_lateral_offset_mm
+                  - _holder.FILM_110.image_mm[1])
+        clip = max(0.0, find.rail_hidden_mm - margin)
+        parts.append(f"film edge {find.rail_hidden_mm:.1f} mm under the rail"
+                     + (f" -> picture clipped by {clip:.1f} mm on that side; "
+                        f"nudge the strip towards the open side" if clip > 0.05
+                        else ""))
     pad = film110.PRODUCT_PAD_MM
     items = []
     for it in _film110_filter_frames(args, state, aperture, find):
@@ -1809,8 +1819,9 @@ def _film110_now_text(n: int, report: list, windows: dict, unseen: set) -> str:
     return "now in " + (rep.where_text(w) if w else "the holder")
 
 
-def _film110_plan(state: Film110State, report: list, missing: list, free_end: list,
-                  unseen: list, seen_all: set, sight: list, turned: bool):
+def _film110_plan(state: Film110State, prior: list, report: list, missing: list,
+                  free_end: list, unseen: list, seen_all: set, sight: list,
+                  turned: bool):
     """advice.next for a lone strip: the joint placement (film110_report.
     plan_next_pass) over the positions this pass measured, carried over the
     film grid to the frame positions it did not see."""
@@ -1829,15 +1840,39 @@ def _film110_plan(state: Film110State, report: list, missing: list, free_end: li
     known = {n: window(n) for n in seen_all}
     extra = {n: window(n) for n in unseen}
     ends = [e for e in (state.film_start_mm, state.film_end_mm) if e is not None]
+    # Where the strip end beyond a free-end image lies in THIS pass: the
+    # distance beyond the image was measured in the pass that saw that end
+    # (newest first) and is carried over, flipped when the strip lies turned
+    # against that pass.
+    pitch = film110.FILM_110.pitch_mm
+    recs = list(prior) + [{"images": state.images, "film_start_mm": state.film_start_mm,
+                           "film_end_mm": state.film_end_mm,
+                           "orientation": state.orientation}]
     end_beyond = {}
     for n in free_end:
-        p = known.get(n)
-        if p is None:
+        w = known.get(n)
+        if w is None:
             continue
-        for e in ends:
-            if (0 <= p - e < film110.FILM_110.pitch_mm) or (0 <= e - (p + L) < film110.FILM_110.pitch_mm):
-                end_beyond[n] = e
-                break
+        for r in reversed(recs):
+            e = next((x for x in r.get("images") or []
+                      if x.get("number") == n and x.get("position_mm") is not None
+                      and not x.get("uncertain")), None)
+            if e is None:
+                continue
+            pos = float(e["position_mm"])
+            hit = None
+            end_hi, end_lo = r.get("film_end_mm"), r.get("film_start_mm")
+            if end_hi is not None and 0 <= end_hi - (pos + L) < pitch:
+                hit = ("hi", end_hi - (pos + L))
+            elif end_lo is not None and 0 <= pos - end_lo < pitch:
+                hit = ("lo", pos - end_lo)
+            if hit is None:
+                continue
+            side, gap = hit
+            if (r.get("orientation") or "same") != state.orientation:
+                side = "lo" if side == "hi" else "hi"
+            end_beyond[n] = (w + L + gap) if side == "hi" else (w - gap)
+            break
     needed = {n: "split" for n in missing}
     needed.update({n: "free_end" for n in free_end})
     needed.update({n: "unseen" for n in unseen})
@@ -1967,8 +2002,8 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                     not_done.append({"reason": "strip_end_free", "numbers": list(free_end)})
                 if unseen:
                     not_done.append({"reason": "not_seen", "numbers": list(unseen)})
-        nxt = _film110_plan(state, record["pass_report"], missing, free_end, unseen,
-                            seen_all, sight, turned)
+        nxt = _film110_plan(state, prior, record["pass_report"], missing, free_end,
+                            unseen, seen_all, sight, turned)
         if nxt is not None:
             suggest = nxt["text"]
         elif not numbers:
@@ -2154,9 +2189,13 @@ def _film110_print_roll_summary(roll: int, state: Film110State, per_frame: list,
                f"(delivered or blank). Next strip: roll {roll + 1}.")
     else:
         why = _film110_not_done_text(adv)
+        wants = adv.get("next") or adv.get("images") or adv.get("unseen") \
+            or not adv.get("frame_positions", {}).get("of")
+        sug = adv["suggest"].rstrip(".")
         nxt = ((f"Not done: {why}. " if why else "")
-               + f"{adv['suggest']}. Re-seat the strip (slide or turn it) and "
-                 f"run 'of135i digitize --film 110 --roll {roll}' again, or stop here.")
+               + (f"{sug}. " if wants else "")
+               + f"Re-seat the strip (slide or turn it) and run "
+                 f"'of135i digitize --film 110 --roll {roll}' again, or stop here.")
     word = "done" if adv.get("done") else "scanned, not done"
     print(f"roll {roll} {word} (110, placement {pl}): {len(per_frame)} "
           f"frames, {sum(1 for e in state.images if e['main'])} "

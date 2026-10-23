@@ -654,7 +654,7 @@ def _starts(first, n):
     return [first + FPITCH * k for k in range(n)]
 
 
-def _strip_spec(starts, side, *, lead_in=-50.0, tail=4.1, ids=None):
+def _strip_spec(starts, side, *, lead_in=-12.0, tail=4.1, ids=None):
     """A strip: image starts (global mm), perforated side, where its film
     begins (default: before the holder's left end) and ends. `ids` names
     the photograph at each start (default 1, 2, ...): every photograph has
