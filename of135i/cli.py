@@ -560,11 +560,15 @@ def _film110_filter_frames(args: argparse.Namespace, state: Film110State,
         ghost_holes = [f.perforation_line for f in find.frames
                        if f.split == "trailing"
                        and f.orientation == "hole-before-image"
+                       and f.perforation_line is not None
                        and f.line0 > f.perforation_line]
     hole_px = film110.HOLE_MAX_MM * px_per_mm
     out = []
     for fr in frames:
+        # The hole-based ghost rule does not apply to an image located by
+        # the printed frame (no hole, perforation_line None).
         if (ghost_holes and fr.orientation == "hole-before-image"
+                and fr.perforation_line is not None
                 and fr.line0 < fr.perforation_line
                 and not (fr.refined.get("line0") and fr.refined.get("line1"))
                 and any(0 <= g - fr.perforation_line <= hole_px
@@ -863,6 +867,7 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
 
         entry = {"number": n, "aperture": aperture, "whole": bool(fr.whole),
                  "split": fr.split, "free_end_near": bool(fr.free_end_near),
+                 "located_by": getattr(fr, "located_by", "holes"),
                  "position_mm": round(float(g), 2),
                  "crop": it["vis_bounds"],
                  "extent_mm": [round(float(it["extent"][0]), 2),

@@ -196,7 +196,7 @@ def main(argv=None) -> int:
                   f"  size {fr.size_mm[0]:.2f}x{fr.size_mm[1]:.2f} mm"
                   f"  refined={fr.refined}"
                   f"  free_end_near={fr.free_end_near}"
-                  f"  perforation@{fr.perforation_line / px_per_mm:.2f} mm")
+                  f"  {'perforation@' + format(fr.perforation_line / px_per_mm, '.2f') + ' mm' if fr.perforation_line is not None else 'located by the printed frame'}")
             if args.edge_check and fr.whole:
                 worst = None
                 for (e, product, foot, margin, pic, sur) in edge_check(

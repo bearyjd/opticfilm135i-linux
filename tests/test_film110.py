@@ -22,6 +22,7 @@ from of135i import cli, film110
 from of135i.holder import FILM_110, STRIP
 
 DPIS = (600, 3600)
+DEFAULT_FIXTURE_SHA256 = "c44b1bbd44994e0c0430090bd8a71e343239ac7445d7217ba47f85a565df2cbc"
 
 MM_PER_INCH = 25.4
 AIR = 65535.0
@@ -970,6 +971,146 @@ def test_cli_scan_parser_defaults_to_135():
     print("test_cli_scan_parser_defaults_to_135 OK")
 
 
+# ---------------------------------------------------- frame locator (no holes)
+
+
+def _frame_fixture(dpi, *, holes=(), n_images=2, aperture_length_mm=52.0, first_mm=1.0, **kw):
+    """printed_border fixture with `n_images` pictures one pitch apart from
+    1.0 mm; returns (arr, ppm, band_lo, band_hi, images_mm)."""
+    L = FILM_110.image_mm[0]
+    c0 = 2.0 + FILM_110.image_lateral_offset_mm
+    c1 = c0 + FILM_110.image_mm[1]
+    imgs = [(first_mm + k * FILM_110.pitch_mm, first_mm + k * FILM_110.pitch_mm + L, c0, c1)
+            for k in range(n_images)]
+    arr, ppm, lo, hi = _build_fixture(dpi, holes_mm=holes, images_mm=imgs,
+                                      printed_border=True,
+                                      aperture_length_mm=aperture_length_mm, **kw)
+    return arr, ppm, lo, hi, imgs
+
+
+def test_default_fixture_is_byte_stable():
+    import hashlib
+    arr, _p, _l, _h = _build_fixture(
+        600, holes_mm=[(3.0, 4.5)], images_mm=[(6.8, 24.0, 3.5, 16.5)])
+    digest = hashlib.sha256(arr.tobytes()).hexdigest()
+    assert digest == DEFAULT_FIXTURE_SHA256, digest
+    print("test_default_fixture_is_byte_stable OK")
+
+
+def test_frame_locator_finds_images_without_holes():
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs = _frame_fixture(dpi, aperture_length_mm=36.0)
+        find = film110.detect(arr, dpi=dpi)
+        assert find.reason == "", (dpi, find.reason)
+        assert len(find.frames) == 2, (dpi, find.frames)
+        for fr, (l0, l1, c0, c1) in zip(find.frames, imgs):
+            assert fr.located_by == "frame", fr.located_by
+            assert fr.perforation_line is None and fr.orientation == "unknown"
+            for got, want in ((fr.line0, l0), (fr.line1, l1), (fr.col0, c0), (fr.col1, c1)):
+                assert abs(got / ppm - want) <= 0.3, (dpi, got / ppm, want)
+        assert find.frames[0].whole and find.frames[0].split is None
+        assert not find.frames[1].whole and find.frames[1].split == "trailing"
+        assert [f.index for f in find.frames] == [1, 2]
+        print(f"test_frame_locator_finds_images_without_holes OK ({dpi} dpi)")
+
+
+def test_frame_locator_leaves_hole_frames_unchanged():
+    def key(f):
+        d = dict(f.__dict__)
+        d.pop("located_by")
+        return d
+    h1 = (3.0, 4.5)
+    h2 = (h1[0] + FILM_110.pitch_mm, h1[1] + FILM_110.pitch_mm)
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs = _frame_fixture(
+            dpi, holes=[h1, h2], first_mm=h1[1] + FILM_110.perforation_lead_mm)
+        # the hole path predicts images at hole end + lead; shift the painted
+        # pictures there so both locators see the same strip
+        film110.FRAME_LOCATOR_ENABLED = False
+        try:
+            off = film110.detect(arr, dpi=dpi)
+        finally:
+            film110.FRAME_LOCATOR_ENABLED = True
+        on = film110.detect(arr, dpi=dpi)
+        assert off.frames, dpi
+        assert all(f.located_by == "holes" for f in off.frames)
+        hole_part = [f for f in on.frames if f.located_by in ("holes", "holes+frame")]
+        assert [key(f) for f in hole_part] == [key(f) for f in off.frames], dpi
+        assert any(f.located_by == "holes+frame" for f in on.frames), dpi
+        print(f"test_frame_locator_leaves_hole_frames_unchanged OK ({dpi} dpi)")
+
+
+def test_frame_locator_finds_the_image_after_a_cut_hole():
+    h1 = (3.0, 4.5)
+    for dpi in DPIS:
+        ilen = FILM_110.image_mm[0]
+        L = ilen
+        c0 = 2.0 + FILM_110.image_lateral_offset_mm
+        c1 = c0 + FILM_110.image_mm[1]
+        i1 = h1[1] + FILM_110.perforation_lead_mm
+        i2 = i1 + FILM_110.pitch_mm
+        arr, ppm, lo, hi = _build_fixture(
+            dpi, holes_mm=[h1], images_mm=[(i1, i1 + L, c0, c1), (i2, i2 + L, c0, c1)],
+            printed_border=True, aperture_length_mm=52.0, free_end_mm=i2 + L + 0.5)
+        find = film110.detect(arr, dpi=dpi)
+        by = {round(f.line0 / ppm): f for f in find.frames}
+        assert any(abs(f.line0 / ppm - i2) <= 0.3 and f.located_by == "frame"
+                   for f in find.frames), (dpi, [(f.located_by, f.line0 / ppm) for f in find.frames])
+        assert any(abs(f.line0 / ppm - i1) <= 0.3 and f.located_by == "holes+frame"
+                   for f in find.frames), dpi
+        print(f"test_frame_locator_finds_the_image_after_a_cut_hole OK ({dpi} dpi)")
+
+
+def test_frame_locator_ignores_sky_and_dense_leader():
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs = _frame_fixture(dpi, n_images=2)
+        # texture picture 1 (so it is not two flat halves) with a 4 mm flat sky
+        a = arr.astype(np.float64)
+        rim = int(round(2.5 * ppm))
+        l0, l1 = int(imgs[0][0] * ppm), int(imgs[0][1] * ppm)
+        n = l1 - l0
+        tex = 0.30 + 0.12 * np.sin(np.arange(n) / ppm * 5.0)
+        sky0 = int(5.0 * ppm)
+        sky1 = sky0 + int(4.0 * ppm)
+        tex[sky0:sky1] = 0.11 * AIR / CLEAR["G"]
+        for ci, key in enumerate(CHANNELS):
+            a[l0:l1, lo + rim:hi - rim, ci] = (tex * CLEAR[key])[:, None]
+        arr2 = np.clip(a, 0, 65535).astype(np.uint16)
+        gaps = film110._frame_gaps(np.median(arr2[:, lo + rim:hi - rim, 1].astype(np.float64), axis=1) / AIR,
+                                   np.ones(arr2.shape[0], dtype=bool), ppm, 17.2, arr2.shape[0])
+        for g0, g1, t0, t1 in gaps:
+            assert not (l0 <= g0 and g1 <= l1), ("sky taken as a gap", g0 / ppm, g1 / ppm)
+        find = film110.detect(arr2, dpi=dpi)
+        assert len(find.frames) == 2, (dpi, [(f.line0 / ppm, f.line1 / ppm) for f in find.frames])
+        # a dense leader (0.03 x air, flat, 11 mm) is never a gap
+        b = arr.astype(np.float64)
+        for ci, key in enumerate(CHANNELS):
+            b[int(20.0 * ppm):int(31.0 * ppm), lo + rim:hi - rim, ci] = 0.03 * AIR * CLEAR[key] / CLEAR["G"]
+        arr3 = np.clip(b, 0, 65535).astype(np.uint16)
+        prof = np.median(arr3[:, lo + rim:hi - rim, 1].astype(np.float64), axis=1) / AIR
+        gaps = film110._frame_gaps(prof, np.ones(len(prof), dtype=bool), ppm, 17.2, len(prof))
+        for g0, g1, t0, t1 in gaps:
+            assert not (19.5 * ppm <= g0 and g1 <= 31.5 * ppm), ("leader taken as a gap", g0 / ppm, g1 / ppm)
+        print(f"test_frame_locator_ignores_sky_and_dense_leader OK ({dpi} dpi)")
+
+
+def test_frame_locator_with_the_band_hidden_under_rails():
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs = _frame_fixture(dpi)
+        pad = int(round(4.0 * ppm))
+        arr[:, :lo, :] = int(PLASTIC)
+        # plastic both sides of the band, air only beyond the far rail
+        arr = np.concatenate([np.full((arr.shape[0], pad, 3), int(PLASTIC), dtype=arr.dtype), arr,
+                              np.full((arr.shape[0], pad, 3), int(AIR), dtype=arr.dtype)], axis=1)
+        find = film110.detect(arr, dpi=dpi)
+        assert find.reason == "", (dpi, find.reason)
+        assert len(find.frames) == 2, (dpi, find.frames)
+        for fr, (l0, l1, c0, c1) in zip(find.frames, imgs):
+            assert fr.located_by == "frame"
+            assert abs(fr.line0 / ppm - l0) <= 0.3 and abs(fr.line1 / ppm - l1) <= 0.3
+        print(f"test_frame_locator_with_the_band_hidden_under_rails OK ({dpi} dpi)")
+
+
 def main() -> int:
     tests = [
         test_whole_and_trailing_split,
@@ -997,6 +1138,12 @@ def main() -> int:
         test_bar_centering_shifts_put_the_bar_in_the_gap,
         test_cli_scan_parser_defaults_to_135,
         test_validate_film110_args,
+        test_default_fixture_is_byte_stable,
+        test_frame_locator_finds_images_without_holes,
+        test_frame_locator_leaves_hole_frames_unchanged,
+        test_frame_locator_finds_the_image_after_a_cut_hole,
+        test_frame_locator_ignores_sky_and_dense_leader,
+        test_frame_locator_with_the_band_hidden_under_rails,
     ]
     passed = 0
     for t in tests:
