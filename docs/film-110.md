@@ -1088,12 +1088,18 @@ Test 106 pass 2: film start 13.7 mm, image 1 at 16.99 mm, `end_gap_mm` 3.3.
 
 ### 15.7 Gap detection (scratches, dust) and blank classification
 
-The printed-border gap is judged on the profile median-filtered over 0.3 mm (a
-0.05 mm bright line or a few specks no longer break its flatness), flat runs are
-cut at every level step (the camera-gate halo that used to mark steps is
-removed by the filter) and each accepted run is extended outward (at most 2 mm)
-while the filtered level stays within `FRAME_LEVEL_TOL` of the run's level, so
-the gap's ends land on the real step. A candidate window's clear-film test
+The printed-border gap is judged robustly: narrow outliers from the 0.3 mm
+median-filtered profile (a 0.05 mm bright scratch, specks of dust) are replaced
+first, then a 0.5 mm window is flat when 95 % of its lines lie within
+`FRAME_FLAT_DEV` (0.0015 x air) of its median. That is five times the noise of
+a real printed border (0.0003) and half that of a picture's own grain (0.003):
+the grain must stay, it is what separates a picture or a printed "0966" window
+frame from the perfectly flat border (a median filter applied wholesale made
+Testigen roll 5's dark window frame a "gap"). Flat runs are cut at every level
+step (the camera-gate halo that used to mark steps is removed by the filter) and
+a flat run of at least 3 mm is extended outward (at most 2 mm per side) while
+the filtered level stays within `FRAME_LEVEL_TOL` of the run's level, so the
+gap's ends land on the real step. A candidate window's clear-film test
 leaves out the gap lines within 2.5 mm of its ends (only windows that lie on
 film): a hole- or frame-located window that runs a millimetre or two into the
 gap is judged on the clear part and is a **blank** (`ApertureFind.blanks`, never

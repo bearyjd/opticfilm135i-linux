@@ -608,6 +608,8 @@ def _candidates(runs, film: Film, px_per_mm: float, reversed_: bool):
 FRAME_LOCATOR_ENABLED = True       # module switch, used only by tests (I-A3)
 FRAME_FLAT_WINDOW_MM = 0.5
 FRAME_FLAT_MAX_STD = 0.003         # (tuned) rolling std / air; real gaps ~0.0003, noise-free fixtures ~0.0005
+FRAME_FLAT_DEV = 0.0015            # a gap is flat when 95 % of a 0.5 mm window lies this close (x air) to its median (real gaps 0.0003, picture grain 0.003)
+FRAME_OUTLIER = 0.01               # a line this far (x air) from the 0.3 mm median is a scratch or speck, not texture
 FRAME_BORDER_MAX_FRAC = 0.16       # a gap reads below this x air
 FRAME_BORDER_MIN_FRAC = 0.04       # (tuned) a full gap below this x air (dense leader 0.03) never sets the border level
 FRAME_GAP_MIN_MM = 6.5
@@ -620,6 +622,7 @@ FRAME_WEAK_PARTIAL_MIN_MM = 3.0    # a partial gap in an aperture with no full g
 FRAME_WEAK_LEVEL = (0.03, 0.16)
 FRAME_MEDIAN_MM = 0.3              # flatness is judged on the profile median-filtered over this (scratches, dust)
 FRAME_EXTEND_MAX_MM = 2.0          # an accepted gap is extended outward to the level step, at most this far per side
+FRAME_EXTEND_MIN_RUN_MM = 3.0      # only a flat run at least this long is extended (a short flat blob in texture stays short)
 BLANK_END_ZONE_MM = 2.5            # gap lines this close to a window's ends are left out of its clear-film test
 BLANK_EDGE_TOL_MM = 1.0            # a blank window may reach this far past the aperture's lines (clipped)
 
@@ -633,22 +636,26 @@ def _frame_gaps(rel: np.ndarray, film_present: np.ndarray, px_per_mm: float,
     w = max(2, int(round(FRAME_FLAT_WINDOW_MM * px_per_mm)))
     if n_lines < w + 1:
         return []
-    x = np.where(film_present, rel, 0.0)
-    # A thin bright scratch or a speck of dust inside a gap must not break
-    # its flatness: judge it on the median-filtered profile.
+    x_raw = np.where(film_present, rel, 0.0)
+    from numpy.lib.stride_tricks import sliding_window_view
     fw = max(3, int(round(FRAME_MEDIAN_MM * px_per_mm)) | 1)
     pad = fw // 2
-    from numpy.lib.stride_tricks import sliding_window_view
-    x = np.median(sliding_window_view(np.pad(x, (pad, pad), mode="edge"), fw), axis=1)
-    c1 = np.concatenate(([0.0], np.cumsum(x)))
-    c2 = np.concatenate(([0.0], np.cumsum(x * x)))
+    # Levels, steps and the outward extension use the median-filtered profile.
+    x = np.median(sliding_window_view(np.pad(x_raw, (pad, pad), mode="edge"), fw), axis=1)
+    # Flatness: a thin bright scratch or a speck of dust (a NARROW outlier
+    # from the filtered profile) is replaced first; the grain of a picture's
+    # own texture is kept, since it is what tells a picture from the perfectly
+    # flat printed border (real gaps: 0.0003, texture: 0.003 x air). A window
+    # is flat when 95 % of its lines lie within FRAME_FLAT_DEV of its median.
+    clean = np.where(np.abs(x_raw - x) > FRAME_OUTLIER, x, x_raw)
+    win = sliding_window_view(clean, w)
+    med = np.median(win, axis=1)
+    dev = np.percentile(np.abs(win - med[:, None]), 95, axis=1)
     cp = np.concatenate(([0], np.cumsum(film_present.astype(np.int64))))
     starts = np.arange(0, n_lines - w + 1)
-    mean = (c1[starts + w] - c1[starts]) / w
-    var = np.maximum((c2[starts + w] - c2[starts]) / w - mean * mean, 0.0)
-    std = np.sqrt(var)
     all_present = (cp[starts + w] - cp[starts]) == w
-    flat_win = all_present & (std < FRAME_FLAT_MAX_STD) & (mean < FRAME_BORDER_MAX_FRAC)
+    flat_win = (all_present & (dev < FRAME_FLAT_DEV)
+                & (med < FRAME_BORDER_MAX_FRAC))
     # a line is flat when any flat window covers it
     diff = np.zeros(n_lines + 1, dtype=np.int64)
     for s in np.flatnonzero(flat_win):
@@ -671,7 +678,7 @@ def _frame_gaps(rel: np.ndarray, film_present: np.ndarray, px_per_mm: float,
         # real level step, also where a scratch or dust cut the flat run short.
         lvl = float(np.median(x[s:e + 1]))
         s0, e0 = s, e
-        if lvl > 0:
+        if lvl > 0 and (e - s + 1) >= FRAME_EXTEND_MIN_RUN_MM * px_per_mm:
             while (s0 > s - ext_max and s0 > 0 and bool(film_present[s0 - 1])
                    and abs(x[s0 - 1] - lvl) <= FRAME_LEVEL_TOL * lvl):
                 s0 -= 1
