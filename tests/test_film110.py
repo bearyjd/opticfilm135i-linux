@@ -1164,6 +1164,55 @@ def test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none():
         print(f"test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none OK ({dpi} dpi)")
 
 
+
+def test_gap_survives_a_thin_scratch_and_dust():
+    """(a) A 0.05 mm bright line and a few specks across a gap must not
+    shorten it: the gap's ends stay on the real level step."""
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs = _frame_fixture(dpi, n_images=2, aperture_length_mm=52.0)
+        clean = film110.detect(arr, dpi=dpi)
+        g0, g1 = imgs[0][1], imgs[1][0]                 # the gap between the pictures
+        a = arr.astype(np.float64)
+        rim = int(round(0.6 * ppm))
+        marks = [(g0 + 3.2, 0.05), (g0 + 1.1, 0.03), (g0 + 5.6, 0.03), (g0 + 6.5, 0.02)]
+        for pos, height in marks:
+            r0 = int(round(pos * ppm))
+            r1 = max(r0 + 1, int(round((pos + height) * ppm)))
+            for ci, key in enumerate(CHANNELS):
+                a[r0:r1, lo + rim:hi, ci] = 0.9 * CLEAR[key]
+        scratched = np.clip(a, 0, 65535).astype(np.uint16)
+        prof = np.median(scratched[:, lo + int(2.5 * ppm):hi - int(2.5 * ppm), 1].astype(np.float64), axis=1) / AIR
+        gaps = film110._frame_gaps(prof, np.ones(len(prof), dtype=bool), ppm, 17.2, len(prof))
+        assert any(abs(x / ppm - g0) <= 0.4 and abs(y / ppm - g1) <= 0.4 for x, y, _t0, _t1 in gaps), \
+            (dpi, [(x / ppm, y / ppm) for x, y, _a, _b in gaps], g0, g1)
+        find = film110.detect(scratched, dpi=dpi)
+        assert len(find.frames) == len(clean.frames) == 2, (dpi, find.frames)
+        for f, c in zip(find.frames, clean.frames):
+            assert abs(f.line0 - c.line0) <= 0.3 * ppm and abs(f.line1 - c.line1) <= 0.3 * ppm
+        print(f"test_gap_survives_a_thin_scratch_and_dust OK ({dpi} dpi)")
+
+
+def test_blank_frame_is_not_an_image_when_a_prediction_runs_into_the_gap():
+    """(b) A hole predicts a window that starts 1.5 mm inside the gap before
+    a clear (blank) frame. The dark gap lines must not make the clear window
+    look like a picture: it is a blank, never an image."""
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs, window = _blank_fixture(dpi)
+        a = arr.copy()
+        lead = FILM_110.perforation_lead_mm
+        he = window[0] - 1.5 - lead
+        hs = he - 2.6
+        rim = int(round(0.6 * ppm))
+        hole_w = int(round(1.5 * ppm))
+        a[int(round(hs * ppm)):int(round(he * ppm)), lo + rim:lo + rim + hole_w, :] = int(AIR)
+        find = film110.detect(a, dpi=dpi)
+        assert all(not (window[0] - 3.0 <= f.line0 / ppm <= window[0] + 3.0) for f in find.frames), \
+            (dpi, [(f.line0 / ppm, f.located_by) for f in find.frames])
+        assert len(find.frames) == 2, (dpi, [(f.line0 / ppm, f.line1 / ppm, f.located_by) for f in find.frames])
+        assert len(find.blanks) == 1 and abs(find.blanks[0][0] / ppm - window[0]) <= 0.6, (dpi, find.blanks)
+        print(f"test_blank_frame_is_not_an_image_when_a_prediction_runs_into_the_gap OK ({dpi} dpi)")
+
+
 def main() -> int:
     tests = [
         test_whole_and_trailing_split,
@@ -1200,6 +1249,8 @@ def main() -> int:
         test_blank_window_between_gaps_is_reported_and_is_no_image,
         test_blank_is_not_reported_where_the_film_ends_inside_the_window,
         test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none,
+        test_gap_survives_a_thin_scratch_and_dust,
+        test_blank_frame_is_not_an_image_when_a_prediction_runs_into_the_gap,
     ]
     passed = 0
     for t in tests:
