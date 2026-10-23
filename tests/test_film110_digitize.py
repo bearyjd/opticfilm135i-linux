@@ -179,7 +179,19 @@ def test_run_a_infers_placement_numbers_and_advises():
         assert adv["missing"] == [2] and adv["free_end"] == [4], adv
         assert adv["images"] == [2, 4] and adv["other_placement"] == "B", adv
         assert "image 2" in adv["suggest"] and "image 4" in adv["suggest"], adv["suggest"]
-        assert "further in" in adv["suggest"], adv["suggest"]
+        assert "towards aperture" in adv["suggest"] and adv["suggest"].startswith("Next pass:"), adv["suggest"]
+        nxt = adv["next"]
+        assert nxt and set(nxt) >= {"shift_mm", "direction", "images", "rescues", "targets",
+                                    "remaining", "another_pass_after"}, nxt
+        assert nxt["images"] * 4 == int(nxt["images"] * 4), nxt     # quarters
+        assert rec["number_basis"] in ("strip_start", "provisional")
+        assert [r["number"] for r in rec["pass_report"]] == [1, 2, 3, 4], rec["pass_report"]
+        assert rec["pass_report"][1]["where"] == {"kind": "bar", "index": 1}, rec["pass_report"]
+        assert rec["pass_report"][1]["state"] == "split"
+        assert rec["pass_report"][3]["state"] == "whole_free_end"
+        assert rec["pass_report"][0]["state"] == "whole_supported" and \
+            rec["pass_report"][0]["outcome"] == "new"
+        assert out.count("Holder: apertures 1-6") == 1 and "bar 1" in out and "Delivered after this pass" in out
         names = _names(d)
         for n in (1, 3, 4):
             assert f"image{n}.tiff" in names and f"image{n}-ir.tiff" in names, names
@@ -473,23 +485,71 @@ def test_later_pass_numbers_by_shift_at_any_seating():
     print("test_later_pass_numbers_by_shift_at_any_seating OK")
 
 
-def test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing():
+def test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing_numbered():
+    """Exit 5 = "photographs written UNNUMBERED, numbering not established":
+    the whole images of the pass are written as p<k>-a<aperture>-<i>.tiff,
+    nothing that carries a number is written or replaced, the record is ok
+    with numbering "unidentified" and never serves as a reference."""
     with _content():
         with tempfile.TemporaryDirectory() as d:
             rc, rec1, *_ = _run(d, _holder_apertures(_starts_for(3.5), None))
             assert rc == 0
-            before = {p.name for p in digitize.roll_dir(d, "", 1).iterdir()}
+            rd = digitize.roll_dir(d, "", 1)
+            before = {p.name: p.read_bytes() for p in rd.iterdir() if p.name.startswith("image")}
             # The same positions, but other pictures: none of pass 1's images.
             other = _strip_spec(_starts(3.5 + 6.4, 4), "lo", ids=[5, 6, 7, 8])
             rc, rec, scans, out, err = _run(d, _holder_apertures(other, None))
             assert rc == 5, (rc, err[-300:])
-            assert "slid or was turned" in err, err
-            assert rec["status"] == "failed" and rec["images"] == [], rec
-            after = {p.name for p in digitize.roll_dir(d, "", 1).iterdir()}
-            assert not any(n.startswith("image") for n in after - before), after - before
-            assert {n for n in after - before} <= {n for n in after if n.startswith("p2-")}
+            assert "slid or was turned" in err and "UNNUMBERED" in err, err
+            assert rec["status"] == "ok" and rec["numbering"] == "unidentified", rec["status"]
+            un = [e for e in rec["images"]]
+            assert un and all(e["number"] is None and e["identified"] is False and e["main"]
+                              and e["position_mm"] is not None and e["crop"] for e in un), un
+            names = {p.name for p in rd.iterdir()}
+            assert all(Path(e["main"]).name in names for e in un), (un, names)
+            assert any(n.startswith("p2-a1-") for n in names), names
+            # nothing numbered written or replaced
+            assert {n: (rd / n).read_bytes() for n in names if n.startswith("image")} == before
+            row = rec["pass_report"][0]
+            assert row["number"] is None and row["identified"] is False and row["outcome"] == "delivered_unnumbered"
+            assert "not identified (delivered unnumbered)" in out + err, out
+            # done / missing / free_end are those of the earlier record
+            assert rec["advice"]["missing"] == rec1["advice"]["missing"]
+            assert rec["advice"]["free_end"] == rec1["advice"]["free_end"]
             assert scans[-1] == "eject"
-    print("test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing OK")
+    print("test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing_numbered OK")
+
+
+def test_unidentified_pass_is_no_reference_and_a_rebuild_numbers_it():
+    """The next pass numbers against the last GOOD record; a rebuild after the
+    recogniser is fixed numbers the unnumbered pass and moves its unnumbered
+    copies to superseded-*/."""
+    orig = film110.decide_orientation
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            rc, rec1, *_ = _run(d, _holder_apertures(_starts_for(3.5), None))
+            assert rc == 0
+            film110.decide_orientation = lambda *a, **k: None       # a recogniser that fails
+            try:
+                rc, rec2, *_ = _run(d, _holder_apertures(_starts_for(3.5 + 10.6), None))
+            finally:
+                film110.decide_orientation = orig
+            assert rc == 5 and rec2["numbering"] == "unidentified", (rc, rec2["numbering"])
+            rc, rec3, *_ = _run(d, _holder_apertures(_starts_for(3.5 + 12.75), None))
+            assert rc == 0 and rec3["pass"] == 3 and rec3["numbering"] == "content", rec3["numbering"]
+            _expected_numbers(rec3, 3.5 + 12.75)             # numbered against pass 1
+            rd = digitize.roll_dir(d, "", 1)
+            assert any(p.name.startswith("p2-a") for p in rd.iterdir())
+            rc, out, err = _rebuild(d)
+            assert rc == 0, (rc, err[-400:])
+            recs = digitize.roll_records_current(d, 1)
+            assert [r["numbering"] for r in recs] == ["protocol", "content", "content"], \
+                [r["numbering"] for r in recs]
+            assert all(e["number"] is not None for e in recs[1]["images"]), recs[1]["images"]
+            assert not any(p.name.startswith("p2-a") for p in rd.iterdir())
+            sup = [p for p in rd.iterdir() if p.name.startswith("superseded-")]
+            assert sup and any(f.name.startswith("p2-a") for s_ in sup for f in s_.iterdir()), sup
+    print("test_unidentified_pass_is_no_reference_and_a_rebuild_numbers_it OK")
 
 
 def _image_thumb(path):
@@ -603,8 +663,10 @@ def test_three_passes_have_their_own_prefixes_and_old_advice_keys():
             assert {"p1-f1.tiff", "p2-f1.tiff", "p3-f1.tiff"} <= set(names), names
             for rec in (rec2, rec3):
                 adv = rec["advice"]
+                # the old keys stay for one release; the holder-language ones are new
                 assert set(adv) == {"missing", "free_end", "suggest", "done",
-                                    "images", "other_placement"}, adv
+                                    "images", "other_placement", "unseen", "next",
+                                    "not_done", "frame_positions", "end_gaps"}, adv
                 assert adv["done"] is (not adv["missing"] and not adv["free_end"])
                 assert adv["images"] == sorted(set(adv["missing"]) | set(adv["free_end"]))
             assert rec3["advice"]["missing"] == [] and rec3["advice"]["free_end"] == []
@@ -640,7 +702,7 @@ def _starts(first, n):
     return [first + FPITCH * k for k in range(n)]
 
 
-def _strip_spec(starts, side, *, lead_in=-50.0, tail=4.1, ids=None):
+def _strip_spec(starts, side, *, lead_in=-12.0, tail=4.1, ids=None):
     """A strip: image starts (global mm), perforated side, where its film
     begins (default: before the holder's left end) and ends. `ids` names
     the photograph at each start (default 1, 2, ...): every photograph has
@@ -1075,9 +1137,14 @@ def test_image_seated_on_the_aperture_edge_is_a_leading_split_of_its_own():
         assert r1["placement"] == "A" and r1["problems"] == [], r1
         assert _shape(r1) == {1: "L", 2: "T", 3: "W", 4: "L"}, _shape(r1)
         assert _images(r1)[1]["aperture"] == 1 and _images(r1)[4]["aperture"] == 3
+        # Near-whole (owner's decision, Test 106): an image within the cut
+        # tolerance of the boundary with its other edge confirmed IS delivered.
+        im = _images(r1)
+        assert im[1]["cut_mm"] is not None and abs(im[1]["cut_mm"] - 0.1) <= 0.1, im[1]
+        assert im[1]["main"] and im[4]["main"] and im[1]["whole"] is False, (im[1], im[4])
+        assert im[2]["main"] is None and "cut_mm" not in im[2]
         adv = r1["advice"]
-        assert (adv["missing"], adv["free_end"], adv["images"], adv["other_placement"]) \
-            == ([1, 2, 4], [], [1, 2, 4], "B"), adv
+        assert adv["missing"] == [2], adv
         assert "split image 2 (already counted)" in out, out
         # (The leader ghost needs the first hole inside the aperture: in A
         # it lies before aperture 1; placement B exercises it in
@@ -1469,9 +1536,37 @@ def test_rebuild_refusals_touch_nothing():
     print("test_rebuild_refusals_touch_nothing OK")
 
 
-def test_rebuild_stops_at_a_pass_it_cannot_recognise():
-    """I-B6: pass 2 shows other pictures -> exit 5, pass 1's products stay,
-    the stopped pass writes no photograph and its record claims no image."""
+def _snapshot(d):
+    rd = digitize.roll_dir(d, "", 1)
+    return ({n: (rd / n).read_bytes() for n in _products(d)},
+            digitize.roll_records_current(d, 1),
+            sorted(p.name for p in rd.iterdir() if p.name.startswith("superseded-")),
+            digitize.film110_next_pass(d, "", 1), digitize.roll_is_done(d, 1))
+
+
+def _assert_untouched_after_failed_rebuild(d, before, rc, err):
+    rd = digitize.roll_dir(d, "", 1)
+    files, recs, sup, nxt, done = before
+    assert rc != 0, rc
+    assert {n: (rd / n).read_bytes() for n in _products(d)} == files, "products changed"
+    cur = digitize.roll_records_current(d, 1)
+    failed = [r for r in cur[len(recs):]]
+    assert cur[:len(recs)] == recs and len(failed) == 1, (len(cur), len(recs))
+    f = failed[0]
+    assert f["status"] == "failed" and f["source"] == "frames" and f["stop_reason"], f
+    assert not f.get("forced") and f["images"] == [], f
+    assert sorted(p.name for p in rd.iterdir() if p.name.startswith("superseded-")) == sup
+    staging = Path(f["staging_dir"])
+    assert staging.is_dir() and staging.name in err, (staging, err[-300:])
+    assert digitize.film110_next_pass(d, "", 1) == nxt
+    assert digitize.roll_is_done(d, 1) == done
+
+
+def test_rebuild_writes_an_unrecognised_pass_unnumbered_and_goes_on():
+    """I-B6, revised: pass 2 shows other pictures -> exit 5 ("numbering not
+    established"), but the rebuild commits: pass 1's products are numbered,
+    pass 2's whole images are written unnumbered, both records are ok, the
+    unidentified one is no reference."""
     with _content():
         with tempfile.TemporaryDirectory() as d:
             rc, rec1, *_ = _run(d, _holder_apertures(_starts_for(3.5), None))
@@ -1480,15 +1575,44 @@ def test_rebuild_stops_at_a_pass_it_cannot_recognise():
             rc, rec2, *_ = _run(d, _holder_apertures(other, None))
             assert rc == 5
             rc, out, err = _rebuild(d)
-            assert rc == 5 and "STOPPED" in err and "pass 2" in err, (rc, err[-400:])
+            assert rc == 5 and "UNNUMBERED" in err and "pass(es) 2" in err, (rc, err[-400:])
             recs = digitize.roll_records_current(d, 1)
-            assert [r["from_pass"] for r in recs] == [1, 2], recs
-            assert recs[0]["status"] == "ok" and recs[0]["images"], recs[0]
-            assert recs[1]["status"] == "failed" and recs[1]["images"] == []
-            products = _products(d)
-            assert {1, 3, 4} <= {int(n[5:].split(".")[0].split("-")[0]) for n in products}
+            assert [r["status"] for r in recs] == ["ok", "ok"] and recs[0].get("forced"), recs
+            assert recs[1]["numbering"] == "unidentified" and recs[0]["images"], recs[1]
+            rd = digitize.roll_dir(d, "", 1)
+            names = {p.name for p in rd.iterdir()}
+            assert {"image1.tiff", "image3.tiff", "image4.tiff"} <= names, names
+            assert any(n.startswith("p2-a") for n in names), names
             assert digitize.film110_next_pass(d, "", 1) == 3
-    print("test_rebuild_stops_at_a_pass_it_cannot_recognise OK")
+    print("test_rebuild_writes_an_unrecognised_pass_unnumbered_and_goes_on OK")
+
+
+def test_rebuild_with_an_exception_mid_write_changes_nothing():
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            _three_pass_roll(d)
+            before = _snapshot(d)
+            orig = cli._write_image
+            calls = {"n": 0}
+
+            def flaky(*a, **k):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise OSError("disk full (test)")
+                return orig(*a, **k)
+
+            cli._write_image = flaky
+            try:
+                rc, out, err = _rebuild(d)
+            finally:
+                cli._write_image = orig
+            assert calls["n"] >= 2
+            assert "disk full (test)" in err, err[-300:]
+            _assert_untouched_after_failed_rebuild(d, before, rc, err)
+            # a clean rebuild afterwards still works and leaves no staging behind
+            rc, out, err = _rebuild(d)
+            assert rc == 0, (rc, err[-300:])
+    print("test_rebuild_with_an_exception_mid_write_changes_nothing OK")
 
 
 def test_frame_located_image_reaches_the_manifest():
@@ -1503,6 +1627,195 @@ def test_frame_located_image_reaches_the_manifest():
             assert rc == 0
             assert all(e["located_by"] in ("holes", "holes+frame") for e in rec["images"]), rec["images"]
     print("test_frame_located_image_reaches_the_manifest OK")
+
+
+# ------------------------------------- holder-language report, numbering (§15)
+
+
+def test_leader_before_the_films_start_is_not_an_image_or_a_problem():
+    """G: a lone strip whose film begins inside aperture 1 -- the first
+    hole predicts an image before itself, which is the leader. It is
+    reported as the leader, never numbered, never a problem."""
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            first = film110.placement_phase_mm("B")
+            spec = _strip_spec(_starts(first, 4), "lo", lead_in=2.9)
+            rc, rec, scans, out, err = _run(d, _holder_apertures(spec, None))
+            assert rc == 0 and rec["problems"] == [], (rc, rec["problems"], err[-300:])
+            assert sorted(e["number"] for e in rec["images"]) == [1, 2, 3, 4], rec["images"]
+            assert "the strip's leader lies here" in out, out
+            assert "phase" not in out.replace("phase 1", ""), out
+            assert rec["number_basis"] == "strip_start" and "anchor_shift" not in rec
+    print("test_leader_before_the_films_start_is_not_an_image_or_a_problem OK")
+
+
+def test_report_fields_text_and_the_joint_suggestion():
+    """C, D, H: machine-readable report first, text derived from it; every
+    printed report starts with the legend; the closing text never claims
+    that no image was numbered."""
+    with tempfile.TemporaryDirectory() as d:
+        rc, rec, scans, out, err = _run_a(d)
+        assert rc == 0
+        lines = out.splitlines()
+        first = next(i for i, ln in enumerate(lines) if ln.startswith("Holder:"))
+        assert lines[first + 1].startswith("Pass 1 report"), lines[first:first + 3]
+        assert "No image numbered" not in out
+        rep = rec["pass_report"]
+        assert [r["number"] for r in rep] == [1, 2, 3, 4]
+        assert set(rep[0]) >= {"number", "where", "state", "outcome", "located_by"}
+        assert rep[0]["where"] == {"kind": "aperture", "index": 1}
+        assert rep[1]["where"] == {"kind": "bar", "index": 1} and rep[1]["outcome"] == "not_delivered"
+        # The text is derived from the fields.
+        assert "bar 1: image 2 split, " in out and " mm under bar 1" in out, out
+        assert "Delivered after this pass: 3 of 4 frame positions; still needed: image 2." in out, out
+        nxt = rec["advice"]["next"]
+        assert nxt["direction"] in ("towards aperture 6", "towards aperture 1")
+        assert nxt["rescues"] and 2 in nxt["rescues"]
+        assert all(set(t) in ({"number", "aperture"}, {"number", "aperture", "end_on", "border_mm", "border_side"}) for t in nxt["targets"])
+        assert rec["advice"]["suggest"].startswith("Next pass: slide the strip ")
+        assert "(about " in rec["advice"]["suggest"] and "mm)" in rec["advice"]["suggest"]
+        assert rec["advice"]["not_done"], rec["advice"]
+    print("test_report_fields_text_and_the_joint_suggestion OK")
+
+
+def test_blank_frame_position_consumes_a_number_and_makes_no_file():
+    """F/E: a blank frame position the detector reports is numbered like an
+    image, listed in `blanks` and in the pass report (state "blank"), counts
+    as accounted for, and never produces a product."""
+    orig = film110.detect
+    calls = {"n": 0}
+    first = 3.5
+    # photographs 1, 2 and 4; photograph 3's position (inside aperture 2) is the blank
+    starts = [first, first + FPITCH, first + 3 * FPITCH]
+    blank_start = first + 2 * FPITCH
+    ppm = DPI / 25.4
+
+    def patched(img, **kw):
+        calls["n"] += 1
+        f = orig(img, **kw)
+        ap = calls["n"]
+        base = (ap - 1) * PITCH
+        if base <= blank_start and blank_start + ILEN <= base + APERTURE_MM:
+            f.blanks = [((blank_start - base) * ppm, (blank_start + ILEN - base) * ppm)]
+        return f
+
+    film110.detect = patched
+    try:
+        with _content():
+            with tempfile.TemporaryDirectory() as d:
+                spec = _strip_spec(starts, "lo", ids=[1, 2, 4])
+                rc, rec, scans, out, err = _run(d, _holder_apertures(spec, None))
+                assert rc == 0, (rc, err[-300:])
+                assert [b["number"] for b in rec["blanks"]] == [3], rec["blanks"]
+                states = {r["number"]: r["state"] for r in rec["pass_report"]}
+                assert states[3] == "blank", states
+                assert "image3.tiff" not in _names(d)
+                assert sorted(e["number"] for e in rec["images"]) == [1, 2, 4]
+                # the blank is accounted for: position 3 is not "unseen"
+                assert 3 not in rec["advice"]["unseen"] and 3 not in rec["advice"]["frame_positions"]["needed"]
+                assert rec["advice"]["frame_positions"]["of"] == 3
+                assert "frame position 3 is blank" in out, out
+    finally:
+        film110.detect = orig
+    print("test_blank_frame_position_consumes_a_number_and_makes_no_file OK")
+
+
+def test_front_end_first_seen_in_a_later_pass_renumbers_the_roll():
+    """E: pass 1 cannot see the strip's front end (film runs on beyond the
+    holder), so its numbers are provisional. Pass 2 slides the strip until the
+    front end is in view with a frame-sized window of film before the first
+    photograph: that window is the first frame position, so the roll is
+    renumbered in-process from the stored frames (no scanner), the old
+    products move to superseded-*/ and every record carries final numbers."""
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            rc, r1, *_ = _run(d, _holder_apertures(
+                _strip_spec(_starts(3.5, 4), "lo", lead_in=-35.0), None))
+            assert rc == 0 and r1["number_basis"] == "provisional", r1
+            before = sorted(p.name for p in digitize.roll_dir(d, "", 1).iterdir())
+            rc, rec, scans, out, err = _run(d, _holder_apertures(
+                _strip_spec(_starts(3.5 + 40.0, 4), "lo", lead_in=5.0), None))
+            assert rc == 0, (rc, err[-400:])
+            assert "renumbering roll 1" in out, out
+            assert "No image numbered" not in out
+            recs = digitize.roll_records_current(d, 1)
+            assert [r["source"] for r in recs] == ["frames", "frames"], [r.get("source") for r in recs]
+            assert recs[0].get("forced") is True
+            assert all("anchor_shift" not in r for r in recs), recs
+            assert recs[-1]["number_basis"] == "strip_start"
+            nums = sorted({e["number"] for r in recs for e in r["images"]})
+            assert nums[0] == 2 and 1 not in nums, nums
+            names = _names(d)
+            assert "image1.tiff" not in names and "image2.tiff" in names, names
+            rd = digitize.roll_dir(d, "", 1)
+            sup = [p for p in rd.iterdir() if p.name.startswith("superseded-")]
+            assert sup and any((s / "image1.tiff").exists() for s in sup), sup
+            # frame position 1 (the leader window) has not been seen and is listed
+            assert recs[-1]["advice"]["unseen"] == [1], recs[-1]["advice"]
+            assert recs[-1]["advice"]["done"] is False
+            assert digitize.film110_next_pass(d, "", 1) == 3
+            assert all(n in names for n in before if n.startswith("p"))
+    print("test_front_end_first_seen_in_a_later_pass_renumbers_the_roll OK")
+
+
+def test_impossible_free_end_rescue_says_why_in_geometry():
+    """A free-end image closer to the strip's end than a bar is wide cannot
+    be kept whole with the end resting on plastic: next is null, and not_done
+    carries a machine-readable reason with the text derived from it."""
+    with tempfile.TemporaryDirectory() as d:
+        state = cli.Film110State("A")
+        pos = 2 * PITCH + 8.0
+        state.images = [{"number": 4, "aperture": 3, "whole": True, "split": None,
+                         "free_end_near": True, "position_mm": pos, "main": "x",
+                         "kept": False, "located_by": "holes", "uncertain": False}]
+        state.film_end_mm = pos + ILEN + 0.3
+        rec = {"roll": 1, "prefix": ""}
+        cli._film110_fill_record(rec, state, Path(d), [])
+        adv = rec["advice"]
+        assert adv["next"] is None and adv["free_end"] == [4], adv
+        reasons = {r["reason"]: r["numbers"] for r in adv["not_done"]}
+        assert reasons.get("free_end_too_close") == [4], adv["not_done"]
+        assert "begins 0.3 mm from the strip's end: no placement keeps it whole with the end resting on plastic" in adv["suggest"], adv["suggest"]
+        assert "without losing" not in adv["suggest"]
+    print("test_impossible_free_end_rescue_says_why_in_geometry OK")
+
+
+def test_near_whole_copy_is_delivered_and_a_deeper_cut_is_split():
+    """Owner's decision (Test 106): an image within EDGE_CUT_MAX_MM of the
+    boundary with its other edge confirmed is delivered (near-whole,
+    cut_mm); at -1.5 mm it is split and not delivered, with hidden_mm and
+    the plastic it lies under reported."""
+    with _content():
+        for start, near in ((-0.1, True), (-1.5, False)):
+            with tempfile.TemporaryDirectory() as d:
+                spec = _strip_spec([start, start + FPITCH, start + 2 * FPITCH, start + 3 * FPITCH],
+                                   "lo", tail=8.0)
+                rc, rec, scans, out, err = _run(d, _holder_apertures(spec, None), placement="A")
+                assert rc == 0, (rc, err[-300:])
+                e = {x["number"]: x for x in rec["images"]}[1]
+                assert e["whole"] is False and e["split"] == "leading", e
+                if near:
+                    assert e.get("cut_mm") is not None and e["cut_mm"] <= 0.5 and e["main"], e
+                    assert "image1.tiff" in _names(d)
+                    row = [r for r in rec["pass_report"] if r["number"] == 1][0]
+                    assert row["state"] == "near_whole" and row["cut_mm"] == e["cut_mm"]
+                    assert 1 not in rec["advice"]["missing"] and "near-whole" in out, out
+                else:
+                    assert "cut_mm" not in e and e["main"] is None, e
+                    assert abs(e["hidden_mm"] - 1.5) <= 0.3 and e["under"] == "end wall at aperture 1", e
+                    assert "image1.tiff" not in _names(d) and 1 in rec["advice"]["missing"]
+    print("test_near_whole_copy_is_delivered_and_a_deeper_cut_is_split OK")
+
+
+def test_free_end_images_record_the_measured_gap_to_the_strip_end():
+    with tempfile.TemporaryDirectory() as d:
+        rc, rec, *_ = _run_a(d)
+        im = {x["number"]: x for x in rec["images"]}
+        assert im[4]["free_end_near"] and im[4]["end_gap_mm"] is not None and 0 <= im[4]["end_gap_mm"] < 8, im[4]
+        assert rec["advice"]["end_gaps"].get("4") == im[4]["end_gap_mm"], rec["advice"]["end_gaps"]
+        row = [r for r in rec["pass_report"] if r["number"] == 4][0]
+        assert row["end_gap_mm"] == im[4]["end_gap_mm"]
+    print("test_free_end_images_record_the_measured_gap_to_the_strip_end OK")
 
 
 def main() -> int:
@@ -1533,7 +1846,8 @@ def main() -> int:
         test_digitize_parser_and_validation,
         test_clear_helpers,
         test_later_pass_numbers_by_shift_at_any_seating,
-        test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing,
+        test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing_numbered,
+        test_unidentified_pass_is_no_reference_and_a_rebuild_numbers_it,
         test_turned_strip_is_recognised_and_its_products_are_rotated_back,
         test_pass_after_a_turned_pass_numbers_along_the_reversed_grid,
         test_turned_strip_with_other_pictures_is_exit_5,
@@ -1542,8 +1856,16 @@ def main() -> int:
         test_rebuild_reproduces_a_three_pass_roll_offline,
         test_rebuild_after_rotate_90_gives_identical_products,
         test_rebuild_refusals_touch_nothing,
-        test_rebuild_stops_at_a_pass_it_cannot_recognise,
+        test_rebuild_writes_an_unrecognised_pass_unnumbered_and_goes_on,
+        test_rebuild_with_an_exception_mid_write_changes_nothing,
         test_frame_located_image_reaches_the_manifest,
+        test_leader_before_the_films_start_is_not_an_image_or_a_problem,
+        test_report_fields_text_and_the_joint_suggestion,
+        test_blank_frame_position_consumes_a_number_and_makes_no_file,
+        test_front_end_first_seen_in_a_later_pass_renumbers_the_roll,
+        test_impossible_free_end_rescue_says_why_in_geometry,
+        test_near_whole_copy_is_delivered_and_a_deeper_cut_is_split,
+        test_free_end_images_record_the_measured_gap_to_the_strip_end,
     ]
     for t in tests:
         t()

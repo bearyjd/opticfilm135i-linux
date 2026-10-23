@@ -470,7 +470,10 @@ its stored `p<k>-f<N>.tiff` frames (renumbered, photographs rewritten, the
 old `image*.tiff` moved to `superseded-<UTC>/`, no scanner touched) after a
 driver correction (`docs/film-110.md` §14). The printed border between
 pictures now locates 110 images when the holes cannot be read
-(`docs/film-110.md` §8 step 9).
+(`docs/film-110.md` §8 step 9). Each pass now ends with a report in the
+holder's own words (apertures 1-6, bars between them, "towards aperture 1/6"),
+ONE joint suggestion for where to slide the strip next, and numbers that count
+frame positions from the strip's front end (`docs/film-110.md` §15).
 Resume is **between strips**: the roll number advances past the highest
 recorded or on-disk roll, an existing roll is not overwritten without
 `--force` (which first clears that roll's previous `f*.tiff`/`.diag.json`

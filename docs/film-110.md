@@ -774,8 +774,9 @@ measured recommendation ("image 2: move 5.7 mm further in", "image 4: no
 seating puts the strip end under plastic"), advice not a requirement; the
 old `advice.images` / `other_placement` keys stay one release for the
 application. Exit codes
-are unchanged (0, 2 refused before hardware, 4 coverage, 5 numbering could
-not be established — nothing written, the frame files kept).
+(0, 2 refused before hardware, 4 coverage, 5 numbering could not be
+established): **exit 5 means "the whole photographs were written UNNUMBERED,
+numbering not established", not "nothing was written"** (§15.9).
 
 **Numbering from pass 2: recognise, never guess.** Pass 1 numbers as §5/§12.
 Every later pass holds its sightings until the slot's last aperture and
@@ -793,7 +794,9 @@ agree on *d* (or *c*) form a hypothesis; what is physically possible (every
 recorded image must still lie in the slot after the move) and the strip's
 own free end, when seen in both passes (`film_start_mm` / `film_end_mm`),
 prune the hypotheses; the best remaining one wins only with a mean
-correlation of at least 0.5 and 0.15 above every other. Otherwise exit 5.
+correlation of at least 0.5 and 0.15 above every other (or enough
+evidence, §15.8). Otherwise exit 5: the pass's whole images are written
+unnumbered (§15.9).
 Test 103 measured 0.74–0.96 for the same photograph against at most 0.52
 for different ones. A sighting predicted before the roll's first image
 that is not whole is the leader (ignored); a *whole* image there is a
@@ -863,10 +866,13 @@ touches USB):
    dpi, ir, rotate, no-clean and the placement label come from the stored
    records, never from the command line; flags that only steer hardware
    (`--park`, `--assume-loaded`, ...) are ignored.
-2. Before anything is written the roll's `image*.tiff` files (including
-   `-ir` and `-uncertain`) are **moved**, not deleted, into
-   `roll-NNN/superseded-<UTC yyyymmddThhmmssZ>/`. The `p<k>` frame files,
-   overscan files and diag sidecars are never touched.
+2. **The replay is atomic for the roll.** Products are written into a
+   staging directory inside the roll directory (`.rebuild-<UTC>/`) and the
+   records are collected in memory. Only when every pass succeeded are the
+   roll's current `image*.tiff` files (including `-ir` and `-uncertain`)
+   **moved**, not deleted, into `roll-NNN/superseded-<UTC yyyymmddThhmmssZ>/`,
+   the staged products moved into place and the records appended. The
+   `p<k>` frame files, overscan files and diag sidecars are never touched.
 3. Each replayed pass appends a manifest record like a live pass plus
    `"source": "frames"`, `"from_pass": k`, `"rebuilt_utc"`; the first one
    carries `"forced": true`, so it starts a new epoch (`roll_is_done`,
@@ -878,7 +884,276 @@ touches USB):
 Exit codes: 0 ok; 2 refused before anything was touched (not `--film 110`,
 no `--roll`, `--strips 2` — a two-strip rebuild is not supported in this
 version —, no 110 records, no stored frame file, records that disagree on
-dpi or ir); 5 when a pass cannot be recognised against the rebuilt
-earlier ones: that pass writes no photograph, its record (status `failed`,
-`images` empty, `stop_reason`) is appended, the rebuild stops, and the
-earlier passes' products and records stay.
+dpi or ir); 5 when numbering could not be established for some pass (§15.9):
+the rebuild still commits — that pass's whole images are written unnumbered
+into the staged set and the replay goes on with the last good reference. On
+any exception (a full disk, say) **nothing of the roll changes**: its
+photographs stay where they are and its current epoch is unchanged. ONE record
+is appended — `status: "failed"`, `source: "frames"`, `stop_reason`,
+`staging_dir` — which starts no epoch, owns no pass (`film110_next_pass`,
+`roll_is_done` and the numbering reference ignore it); the message names the
+staging directory, which is kept for inspection.
+
+## 15. The pass report in holder language, one next placement, numbers from the strip's front end (2026-10-23, offline)
+
+A pass used to end with per-image texts ("move 14.9 mm further in …") and a
+count that started wherever the seating put "image 1". Three changes make the
+report something an operator can act on without a ruler and the numbers mean
+the same thing on every pass. All of it is derived from fields the record
+carries; the text is built from the fields, never the other way round.
+Code: `of135i/film110_report.py` (pure functions), `cli._film110_fill_record`.
+
+### 15.1 The convention (Christian's wording, binding)
+
+Apertures 1–6; **bar k lies between aperture k and aperture k+1** (bars 1–5);
+the end walls are "the end wall at aperture 1" and "the end wall at aperture
+6". Directions are always **"towards aperture 1"** or **"towards aperture
+6"** — never in/out/left/right. Amounts are image lengths with mm in
+brackets, in quarters: "half an image (about 13 mm)". Every printed report
+starts with one legend line stating this.
+
+Which physical holder end aperture 1 is has **not been confirmed by the
+owner** yet; the working assumption "the holder end that enters the scanner
+first" lives in ONE constant, `film110_report.APERTURE_1_END`, and the
+legend is built from it. If it is the other end, change that string; no
+logic depends on it. Coordinates are `film110.global_position_mm`: 0 mm is
+aperture 1's start and positions grow towards aperture 6.
+
+### 15.2 The pass report (record field `pass_report`)
+
+One entry per sighting of the pass, ordered along the holder from aperture
+1:
+
+    {"number": n, "where": {"kind": "aperture"|"bar"|"end_wall", "index": k},
+     "state": "whole_supported"|"whole_free_end"|"split"|"blank",
+     "outcome": "new"|"better"|"kept"|"not_delivered",
+     "located_by": "holes"|"frame"|"holes+frame", "position_mm": x}
+
+`where` of a split image is the bar (or end wall) that splits it. `outcome`
+is about this sighting: `new` = a file was written, `better` = it replaced a
+free-end copy, `kept` = the roll already held an as good or better copy,
+`not_delivered` = split, refused or blank. The CLI prints it grouped per
+aperture/bar/end wall, then "Delivered after this pass: x of y frame
+positions; still needed: …" (`advice.frame_positions` carries x, y and the
+numbers). A **blank** frame position (state `blank`, record field `blanks`)
+is an unexposed frame the detector saw (§15.5): it consumes a number and
+never produces a file.
+
+### 15.3 One joint suggestion for the next pass (`advice.next`)
+
+The per-image texts are replaced by ONE placement of the whole strip (slides
+only). `film110_report.plan_next_pass` searches shifts in ±60 mm that keep
+every known image and seen strip end inside the holder (strip material may not
+cross the end walls) and rescues a needed image when its shifted window lies
+inside ONE aperture with at least 2.0 mm to both aperture edges; an image
+delivered with the strip end free is rescued only if, in addition, the strip
+end beyond it lies on plastic (a bar or an end wall). It picks the most
+rescued images, then the largest minimum margin, then the smallest move.
+
+    advice.next = {"shift_mm": s,            # + = towards aperture 6
+                   "direction": "towards aperture 6"|"towards aperture 1",
+                   "images": 0.5,            # |s| in image lengths, to a quarter
+                   "rescues": [2], "targets": [{"number": 2, "aperture": 2}],
+                   "remaining": [], "another_pass_after": false}   # or null
+
+    Next pass: slide the strip half an image (about 13 mm) towards aperture 6,
+    so that image 2 (now split by bar 1) lies in the middle of aperture 2.
+
+`advice.suggest` keeps this text for one release; the older keys (`images`,
+`other_placement`, `missing`, `free_end`, `done`) stay for one release.
+
+`shift_mm` is the exact value found on the 0.5 mm grid. The operator places
+by the **visual target**, not by millimetres: the text gives the amount only
+as "about" (quarter images and mm) and always names what to look at — for a
+split image "so that image 2 … lies in the middle of aperture 2", for a
+free-end rescue the plastic the strip's end must rest on ("… and the strip's
+end rests on bar 3", or "… with the strip's end against the end wall at
+aperture 1"; machine-readable as `targets[].end_on`: `"bar N"` / `"end wall
+at aperture N"`). Margins above 5 mm count as equal when two placements are
+compared (otherwise a 50 mm move beats a 15 mm one for one more millimetre
+of margin).
+
+**When nothing can be rescued** `next` is null and `advice.not_done` carries
+the reason, derived from the geometry: `free_end_too_close` (the image lies
+nearer the strip's end than a bar is wide — about 2 mm — so no placement keeps
+it whole with the end resting on plastic: accept the free-end copy, or stop),
+`free_end_unmeasured` (the end beyond the image was never seen) or
+`no_placement` (no placement within the holder brings it whole into one
+aperture). Delivered images are never "lost" by a move; they may merely be
+split by it, and another pass can re-deliver them.
+
+The suggestion is **content-agnostic geometry**
+over positions the driver already identified by content; it never numbers or
+identifies anything (that stays with `decide_orientation`). Positions of
+images the pass did not see are carried over the film grid from the nearest
+sighting; the end beyond a free-end image is carried from the pass that saw
+it. Two-strip loads keep the old per-image suggestion.
+
+### 15.4 Numbers count frame positions from the strip's front end
+
+The **front end** is the strip end that lay towards aperture 1 in pass 1
+(for a turned pass that is the end towards aperture 6). Number 1 is the
+first frame position after it: a position exists when its whole window lies
+on the film between the strip's ends, give or take 1 mm (`FRONT_TOLERANCE_MM`,
+the same tolerance as the leader rule below). A frame position that was never
+seen, or only split, is *needed*; a blank one is *accounted for* (blank
+positions consume a number, like the printed edge numbers). Real leaders
+(15–18 mm on Testigen rolls 5–8) are shorter than a frame window and hold no
+position.
+
+* **Pass 1 sees the front end** (a free film start inside an aperture):
+  the protocol number is shifted so the first frame position is 1, at once
+  (`state.number_shift`).
+* **A later pass sees it first**: the live run finishes its pass normally and
+  records it (`number_basis: "strip_start"`, `anchor_shift` ≠ 0), then — the
+  scanner is already ejected — replays the roll from its stored frames
+  in-process (§14, the same code, no hardware) with the shift applied to pass
+  1's numbering, so every record and product carries its final number. The old
+  products move to `superseded-<UTC>/`; nothing is deleted. A rebuild
+  (`--from-frames`) finds the shift itself and restarts once when it first
+  appears in a later pass. If that replay stops (exit 5) the pass is still
+  recorded and a warning says how to re-run it.
+* **Until the front end has been seen** the numbers are **provisional**
+  (`number_basis: "provisional"`), and the report says so.
+* The rear end gives the roll's last frame position (`rear_number`); the
+  roll's positions are 1..rear, or 1..the highest number seen.
+
+`done` (information, never a refusal) now also requires every frame position
+between the two ends to have a delivered copy or be blank (`advice.unseen`
+lists the ones nobody has seen), and the front end to have been seen — or the
+first image to lie within a film pitch of the end wall at aperture 1, as
+before. `advice.not_done` lists the reasons, `[{"reason", "numbers"}]`:
+`no_image`, `front_end_not_seen`, `rear_end_not_seen`, `seen_only_split`,
+`strip_end_free`, `not_seen`. The closing text is built from them ("Not done:
+the strip's front end has not been seen: seat it so that its first frame lies
+in aperture 1; …") and never says that no image was numbered when images
+were.
+
+### 15.5 Blank frame positions (detector) and the leader
+
+`detect` reports `ApertureFind.blanks = [(line0, line1)]`: a window the frame
+locator predicts from an accepted gap that fails the plausibility test
+because it reads as clear film (≈ 0.98 × the clear base, flat), lying wholly
+on film lines and not on top of a found image. The clear leader beyond a
+free film end is not one (that window reaches lines without film). Real
+frames: Testigen roll 5, pass 1, aperture 2.
+
+On a lone strip a predicted image that lies before the film's start (by more
+than `FILM_START_TOLERANCE_MM`) is the strip's **leader**, and one that lies
+past the film's end is its **tail**: both are dropped before numbering and
+reported as such, not as a problem (before, a hole-found leading split on a
+strip that starts inside aperture 1 was reported as "not at the placement's
+phase"). Holder-end positions are used here only as geometry; the identity
+of a photograph is still decided by content.
+
+### 15.6 Near-whole copies, measured amounts, the gap to the strip's end (Test 106)
+
+**Near-whole.** An image that is not `whole` only because ONE along-transport
+edge lies within `[-EDGE_CUT_MAX_MM (0.5), WHOLE_MARGIN_MM (0.3))` of the
+aperture boundary, with its other edge inside and confirmed by the data, is a
+*near-whole* copy (`FrameFind.cut_mm` = how much is hidden under the plastic,
+`>= 0`; `whole` and `split` keep their meaning). The CLI delivers it (the crop
+is clamped to the aperture, never padded into the plastic). Test 106 pass 1:
+the strip lay against the end wall at aperture 1 and image 1 began at -0.1 mm;
+the owner judges that supported copy better than a whole copy with the strip
+end free. Ranking of copies of one number (`film110_report.copy_rank`; the best
+wins, the others are `kept`): whole & supported > near-whole & supported >
+whole & free end > near-whole & free end > split. A near-whole copy counts as
+delivered for `missing` and `done`; a supported one needs nothing more, so the
+joint suggestion never proposes a pass only to replace it. `pass_report` state
+`near_whole` (with `cut_mm`) sits under its aperture.
+
+**Measured amounts.** Every split or near-whole row carries `hidden_mm` (how
+much lies under the plastic: the predicted edge against the aperture boundary)
+and `under` (`"bar N"` / `"end wall at aperture N"`): "bar 1: image 2 split,
+7.9 mm under bar 1"; "aperture 1: image 1 near-whole, 0.2 mm under the end wall
+at aperture 1 (delivered, strip end supported)".
+
+**The gap to the strip's end.** Whenever a free strip end lies within one film
+pitch of an image, the entry records `end_gap_mm` (end to the image's nearest
+edge; also `advice.end_gaps`, newest measurement per number). A free-end rescue
+is feasible iff the image's edge on the end's side can lie at least
+`FREE_END_EDGE_MIN_MM` (0.6 = WHOLE_MARGIN 0.3 + a placement tolerance 0.3) inside
+the aperture with the end at least 0.1 mm inside the plastic (bar or end wall);
+the planner prefers the end well inside the plastic and the smaller move. Its
+visual target names the plastic and says not to push: "… lies inside aperture 1,
+about 2.3 mm of the dark border beside it towards aperture 1 in view, and the
+strip's end just under the end wall at aperture 1 (do not push the strip against
+it)" (`targets[].end_on`, `border_mm`, `border_side`). When no rescue exists the
+text quotes the gap ("image 1 begins 0.1 mm from the strip's end: no placement
+keeps it whole with the end resting on plastic") or, when the end was always
+under plastic, says that a pass with that end visible in an aperture will
+measure it (`not_done` reasons `free_end_too_close`, `free_end_unmeasured`).
+Test 106 pass 2: film start 13.7 mm, image 1 at 16.99 mm, `end_gap_mm` 3.3.
+
+### 15.7 Gap detection (scratches, dust) and blank classification
+
+The printed-border gap is judged robustly: narrow outliers from the 0.3 mm
+median-filtered profile (a 0.05 mm bright scratch, specks of dust) are replaced
+first, then a 0.5 mm window is flat when 95 % of its lines lie within
+`FRAME_FLAT_DEV` (0.0015 x air) of its median. That is five times the noise of
+a real printed border (0.0003) and half that of a picture's own grain (0.003):
+the grain must stay, it is what separates a picture or a printed "0966" window
+frame from the perfectly flat border (a median filter applied wholesale made
+Testigen roll 5's dark window frame a "gap"). Flat runs are cut at every level
+step (the camera-gate halo that used to mark steps is removed by the filter) and
+a flat run of at least 3 mm is extended outward (at most 2 mm per side) while
+the filtered level stays within `FRAME_LEVEL_TOL` of the run's level, so the
+gap's ends land on the real step. A candidate window's clear-film test
+leaves out the gap lines within 2.5 mm of its ends (only windows that lie on
+film): a hole- or frame-located window that runs a millimetre or two into the
+gap is judged on the clear part and is a **blank** (`ApertureFind.blanks`, never
+a product), not an image; a blank may reach 1 mm past the aperture's lines.
+Real-data A/B (98 stored apertures, 143 hole frames): identical except two
+apertures whose "image" was an unexposed frame (Nastatestigen roll 1 p1-f1,
+Testigen roll 2 p1-f1), now blank.
+
+### 15.8 Recognising a pass on a strip of near-duplicate shots (Test 106 pass 3)
+
+`decide_orientation` still decides slide against turn by what the pictures
+look like, never by positions alone. Its acceptance now weighs **evidence**:
+for each cluster of (new sighting, recorded sighting) pairs that agree on one
+shift, evidence = the sum over DISTINCT new sightings of each one's best
+correlation inside the cluster (a sighting that correlates with nothing adds
+about 0 and vetoes nothing; each sighting counts once). The winner is the
+cluster with the most evidence (ties: more pairs at or above
+`ORIENT_MIN_CORR`, then the best pair). It is accepted when its best pair is at
+least `ORIENT_MIN_CORR` AND either its best pair is `ORIENT_MARGIN` (0.15)
+above every rival's best pair OR its evidence is `ORIENT_EVIDENCE_MARGIN`
+(1.0) above the best rival's evidence (a rival = a cluster of the other kind
+or another shift). Test 106 pass 3: the true slide (+22.4 mm) had four
+distinct new sightings at 0.91-0.96 (evidence 3.75); the competing slide (-3.0
+mm, one pitch off) 0.84, 0.71, 0.10 (evidence 1.65) because the strip holds
+near-duplicate consecutive shots; 0.96 - 0.84 = 0.12 refused it. One new
+sighting at 0.96 against 0.84 is still refused. On every stored multi-pass roll
+the harness reaches (Testigen rolls 5-8 and Test 106 pass 2) the decision is
+unchanged (orientation and key); the two-strip rolls (Testigen 3-4,
+Nastatestigen, Test 103) cannot be replayed by `--from-frames` and are not
+covered by that check.
+
+### 15.9 Scanned and complete images are never discarded (owner's founding requirement)
+
+When numbering cannot be established for a pass (`decide_orientation` finds
+no decision, or nothing of the pass can be compared with the reference), every
+WHOLE and near-whole image of that pass is still written, **unnumbered**, as
+`p<k>-a<aperture>-<i>.tiff` (+ `-ir.tiff`; `i` = order within the aperture;
+`--rotate` applied, no turn undone because the orientation is unknown). The
+manifest entries have `number: null`, `identified: false`, `position_mm`,
+`crop`, `free_end_near`, `cut_mm`, and `pass_report` lists them as "an image
+whole, not identified (delivered unnumbered)" (outcome `delivered_unnumbered`).
+
+* Nothing that carries a number is written or replaced in that pass: an
+  unidentified copy never overwrites or ranks against a numbered one.
+* The pass record is `status: "ok"` with `numbering: "unidentified"` (and
+  `numbering_note` = why). It is never the reference of the next pass
+  (`_film110_pick_ref` skips a record without numbered images) and changes no
+  `done` / `missing` / `free_end`.
+* **Application contract.** Exit 5 now means "photographs written unnumbered,
+  numbering not established", not "nothing written". The CLI text says how many
+  were delivered and why.
+* A later `--from-frames` rebuild that CAN number the pass supersedes the
+  unnumbered copies: they move to `superseded-*/` like any replaced product
+  (only a rebuild or `--force` removes them; a later live pass leaves them).
+* The atomic rebuild (§14) follows the same rule: a pass it cannot recognise is
+  written unnumbered into the staged set, the replay goes on with the last good
+  reference, the command exits 5 after committing.

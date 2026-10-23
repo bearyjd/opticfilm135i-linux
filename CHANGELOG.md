@@ -6,6 +6,49 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- **Scanned and complete images are never discarded** (owner's founding
+  requirement, docs/film-110.md §15.9): when numbering cannot be established
+  for a pass, its whole and near-whole images are written unnumbered
+  (`p<k>-a<aperture>-<i>.tiff`, manifest `number: null`, `identified: false`),
+  the record is `ok` with `numbering: "unidentified"` and never a reference.
+  Exit 5 now means "photographs written unnumbered, numbering not
+  established", not "nothing written"; a rebuild supersedes them.
+- Test 106 pass 3 (2026-10-23, offline): `decide_orientation` accepts a
+  cluster on evidence (sum of each distinct new sighting's best correlation)
+  as well as on the best-pair margin, so a strip of near-duplicate shots is
+  recognised (+22.4 mm slide, 0.96 against 0.84); every earlier stored decision
+  is unchanged (docs/film-110.md §15.8).
+- Test 105/106 (2026-10-23, offline): gap detection robust to scratches and
+  dust (median filter, level-step cuts, extension) and a clear frame is never
+  an image when a prediction runs into the gap (it is a blank). A **near-whole**
+  copy (one edge within 0.5 mm of the boundary, the other confirmed) is
+  delivered and ranked: whole & supported > near-whole & supported > whole &
+  free end > near-whole & free end > split. Report rows carry `hidden_mm` /
+  `under` / `end_gap_mm`; a free-end rescue uses the measured gap and names the
+  plastic the end must just reach under; the impossible case quotes the gap
+  (docs/film-110.md §15.6, §15.7).
+- Test 104 follow-up (2026-10-23, offline): **the pass report speaks the
+  holder's language, with ONE next placement, and numbers count frame
+  positions from the strip's front end** (docs/film-110.md §15). Records
+  carry `pass_report` (per sighting: number, where = aperture / bar / end
+  wall, state, outcome, located_by), `blanks`, `number_basis`
+  (`"strip_start"` / `"provisional"`) and `advice.next` (one joint slide of
+  the whole strip in quarter image lengths, "towards aperture 1/6"; null when
+  nothing is needed or no placement helps) with `advice.not_done`,
+  `advice.unseen`, `advice.frame_positions`; `advice.suggest` carries the
+  text, the older keys stay one release. Every printed report starts with the
+  one-line convention legend (the unconfirmed "aperture 1 = the end that
+  enters first" is the single constant `film110_report.APERTURE_1_END`).
+  Unexposed frame positions (`ApertureFind.blanks`) consume a number and make
+  no file. When a later pass first sees the strip's front end the roll is
+  renumbered in-process from its stored frames (the old photographs move to
+  `superseded-*/`). The closing text never says "No image numbered" when
+  images were numbered. `--from-frames` and the automatic renumbering are
+  atomic for the roll (staging directory; a stop or an exception changes
+  nothing but one failed record). Shifts are exact on a 0.5 mm grid and the
+  text names the visual target (`targets[].end_on` for a free-end rescue); an
+  impossible free-end rescue says why (`free_end_too_close`). A predicted image before a lone strip's film start
+  (the leader) or past its end (the tail) is dropped and reported as such.
 - Test 104 follow-up (2026-10-23, offline): **the holes are never a gate.**
   The printed border between pictures (a flat, dark ~8 mm gap along
   transport) now locates images independently of the perforation holes

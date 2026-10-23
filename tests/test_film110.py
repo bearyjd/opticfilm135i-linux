@@ -1111,6 +1111,151 @@ def test_frame_locator_with_the_band_hidden_under_rails():
         print(f"test_frame_locator_with_the_band_hidden_under_rails OK ({dpi} dpi)")
 
 
+
+def _blank_fixture(dpi, **kw):
+    """Pictures one and three of a strip with an unexposed (clear film)
+    frame position between them; returns (arr, ppm, lo, hi, imgs, window)."""
+    L = FILM_110.image_mm[0]
+    arr, ppm, lo, hi, imgs = _frame_fixture(dpi, n_images=3, aperture_length_mm=78.0, **kw)
+    window = imgs[1][:2]
+    a = arr.astype(np.float64)
+    l0, l1 = int(round(window[0] * ppm)), int(round(window[1] * ppm))
+    for ci, key in enumerate(CHANNELS):
+        a[l0:l1, lo + int(round(0.6 * ppm)):hi, ci] = 0.98 * CLEAR[key]
+    return np.clip(a, 0, 65535).astype(np.uint16), ppm, lo, hi, [imgs[0], imgs[2]], window
+
+
+def test_blank_window_between_gaps_is_reported_and_is_no_image():
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs, window = _blank_fixture(dpi)
+        find = film110.detect(arr, dpi=dpi)
+        assert find.reason == "", (dpi, find.reason)
+        assert len(find.frames) == 2, (dpi, [(f.line0 / ppm, f.line1 / ppm) for f in find.frames])
+        assert len(find.blanks) == 1, (dpi, find.blanks)
+        b0, b1 = find.blanks[0]
+        assert abs(b0 / ppm - window[0]) <= 0.4 and abs(b1 / ppm - window[1]) <= 0.4, (dpi, b0 / ppm, b1 / ppm, window)
+        assert all(abs(f.line0 / ppm - w[0]) <= 0.3 for f, w in zip(find.frames, imgs))
+        print(f"test_blank_window_between_gaps_is_reported_and_is_no_image OK ({dpi} dpi)")
+
+
+def test_blank_is_not_reported_where_the_film_ends_inside_the_window():
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs, window = _blank_fixture(dpi)
+        a = arr.copy()
+        a[int(round((window[0] + 8.0) * ppm)):, lo:hi, :] = int(AIR)    # the film ends inside the window
+        find = film110.detect(a, dpi=dpi)
+        assert find.blanks == [], (dpi, find.blanks)
+        print(f"test_blank_is_not_reported_where_the_film_ends_inside_the_window OK ({dpi} dpi)")
+
+
+def test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none():
+    for dpi in DPIS:
+        # a clear leader before the first gap, film starting inside the aperture
+        arr, ppm, lo, hi, imgs = _frame_fixture(dpi, n_images=2, first_mm=20.0, aperture_length_mm=70.0)
+        a = arr.copy()
+        a[:int(round(4.0 * ppm)), lo:hi, :] = int(AIR)                    # the film begins at 4 mm
+        for ci, key in enumerate(CHANNELS):
+            a[int(round(4.0 * ppm)):int(round(10.0 * ppm)), lo:hi, ci] = int(0.98 * CLEAR[key])
+        find = film110.detect(a, dpi=dpi)
+        assert find.blanks == [], (dpi, find.blanks)
+        # and a plain strip of pictures reports none either
+        plain = film110.detect(_frame_fixture(dpi, n_images=2)[0], dpi=dpi)
+        assert plain.blanks == []
+        print(f"test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none OK ({dpi} dpi)")
+
+
+
+def test_gap_survives_a_thin_scratch_and_dust():
+    """(a) A 0.05 mm bright line and a few specks across a gap must not
+    shorten it: the gap's ends stay on the real level step."""
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs = _frame_fixture(dpi, n_images=2, aperture_length_mm=52.0)
+        clean = film110.detect(arr, dpi=dpi)
+        g0, g1 = imgs[0][1], imgs[1][0]                 # the gap between the pictures
+        a = arr.astype(np.float64)
+        rim = int(round(0.6 * ppm))
+        marks = [(g0 + 3.2, 0.05), (g0 + 1.1, 0.03), (g0 + 5.6, 0.03), (g0 + 6.5, 0.02)]
+        for pos, height in marks:
+            r0 = int(round(pos * ppm))
+            r1 = max(r0 + 1, int(round((pos + height) * ppm)))
+            for ci, key in enumerate(CHANNELS):
+                a[r0:r1, lo + rim:hi, ci] = 0.9 * CLEAR[key]
+        scratched = np.clip(a, 0, 65535).astype(np.uint16)
+        prof = np.median(scratched[:, lo + int(2.5 * ppm):hi - int(2.5 * ppm), 1].astype(np.float64), axis=1) / AIR
+        gaps = film110._frame_gaps(prof, np.ones(len(prof), dtype=bool), ppm, 17.2, len(prof))
+        assert any(abs(x / ppm - g0) <= 0.4 and abs(y / ppm - g1) <= 0.4 for x, y, _t0, _t1 in gaps), \
+            (dpi, [(x / ppm, y / ppm) for x, y, _a, _b in gaps], g0, g1)
+        find = film110.detect(scratched, dpi=dpi)
+        assert len(find.frames) == len(clean.frames) == 2, (dpi, find.frames)
+        for f, c in zip(find.frames, clean.frames):
+            assert abs(f.line0 - c.line0) <= 0.3 * ppm and abs(f.line1 - c.line1) <= 0.3 * ppm
+        print(f"test_gap_survives_a_thin_scratch_and_dust OK ({dpi} dpi)")
+
+
+def test_blank_frame_is_not_an_image_when_a_prediction_runs_into_the_gap():
+    """(b) A hole predicts a window that starts 1.5 mm inside the gap before
+    a clear (blank) frame. The dark gap lines must not make the clear window
+    look like a picture: it is a blank, never an image."""
+    for dpi in DPIS:
+        arr, ppm, lo, hi, imgs, window = _blank_fixture(dpi)
+        a = arr.copy()
+        lead = FILM_110.perforation_lead_mm
+        he = window[0] - 1.5 - lead
+        hs = he - 2.6
+        rim = int(round(0.6 * ppm))
+        hole_w = int(round(1.5 * ppm))
+        a[int(round(hs * ppm)):int(round(he * ppm)), lo + rim:lo + rim + hole_w, :] = int(AIR)
+        find = film110.detect(a, dpi=dpi)
+        assert all(not (window[0] - 3.0 <= f.line0 / ppm <= window[0] + 3.0) for f in find.frames), \
+            (dpi, [(f.line0 / ppm, f.located_by) for f in find.frames])
+        assert len(find.frames) == 2, (dpi, [(f.line0 / ppm, f.line1 / ppm, f.located_by) for f in find.frames])
+        assert len(find.blanks) == 1 and abs(find.blanks[0][0] / ppm - window[0]) <= 0.6, (dpi, find.blanks)
+        print(f"test_blank_frame_is_not_an_image_when_a_prediction_runs_into_the_gap OK ({dpi} dpi)")
+
+
+
+def test_orientation_is_decided_by_evidence_over_near_duplicate_shots():
+    """Test 106 pass 3: the true slide (22.4 mm) has four distinct new
+    sightings agreeing (0.91-0.96); a competing slide (-3.0 mm, one pitch
+    off) has 0.84, 0.71, 0.10 because the strip holds near-duplicate shots.
+    Best pair 0.96 - 0.84 = 0.12 < ORIENT_MARGIN, yet the evidence (3.75
+    against 1.65) decides. One new sighting alone does not."""
+    old_p = [0.0, 25.5, 51.0, 76.5]
+    new_p = [r + 22.4 for r in old_p]
+    true = {(0, 0): 0.91, (1, 1): 0.93, (2, 2): 0.95, (3, 3): 0.96}
+    other = {(0, 1): 0.84, (1, 2): 0.71, (2, 3): 0.10}
+    table = {**true, **other}
+
+    def stub(item, oitem, kind, film=FILM_110):
+        if kind != "same":
+            return None
+        return table.get((item[3], oitem[4]))
+
+    saved = film110.pair_correlation
+    film110.pair_correlation = stub
+    try:
+        new = [(p, 0.0, 17.2, i) for i, p in enumerate(new_p)]
+        old = [(j + 1, r, 0.0, 17.2, j) for j, r in enumerate(old_p)]
+        dec = film110.decide_orientation(new, old)
+        assert dec is not None and dec["orientation"] == "same", dec
+        assert abs(dec["key"] - 22.4) <= 1.0, dec
+        assert dec["evidence"] - dec["runner_up_evidence"] >= film110.ORIENT_EVIDENCE_MARGIN, dec
+        assert dec["corr"] - dec["other"] < film110.ORIENT_MARGIN, dec     # the old rule would refuse
+        # a member that correlates with nothing adds nothing and vetoes nothing
+        table[(2, 2)] = -0.19
+        dec = film110.decide_orientation(new, old)
+        assert dec is not None and abs(dec["key"] - 22.4) <= 1.0, dec
+        table[(2, 2)] = 0.95
+        # ONE new sighting: 0.96 against 0.84 is still not enough
+        table.clear()
+        table.update({(0, 0): 0.96, (0, 1): 0.84})
+        dec = film110.decide_orientation(new[:1], old)
+        assert dec is None, dec
+    finally:
+        film110.pair_correlation = saved
+    print("test_orientation_is_decided_by_evidence_over_near_duplicate_shots OK")
+
+
 def main() -> int:
     tests = [
         test_whole_and_trailing_split,
@@ -1144,6 +1289,12 @@ def main() -> int:
         test_frame_locator_finds_the_image_after_a_cut_hole,
         test_frame_locator_ignores_sky_and_dense_leader,
         test_frame_locator_with_the_band_hidden_under_rails,
+        test_blank_window_between_gaps_is_reported_and_is_no_image,
+        test_blank_is_not_reported_where_the_film_ends_inside_the_window,
+        test_leader_beyond_the_free_start_is_not_a_blank_and_pictures_have_none,
+        test_gap_survives_a_thin_scratch_and_dust,
+        test_blank_frame_is_not_an_image_when_a_prediction_runs_into_the_gap,
+        test_orientation_is_decided_by_evidence_over_near_duplicate_shots,
     ]
     passed = 0
     for t in tests:

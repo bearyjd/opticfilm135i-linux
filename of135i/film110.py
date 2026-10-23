@@ -85,6 +85,7 @@ LEVEL_NEAR_MM = 0.3             # the inside/outside levels that decide an edge'
 LEVEL_FAR_MM = 1.0              # ... are medians over this band either side of the predicted edge
 LEVEL_MIN_CONTRAST = 0.08       # below this relative level difference nothing is refined (real 110 edges: > 0.6)
 WHOLE_MARGIN_MM = 0.3
+EDGE_CUT_MAX_MM = 0.5            # a near-whole copy hides at most this much under the plastic
 LEADING_CONTINUATION_MM = 1.0
 LEADING_CONTINUATION_FRAC = 0.8
 CLEAR_BASE_PERCENTILE = 99.0
@@ -138,6 +139,15 @@ class FrameFind:
     orientation: str
     col_clamp: "tuple | None" = None   # (lo, hi): the film band minus RAIL_EDGE_INSET_MM; `crop` never pads past it
     located_by: str = "holes"          # "holes" | "frame" (printed border only) | "holes+frame"
+    # Near-whole: not `whole` only because ONE along-transport edge lies within
+    # [-EDGE_CUT_MAX_MM, WHOLE_MARGIN_MM) of the aperture boundary (the other
+    # confirmed): `cut_mm` is how much of the image is hidden under the plastic
+    # (boundary minus predicted edge, >= 0). None = not near-whole. The CLI
+    # delivers such a copy (docs/film-110.md section 15.6).
+    cut_mm: "float | None" = None
+    # Distance (mm) from a free strip end seen in this aperture to this image's
+    # nearest edge, when the end lies within a film pitch of the image.
+    end_gap_mm: "float | None" = None
 
 
 @dataclass
@@ -153,6 +163,10 @@ class ApertureFind:
     reason: str = ""
     rail_hidden_mm: float = 0.0        # film width hidden under a rail (0 = fully visible)
     film_runs: list = field(default_factory=list)   # [(first_line, last_line)] of film present
+    # Unexposed frame positions the frame locator saw: [(line0, line1)] of a
+    # window between printed-border gaps that reads as clear film (plausibility
+    # test failed), lying wholly on film. They consume a number, never a product.
+    blanks: list = field(default_factory=list)
 
 
 # ------------------------------------------------------------- small helpers
@@ -594,7 +608,10 @@ def _candidates(runs, film: Film, px_per_mm: float, reversed_: bool):
 FRAME_LOCATOR_ENABLED = True       # module switch, used only by tests (I-A3)
 FRAME_FLAT_WINDOW_MM = 0.5
 FRAME_FLAT_MAX_STD = 0.003         # (tuned) rolling std / air; real gaps ~0.0003, noise-free fixtures ~0.0005
+FRAME_FLAT_DEV = 0.0015            # a gap is flat when 95 % of a 0.5 mm window lies this close (x air) to its median (real gaps 0.0003, picture grain 0.003)
+FRAME_OUTLIER = 0.01               # a line this far (x air) from the 0.3 mm median is a scratch or speck, not texture
 FRAME_BORDER_MAX_FRAC = 0.16       # a gap reads below this x air
+FRAME_BORDER_BASE_FRAC = 0.5       # a gap reads below this fraction of the aperture's clear film base
 FRAME_BORDER_MIN_FRAC = 0.04       # (tuned) a full gap below this x air (dense leader 0.03) never sets the border level
 FRAME_GAP_MIN_MM = 6.5
 FRAME_GAP_MAX_MM = 9.5
@@ -604,10 +621,15 @@ FRAME_MATCH_MM = 3.0               # (tuned) a frame-located image this close to
 FRAME_MAX_OVERLAP_MM = 2.0         # (tuned) pictures never overlap more than this
 FRAME_WEAK_PARTIAL_MIN_MM = 3.0    # a partial gap in an aperture with no full gap (weaker rule)
 FRAME_WEAK_LEVEL = (0.03, 0.16)
+FRAME_MEDIAN_MM = 0.3              # flatness is judged on the profile median-filtered over this (scratches, dust)
+FRAME_EXTEND_MAX_MM = 2.0          # an accepted gap is extended outward to the level step, at most this far per side
+FRAME_EXTEND_MIN_RUN_MM = 3.0      # only a flat run at least this long is extended (a short flat blob in texture stays short)
+BLANK_END_ZONE_MM = 2.5            # gap lines this close to a window's ends are left out of its clear-film test
+BLANK_EDGE_TOL_MM = 1.0            # a blank window may reach this far past the aperture's lines (clipped)
 
 
 def _frame_gaps(rel: np.ndarray, film_present: np.ndarray, px_per_mm: float,
-                image_len_mm: float, n_lines: int) -> list:
+                image_len_mm: float, n_lines: int, base_rel: "float | None" = None) -> list:
     """The printed-border gaps along transport. `rel` is the band-interior
     profile divided by air. Returns [(start, end, touches_start,
     touches_end)] in line units (end exclusive); a gap that touches the
@@ -615,29 +637,66 @@ def _frame_gaps(rel: np.ndarray, film_present: np.ndarray, px_per_mm: float,
     w = max(2, int(round(FRAME_FLAT_WINDOW_MM * px_per_mm)))
     if n_lines < w + 1:
         return []
-    x = np.where(film_present, rel, 0.0)
-    c1 = np.concatenate(([0.0], np.cumsum(x)))
-    c2 = np.concatenate(([0.0], np.cumsum(x * x)))
+    x_raw = np.where(film_present, rel, 0.0)
+    from numpy.lib.stride_tricks import sliding_window_view
+    fw = max(3, int(round(FRAME_MEDIAN_MM * px_per_mm)) | 1)
+    pad = fw // 2
+    # Levels, steps and the outward extension use the median-filtered profile.
+    x = np.median(sliding_window_view(np.pad(x_raw, (pad, pad), mode="edge"), fw), axis=1)
+    # Flatness: a thin bright scratch or a speck of dust (a NARROW outlier
+    # from the filtered profile) is replaced first; the grain of a picture's
+    # own texture is kept, since it is what tells a picture from the perfectly
+    # flat printed border (real gaps: 0.0003, texture: 0.003 x air). A window
+    # is flat when 95 % of its lines lie within FRAME_FLAT_DEV of its median.
+    clean = np.where(np.abs(x_raw - x) > FRAME_OUTLIER, x, x_raw)
+    win = sliding_window_view(clean, w)
+    med = np.median(win, axis=1)
+    dev = np.percentile(np.abs(win - med[:, None]), 95, axis=1)
     cp = np.concatenate(([0], np.cumsum(film_present.astype(np.int64))))
     starts = np.arange(0, n_lines - w + 1)
-    mean = (c1[starts + w] - c1[starts]) / w
-    var = np.maximum((c2[starts + w] - c2[starts]) / w - mean * mean, 0.0)
-    std = np.sqrt(var)
     all_present = (cp[starts + w] - cp[starts]) == w
-    flat_win = all_present & (std < FRAME_FLAT_MAX_STD) & (mean < FRAME_BORDER_MAX_FRAC)
+    flat_win = (all_present & (dev < FRAME_FLAT_DEV)
+                & (med < FRAME_BORDER_MAX_FRAC))
+    if base_rel:
+        # the printed border is dark against the film's clear base (real
+        # strips 0.1-0.15, fixtures 0.42); a flat stretch at more than half
+        # the base is a picture's smooth region, not a border
+        flat_win &= med < FRAME_BORDER_BASE_FRAC * base_rel
     # a line is flat when any flat window covers it
     diff = np.zeros(n_lines + 1, dtype=np.int64)
     for s in np.flatnonzero(flat_win):
         diff[s] += 1
         diff[s + w] -= 1
     flat_line = np.cumsum(diff[:n_lines]) > 0
+    # Two constant levels side by side (a gap against a picture's flat half)
+    # would join into one flat run: cut the runs at every level step. (The
+    # step used to be marked by the camera-gate halo, which the median
+    # filter removes.)
+    h = max(1, w // 2)
+    idx = np.arange(n_lines)
+    left, right = x[np.clip(idx - h, 0, n_lines - 1)], x[np.clip(idx + h, 0, n_lines - 1)]
+    flat_line &= ~(np.abs(right - left) > np.maximum(FRAME_LEVEL_TOL * np.minimum(left, right), 0.004))
     cands = []
+    ext_max = int(round(FRAME_EXTEND_MAX_MM * px_per_mm))
     for (s, e) in _true_runs(flat_line):
+        # Extend the run outward while the filtered level stays within the
+        # tolerance of the run's own level: the gap's ends then land on the
+        # real level step, also where a scratch or dust cut the flat run short.
+        lvl = float(np.median(x[s:e + 1]))
+        s0, e0 = s, e
+        if lvl > 0 and (e - s + 1) >= FRAME_EXTEND_MIN_RUN_MM * px_per_mm:
+            while (s0 > s - ext_max and s0 > 0 and bool(film_present[s0 - 1])
+                   and abs(x[s0 - 1] - lvl) <= FRAME_LEVEL_TOL * lvl):
+                s0 -= 1
+            while (e0 < e + ext_max and e0 + 1 < n_lines and bool(film_present[e0 + 1])
+                   and abs(x[e0 + 1] - lvl) <= FRAME_LEVEL_TOL * lvl):
+                e0 += 1
+        s, e = s0, e0
         g0, g1 = float(s), float(e + 1)
         touch0 = s == 0 or not bool(film_present[s - 1])
         touch1 = e + 1 >= n_lines or not bool(film_present[e + 1])
         length = (g1 - g0) / px_per_mm
-        level = float(np.median(rel[s:e + 1]))
+        level = float(np.median(x[s:e + 1]))
         cands.append((g0, g1, touch0, touch1, length, level))
     full = [c for c in cands if not c[2] and not c[3]
             and FRAME_GAP_MIN_MM <= c[4] <= FRAME_GAP_MAX_MM]
@@ -774,6 +833,18 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
     rim_guard = RIM_GUARD_MM * px_per_mm
     rail_guard = RAIL_GUARD_MM * px_per_mm
 
+    # The printed-border gaps of this aperture (frame locator). Their lines
+    # are not picture: a window's clear-film test leaves them out, so a window
+    # that runs a little into a gap (a prediction 1 mm off) still reads as the
+    # clear frame it is, and is never taken for a picture because of the dark
+    # gap lines in it.
+    gaps = (_frame_gaps(interior_profile / air, film_present, px_per_mm,
+                        film.image_mm[0], n_lines, clear_base / air)
+            if FRAME_LOCATOR_ENABLED else [])
+    gap_mask = np.zeros(n_lines, dtype=bool)
+    for (g0, g1, _t0, _t1) in gaps:
+        gap_mask[max(0, int(np.floor(g0))):min(n_lines, int(np.ceil(g1)))] = True
+
     def _refine_candidate(line0, line1, perforation_line, orientation, lateral):
         """Plausibility, along-transport refinement, lateral prediction and
         refinement and whole/split classification of ONE predicted image,
@@ -793,15 +864,26 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
         # the aperture holds little clear film to estimate the base
         # from (a fogged leader plus one image, 2026-09-19 aperture 1).
         trim = int(round(PLAUSIBILITY_TRIM_MM * px_per_mm))
-        if chi - clo > 4 * trim:
-            seg = interior_profile[clo + trim:chi - trim]
+        if chi - clo > 3 * trim:
+            a_i, b_i = clo + trim, chi - trim
         else:
-            seg = interior_profile[clo:chi]
+            a_i, b_i = clo, chi
+        seg = interior_profile[a_i:b_i]
+        # Only gap lines near the window's ENDS are left out (where a
+        # prediction a millimetre or two off runs into a gap); a flat run
+        # inside the picture is the picture's own.
+        zone = int(round(BLANK_END_ZONE_MM * px_per_mm))
+        lines = np.arange(a_i, b_i)
+        near_end = (lines < clo + zone) | (lines >= chi - zone)
+        kept = seg[~(gap_mask[a_i:b_i] & near_end) & film_present[a_i:b_i]]
+        if kept.size >= min_overlap_px and float(film_present[clo:chi].mean()) >= 0.9:
+            # (a window that reaches off the film -- a leader ghost -- is judged as before)
+            seg = kept
         seg_mean = float(np.mean(seg))
         seg_std = float(np.std(seg))
         if (seg_mean >= IMAGE_DENSITY_FRAC * clear_base
                 and seg_std < IMAGE_VARIATION_FRAC * max(seg_mean, 1.0)):
-            return None, 0
+            return None, -1        # reads as clear film (a blank, for the frame locator)
 
         r_line0, ok_l0 = _refine_edge(interior_profile, line0, px_per_mm, outward=-1)
         r_line1, ok_l1 = _refine_edge(interior_profile, line1, px_per_mm, outward=+1)
@@ -875,13 +957,27 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
         else:
             split = None
 
+        # Near-whole: one edge within the cut tolerance of the boundary, the
+        # other inside and confirmed by the data.
+        cut_mm = None
+        cut_px = EDGE_CUT_MAX_MM * px_per_mm
+        if (not whole and split == "leading" and r_line0 >= -cut_px
+                and r_line1 <= n_lines - whole_margin_px and ok_l1):
+            cut_mm = max(0.0, -r_line0) / px_per_mm
+        elif (not whole and split == "trailing" and r_line1 <= n_lines + cut_px
+                and r_line0 >= whole_margin_px and ok_l0):
+            cut_mm = max(0.0, r_line1 - n_lines) / px_per_mm
+
         free_end_near = False
-        for fend in (film_line_start, film_line_end):
+        end_gap_mm = None
+        for fend, is_start in ((film_line_start, True), (film_line_end, False)):
             if fend is None:
                 continue
             if abs(r_line0 - fend) <= pitch_px or abs(r_line1 - fend) <= pitch_px:
                 free_end_near = True
-                break
+                gap = ((r_line0 - fend) if is_start else (fend - r_line1)) / px_per_mm
+                if gap >= -EDGE_CUT_MAX_MM and (end_gap_mm is None or gap < end_gap_mm):
+                    end_gap_mm = max(0.0, gap)
 
         size_mm = ((r_line1 - r_line0) / px_per_mm, (r_col1 - r_col0) / px_per_mm)
         return FrameFind(
@@ -895,6 +991,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
             size_mm=size_mm,
             orientation=orientation,
             col_clamp=col_clamp,
+            cut_mm=cut_mm, end_gap_mm=end_gap_mm,
         ), score
 
     # d. Perforations: resolve the perforated edge and its hole runs. The
@@ -946,6 +1043,8 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
                       else "no perforation found in the film band")
 
     frames_out: list = []
+    hole_clear: list = []
+    blanks_out: list = []
     lateral_known = None
     if runs:
         perforated_edge_col = lo if edge_is_low else hi
@@ -956,6 +1055,7 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
             lead/trail assignment; returns (frames, score) where score is
             the number of along-transport edges the data confirmed."""
             out = []
+            clear = []
             score = 0
             for (line0, line1, perforation_line) in _candidates(runs, film, px_per_mm, reversed_):
                 fr, sc = _refine_candidate(
@@ -963,25 +1063,28 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
                     "hole-before-image" if not reversed_ else "hole-after-image",
                     lateral_known)
                 if fr is None:
+                    if sc < 0:
+                        clear.append((line0, line1))     # a clear frame, not a picture
                     continue
                 score += sc
                 fr.index = len(out) + 1
                 out.append(fr)
-            return out, score
+            return out, score, clear
 
         # The strip may be inserted either way round; the two assignments of
         # lead/trail differ by ~1 mm, more than the refinement window, so the
         # data decides: the assignment whose predicted along-transport edges
         # the profile confirms more often wins; a tie keeps the normal one.
-        frames_normal, score_normal = _evaluate(False)
-        frames_rev, score_rev = _evaluate(True)
-        frames_out = frames_rev if score_rev > score_normal else frames_normal
+        frames_normal, score_normal, clear_normal = _evaluate(False)
+        frames_rev, score_rev, clear_rev = _evaluate(True)
+        if score_rev > score_normal:
+            frames_out, hole_clear = frames_rev, clear_rev
+        else:
+            frames_out, hole_clear = frames_normal, clear_normal
 
     # e. The frame locator (independent of the holes): the printed border
     # between two pictures reads as a flat, dark gap along transport.
     if FRAME_LOCATOR_ENABLED:
-        gaps = _frame_gaps(interior_profile / air, film_present, px_per_mm,
-                           film.image_mm[0], n_lines)
         img_px = film.image_mm[0] * px_per_mm
         preds = []
         for (g0, g1, touch0, touch1) in gaps:
@@ -1002,10 +1105,13 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
         match_px = FRAME_MATCH_MM * px_per_mm
         overlap_px = FRAME_MAX_OVERLAP_MM * px_per_mm
         found = []
+        blank_windows = list(hole_clear)
         for (line0, line1) in merged:
             fr, sc = _refine_candidate(line0, line1, None, "unknown", lateral_known)
             if fr is not None:
                 found.append((sc, fr))
+            elif sc < 0:
+                blank_windows.append((line0, line1))
         found.sort(key=lambda t: (-t[0], t[1].line0))   # the better-confirmed first
         added = []
         for _sc, fr in found:
@@ -1026,11 +1132,37 @@ def detect(image, *, dpi: float, film: Film = FILM_110) -> ApertureFind:
             frames_out = sorted(frames_out + added, key=lambda f: f.line0)
             for i, f in enumerate(frames_out):
                 f.index = i + 1
-    if frames_out:
+        # Blank frame positions: a window the gaps predict that is clear film,
+        # lying wholly on film (the clear leader beyond a free film end is not
+        # one: that window reaches lines without film) and not on top of an
+        # image that was found.
+        edge_px = BLANK_EDGE_TOL_MM * px_per_mm
+        for (b0, b1) in sorted(blank_windows):
+            # A window predicted by a hole may begin inside a gap (or end in
+            # one): the clear frame starts where the gap ends.
+            for (g0, g1, _t0, _t1) in gaps:
+                if g0 <= b0 < g1:
+                    b0, b1 = g1, g1 + img_px
+                    break
+                if g0 < b1 <= g1:
+                    b0, b1 = g0 - img_px, g0
+                    break
+            if b0 < -edge_px or b1 > n_lines + edge_px:
+                continue
+            b0, b1 = max(0.0, b0), min(float(n_lines), b1)
+            i0, i1 = int(np.ceil(b0)), int(np.floor(b1))
+            if i1 <= i0 or not bool(film_present[i0:i1].all()):
+                continue
+            if any(min(b1, o.line1) - max(b0, o.line0) > overlap_px for o in frames_out):
+                continue
+            if any(min(b1, e1) - max(b0, e0) > 0.5 * (b1 - b0) for (e0, e1) in blanks_out):
+                continue
+            blanks_out.append((float(b0), float(b1)))
+    if frames_out or blanks_out:
         reason = ""
     return ApertureFind(False, (lo, hi), film_line_start, film_line_end,
                          leading_continuation, frames_out, reason, rail_hidden_mm,
-                         film_runs=film_runs_out)
+                         film_runs=film_runs_out, blanks=blanks_out)
 
 
 def product_bounds(find: FrameFind, *, dpi: float | None = None, pad_mm: float = 0.0,
@@ -1297,7 +1429,11 @@ THUMB_INSET = 0.12              # fraction of each side cut off before binning: 
                                 # are the same on every image and would make any
                                 # two images correlate; only the picture decides
 ORIENT_MIN_CORR = 0.5           # the winning hypothesis' mean correlation at least ...
-ORIENT_MARGIN = 0.15            # ... and this far above the other one
+ORIENT_MARGIN = 0.15            # ... and this far above the other one, OR
+ORIENT_EVIDENCE_MARGIN = 1.0    # ... its evidence (the sum over DISTINCT new sightings of each one's
+                                # best correlation in the cluster) this far above the runner-up's: a strip
+                                # of near-duplicate shots (Test 106: 0.96 against 0.84) is decided by how
+                                # many different pictures agree, not by one pair
 END_AGREE_MM = 3.0              # a slide must agree with a free film end seen in both runs
 RANGE_SLACK_MM = 3.0            # a hypothesis may put a recorded image this far outside the
                                 # slot's range (edge refinement and the wall's exact place:
@@ -1428,26 +1564,29 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
     must still lie inside it after the move -- and by the strip's own
     free end when one was seen in both runs (`end_shift` = its move, mm:
     a slide must agree with it within END_AGREE_MM; a turn is not
-    checked against it). Among the clusters left, the best -- most pairs
-    with a usable correlation, then best correlation -- wins when its
-    best pair is at least ORIENT_MIN_CORR and ORIENT_MARGIN above every
-    other remaining cluster's best pair, of either kind. No window on the shift: a move of
+    checked against it). Among the clusters left, the best -- most
+    evidence (the sum over distinct new sightings of each one's best
+    correlation in the cluster), then most usable pairs, then best
+    correlation -- wins when its best pair is at least ORIENT_MIN_CORR
+    and either ORIENT_MARGIN above every other remaining cluster's best
+    pair, of either kind, or ORIENT_EVIDENCE_MARGIN above the best
+    rival's evidence. No window on the shift: a move of
     more than half a pitch, or of whole apertures, is told from a smaller
     one by the pictures (and the free end), which positions alone cannot
     do -- the film is periodic. Returns {"orientation": "same"|"turned",
     "key": mm, "corr": r, "other": r, "pairs": n} or None when no two
     sightings overlap or the pictures do not decide it. Pure."""
     slide, turned = [], []
-    for item in new:
+    for ni, item in enumerate(new):
         p = item[0]
         for oitem in old:
             r = oitem[1]
             c = pair_correlation(item, oitem, "same", film)
             if c is not None:
-                slide.append((p - r, c))
+                slide.append((p - r, c, ni))
             c = pair_correlation(item, oitem, "turned", film)
             if c is not None:
-                turned.append((p + r, c))
+                turned.append((p + r, c, ni))
     if not slide and not turned:
         return None
     length = film.image_mm[0]
@@ -1468,9 +1607,9 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
     tol = SHIFT_AGREE_MM / 2
     clusters = []
     for kind, pairs in (("same", slide), ("turned", turned)):
-        for key0, _c in pairs:
-            members = [(k, c) for k, c in pairs if abs(k - key0) <= tol]
-            keys = sorted(k for k, _c in members)
+        for key0, _c, _i in pairs:
+            members = [(k, c, i) for k, c, i in pairs if abs(k - key0) <= tol]
+            keys = sorted(k for k, _c, _i in members)
             key = keys[len(keys) // 2]
             if not possible(kind, key):
                 continue
@@ -1478,20 +1617,29 @@ def decide_orientation(new, old, film: Film = FILM_110, *,
             # a few millimetres of flat overlap correlates with nothing,
             # and must not drag down the cluster its geometry puts it in
             # (Test 104, load 2: 0.84 and -0.19 in the true cluster).
-            best = max(c for _k, c in members)
-            good = sum(1 for _k, c in members if c >= ORIENT_MIN_CORR)
-            clusters.append(((good, best), kind, key, best, len(members)))
+            best = max(c for _k, c, _i in members)
+            good = sum(1 for _k, c, _i in members if c >= ORIENT_MIN_CORR)
+            # Evidence: each DISTINCT new sighting counts once, by its best
+            # correlation in the cluster; a member that correlates with
+            # nothing adds nothing (never subtracts).
+            per_new: dict = {}
+            for _k, c, i in members:
+                per_new[i] = max(per_new.get(i, 0.0), c)
+            evidence = sum(max(0.0, v) for v in per_new.values())
+            clusters.append(((evidence, good, best), kind, key, best, len(members), evidence))
     if not clusters:
         return None
     clusters.sort(key=lambda x: x[0], reverse=True)
-    _score, kind, key, best, n = clusters[0]
-    others = [c[3] for c in clusters[1:]
-              if c[1] != kind or abs(c[2] - key) > tol]
-    other = max(others) if others else -1.0
-    if best < ORIENT_MIN_CORR or best - other < ORIENT_MARGIN:
+    _score, kind, key, best, n, evidence = clusters[0]
+    rivals = [c for c in clusters[1:] if c[1] != kind or abs(c[2] - key) > tol]
+    other = max((c[3] for c in rivals), default=-1.0)
+    runner_up = max((c[5] for c in rivals), default=0.0)
+    if best < ORIENT_MIN_CORR:
+        return None
+    if best - other < ORIENT_MARGIN and evidence - runner_up < ORIENT_EVIDENCE_MARGIN:
         return None
     return {"orientation": kind, "key": key, "corr": best, "other": other,
-            "pairs": n}
+            "pairs": n, "evidence": evidence, "runner_up_evidence": runner_up}
 
 
 def slot_position_range(slot: int = 1, strips: int = 1, film: Film = FILM_110,
