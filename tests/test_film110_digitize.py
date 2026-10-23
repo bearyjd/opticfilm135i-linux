@@ -179,7 +179,19 @@ def test_run_a_infers_placement_numbers_and_advises():
         assert adv["missing"] == [2] and adv["free_end"] == [4], adv
         assert adv["images"] == [2, 4] and adv["other_placement"] == "B", adv
         assert "image 2" in adv["suggest"] and "image 4" in adv["suggest"], adv["suggest"]
-        assert "further in" in adv["suggest"], adv["suggest"]
+        assert "towards aperture" in adv["suggest"] and adv["suggest"].startswith("Next pass:"), adv["suggest"]
+        nxt = adv["next"]
+        assert nxt and set(nxt) >= {"shift_mm", "direction", "images", "rescues", "targets",
+                                    "remaining", "another_pass_after"}, nxt
+        assert nxt["images"] * 4 == int(nxt["images"] * 4), nxt     # quarters
+        assert rec["number_basis"] in ("strip_start", "provisional")
+        assert [r["number"] for r in rec["pass_report"]] == [1, 2, 3, 4], rec["pass_report"]
+        assert rec["pass_report"][1]["where"] == {"kind": "bar", "index": 1}, rec["pass_report"]
+        assert rec["pass_report"][1]["state"] == "split"
+        assert rec["pass_report"][3]["state"] == "whole_free_end"
+        assert rec["pass_report"][0]["state"] == "whole_supported" and \
+            rec["pass_report"][0]["outcome"] == "new"
+        assert out.count("Holder: apertures 1-6") == 1 and "bar 1" in out and "Delivered after this pass" in out
         names = _names(d)
         for n in (1, 3, 4):
             assert f"image{n}.tiff" in names and f"image{n}-ir.tiff" in names, names
@@ -603,8 +615,10 @@ def test_three_passes_have_their_own_prefixes_and_old_advice_keys():
             assert {"p1-f1.tiff", "p2-f1.tiff", "p3-f1.tiff"} <= set(names), names
             for rec in (rec2, rec3):
                 adv = rec["advice"]
+                # the old keys stay for one release; the holder-language ones are new
                 assert set(adv) == {"missing", "free_end", "suggest", "done",
-                                    "images", "other_placement"}, adv
+                                    "images", "other_placement", "unseen", "next",
+                                    "not_done", "frame_positions"}, adv
                 assert adv["done"] is (not adv["missing"] and not adv["free_end"])
                 assert adv["images"] == sorted(set(adv["missing"]) | set(adv["free_end"]))
             assert rec3["advice"]["missing"] == [] and rec3["advice"]["free_end"] == []

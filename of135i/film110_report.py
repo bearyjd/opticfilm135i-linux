@@ -26,6 +26,7 @@ APERTURE_1_END = "the holder end that enters the scanner first"
 
 N_APERTURES = STRIP.frames
 SUGGEST_MARGIN_MM = 2.0            # a rescued image keeps this far from both aperture edges
+SUGGEST_COMFORT_MM = 5.0           # margins above this count as equal when two placements are compared (else a 50 mm move beats a 15 mm one for 1 mm more margin)
 SUGGEST_RANGE_MM = 60.0
 SUGGEST_STEP_MM = 0.5
 FRONT_TOLERANCE_MM = 1.0           # = film110.FILM_START_TOLERANCE_MM: a frame position may begin this far before the strip's end
@@ -281,12 +282,14 @@ def _inside_limits(points, shift, lo, hi) -> bool:
     return True
 
 
-def plan_next_pass(windows: dict, needed: dict, ends: list,
-                   end_beyond: dict, now: dict) -> "dict | None":
+def plan_next_pass(known: dict, needed: dict, ends: list,
+                   end_beyond: dict, now: dict, extra: dict = None) -> "dict | None":
     """ONE placement for the next pass, in holder mm (slides the whole strip).
 
-    windows    {number: start_mm} of every frame position the strip is known to
+    known      {number: start_mm} of every frame position the strip is known to
                hold (measured in this pass, or on the film grid through one);
+    extra      {number: start_mm} of needed positions never seen (grid only;
+               they do not limit the shift);
     needed     {number: kind} the positions still to be delivered, kind in
                "split" | "free_end" | "unseen";
     ends       strip ends seen in this pass (mm);
@@ -303,8 +306,10 @@ def plan_next_pass(windows: dict, needed: dict, ends: list,
         return None
     L = FILM_110.image_mm[0]
     lo, hi = holder_limits()
+    windows = dict(extra or {})
+    windows.update(known)
     points = []
-    for p in windows.values():
+    for p in known.values():
         points += [p, p + L]
     points += list(ends)
     plastic = [(a, b) for _k, _i, a, b in plastic_spans()]
@@ -338,7 +343,7 @@ def plan_next_pass(windows: dict, needed: dict, ends: list,
             targets.append({"number": n, "aperture": hit[0]})
         if not rescued:
             continue
-        key = (len(rescued), min(margins), -abs(s))
+        key = (len(rescued), min(min(margins), SUGGEST_COMFORT_MM), -abs(s))
         if best is None or key > best[0]:
             best = (key, s, rescued, targets)
     if best is None:

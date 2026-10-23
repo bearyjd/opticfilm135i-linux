@@ -501,6 +501,17 @@ class Film110State:
         self.film_end_mm: "float | None" = None
         self.next_strip_start_mm: "float | None" = None   # slot 1: strip 2's start seen in its last aperture
         self.finalized = False
+        # Frame-position numbering from the strip's front end (docs/film-110.md
+        # §15). `blanks` = unexposed frame positions seen this pass (never a
+        # product); `number_shift` is added to the protocol numbers of a pass
+        # that numbers without a reference (pass 1): decided from the front
+        # end when it is in view (`shift_decided`), or handed in by a rebuild
+        # that already knows it (`shift_forced`).
+        self.blanks: list = []
+        self.number_shift = 0
+        self.shift_decided = False
+        self.shift_forced = False
+        self.anchored_before = False       # an earlier pass already saw the front end
 
 
 def _film110_ref_entries(ref: dict) -> list:
@@ -585,15 +596,21 @@ def _film110_filter_frames(args: argparse.Namespace, state: Film110State,
                                "hole: no strip lies there (strip end / gap), "
                                "ignored"})
             continue
-        if (anchored and find.film_line_start is not None
+        if ((anchored or not two) and find.film_line_start is not None
                 and fr.line0 < find.film_line_start
                 - film110.FILM_START_TOLERANCE_MM * px_per_mm):
             # The film begins inside this aperture and the predicted image
             # starts before it: the first hole of the strip predicted an
             # image BEFORE itself (strip 1's end / the gap), which cannot
-            # exist. Without this the ghost would become the anchor.
-            out.append({"msg": "image predicted before the strip's film begins "
-                               "(strip end / gap before it): no image, ignored"})
+            # exist. Without this the ghost would become the anchor. On a
+            # lone strip it is the clear leader (a leading split whose lines
+            # before the film are air and after it clear leader): reported
+            # as the leader, not as a problem.
+            out.append({"msg": ("image predicted before the strip's film begins "
+                                "(strip end / gap before it): no image, ignored")
+                        if two else
+                        "the strip's leader lies here (the film begins inside "
+                        "this aperture): not an image, ignored"})
             continue
         if fr.split == "leading" and not fr.refined.get("line1"):
             # Every hole predicts BOTH its neighbours, so the strip's
@@ -649,7 +666,7 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
     if find.empty:
         print(f"110: aperture {aperture} — empty")
         return
-    if not find.frames:
+    if not find.frames and not getattr(find, "blanks", None):
         print(f"110: aperture {aperture} — {find.reason or 'no images predicted'}")
         return
 
@@ -716,6 +733,9 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
         it["patch"] = None
         items.append(it)
 
+    for (b0, b1) in getattr(find, "blanks", None) or []:
+        items.append({"blank": (float(b0), float(b1))})
+
     if state.ref is not None:
         # A later pass: hold the whole images (copies: a view would keep
         # the whole aperture alive) until the slot is complete.
@@ -740,6 +760,65 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
               f"image from the previous aperture")
 
 
+def _film110_apply_front_shift(state: Film110State, n: int, g: float) -> int:
+    """Protocol number -> frame-position number counted from the strip's
+    front end (docs/film-110.md §15). Only a pass that numbers by the
+    protocol (no reference) and a lone strip use it. The shift is decided
+    once, from the first sighting of the pass, when the strip's front end is
+    already in view (the low holder end of pass 1, whose apertures arrive in
+    order): number 1 is the first frame position whose window lies on the
+    film. Without a visible front end the numbers stay provisional (shift 0).
+    A rebuild that already knows the shift has set `shift_forced`."""
+    from . import film110_report as rep
+    if state.strips != 1:
+        return n
+    if not state.shift_decided:
+        state.shift_decided = True
+        if state.film_start_mm is not None and not state.shift_forced:
+            front, _rear = rep.strip_bounds([(n, g)], (state.film_start_mm, None), False)
+            if front is not None:
+                state.number_shift = 1 - int(front)
+    return n + state.number_shift
+
+
+def _film110_number_blank(args: argparse.Namespace, state: Film110State,
+                          aperture: int, window: tuple, parts: list) -> None:
+    """Number an unexposed frame position (ApertureFind.blanks) like an image
+    would be, record it in `state.blanks` and say so in `parts`. It consumes
+    a number but never makes a product. A blank that cannot be numbered
+    (placement undecided, off the grid, two-strip slot 2) is skipped."""
+    from . import film110
+    if state.strips == 2 and state.slot == 2:
+        return
+    g = film110.global_position_mm(aperture, window[0], args.dpi)
+    nm = state.numbering
+    if nm is not None:
+        if nm["kind"] == "turned":
+            n, residual = film110.number_turned(g, nm["key"], nm["entries"],
+                                                direction=nm["direction"])
+        else:
+            n, residual = film110.number_by_shift(g, nm["key"], nm["entries"],
+                                                  direction=nm["direction"])
+        if abs(residual) > film110.SHIFT_RESIDUAL_MM:
+            return
+    else:
+        if state.placement is None:
+            inferred, _res = film110.infer_placement(aperture, window[0], args.dpi)
+            if inferred is None:
+                return
+            state.placement, state.placement_source = inferred, "inferred"
+        n, residual = film110.image_number(aperture, window[0], args.dpi, state.placement)
+        if abs(residual) > film110.PLACEMENT_PHASE_TOLERANCE_MM or n < 1:
+            return
+        n = _film110_apply_front_shift(state, n, g)
+    if any(b["number"] == n for b in state.blanks) or any(e["number"] == n for e in state.images):
+        return
+    state.blanks.append({"number": n, "aperture": aperture, "position_mm": round(float(g), 2),
+                         "located_by": "frame"})
+    parts.append(f"frame position {n} is blank (clear film between two printed "
+                 f"borders): consumes a number, no file")
+
+
 def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
                              aperture: int, parts: list, items: list,
                              emit) -> None:
@@ -753,6 +832,9 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
     nm = state.numbering
     px_per_mm = args.dpi / film110.MM_PER_INCH
     for it in items:
+        if "blank" in it:
+            _film110_number_blank(args, state, aperture, it["blank"], parts)
+            continue
         if "fr" not in it:
             parts.append(it["msg"])
             continue
@@ -855,6 +937,7 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
                 parts.append(note + msg)
                 state.problems.append(msg)
                 continue
+            n = _film110_apply_front_shift(state, n, g)
 
         if fr.split == "leading" and any(e["number"] == n for e in state.images):
             # The tail of the image the previous aperture numbered as a
@@ -1709,23 +1792,84 @@ def _film110_suggest(state: Film110State, prior: list, missing: list,
     return label + "; ".join(texts)
 
 
+def _film110_now_text(n: int, report: list, windows: dict, unseen: set) -> str:
+    """Where image `n` lies now, for the next-pass sentence."""
+    from . import film110_report as rep
+    if n in unseen:
+        return "not seen so far"
+    for r in report:
+        if r["number"] == n:
+            if r["state"] == "split":
+                return "now split by " + rep.where_text(r["where"])
+            if r["state"] == "whole_free_end":
+                return "now whole, with the strip end free"
+    w = rep.locate_window(windows[n]) if n in windows else None
+    if w is not None and w["kind"] != "aperture":
+        return "now split by " + rep.where_text(w)
+    return "now in " + (rep.where_text(w) if w else "the holder")
+
+
+def _film110_plan(state: Film110State, report: list, missing: list, free_end: list,
+                  unseen: list, seen_all: set, sight: list, turned: bool):
+    """advice.next for a lone strip: the joint placement (film110_report.
+    plan_next_pass) over the positions this pass measured, carried over the
+    film grid to the frame positions it did not see."""
+    from . import film110, film110_report as rep
+    if not sight:
+        return None
+    measured = dict(sight)
+    L = film110.FILM_110.image_mm[0]
+
+    def window(n):
+        if n in measured:
+            return measured[n]
+        ref = min(sight, key=lambda t: abs(t[0] - n))
+        return rep.window_of(n, ref, turned)
+
+    known = {n: window(n) for n in seen_all}
+    extra = {n: window(n) for n in unseen}
+    ends = [e for e in (state.film_start_mm, state.film_end_mm) if e is not None]
+    end_beyond = {}
+    for n in free_end:
+        p = known.get(n)
+        if p is None:
+            continue
+        for e in ends:
+            if (0 <= p - e < film110.FILM_110.pitch_mm) or (0 <= e - (p + L) < film110.FILM_110.pitch_mm):
+                end_beyond[n] = e
+                break
+    needed = {n: "split" for n in missing}
+    needed.update({n: "free_end" for n in free_end})
+    needed.update({n: "unseen" for n in unseen})
+    windows = dict(extra)
+    windows.update(known)
+    now = {n: _film110_now_text(n, report, windows, set(unseen)) for n in needed if n in windows}
+    return rep.plan_next_pass(known, needed, ends, end_beyond, now, extra)
+
+
 def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                          prior: "list | None" = None) -> None:
     """Write the 110 fields of a digitize roll record: the pass, the
     placement label ("A"/"B"/"free"/null), whether it was given, the
     strip's orientation relative to pass 1, one `images` entry per
-    numbered image, the refusals, and `advice` over the WHOLE roll (the
-    records before this run plus this run):
+    numbered image, the refusals, the pass report in holder language
+    (`pass_report`, `blanks`, `number_basis`) and `advice` over the WHOLE
+    roll (the records before this run plus this run):
 
-        {"missing": [n], "free_end": [n], "suggest": "<text>",
-         "images": sorted(missing + free_end), "other_placement": ...}
+        {"missing": [n], "free_end": [n], "unseen": [n], "suggest": "<text>",
+         "next": {...} | null, "not_done": [{"reason", "numbers"}],
+         "done": bool, "images": sorted(missing + free_end),
+         "other_placement": ...}
 
     `missing` = numbers seen only split and never delivered; `free_end` =
     numbers whose delivered copy is one with the strip end free (the sag
-    rule, docs/film-110.md §4); `images` and `other_placement` are the
-    older keys kept for the application ("A"/"B" swapped, null when the
-    placement is "free" or undecided)."""
-    from . import digitize
+    rule, docs/film-110.md §4); `unseen` = frame positions between the
+    strip's ends that no pass has seen; `next` = the ONE joint placement
+    for the next pass (docs/film-110.md §15); `images` and
+    `other_placement` are the older keys kept for the application ("A"/"B"
+    swapped, null when the placement is "free" or undecided). `done` never
+    refuses a run; it is information."""
+    from . import digitize, film110, film110_report as rep
     record["film"] = "110"
     record["pass"] = state.pass_index
     record["placement"] = state.placement
@@ -1733,6 +1877,8 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
     record["orientation"] = state.orientation
     record["numbering"] = state.numbering_basis
     record["images"] = state.images
+    record["blanks"] = [dict(b) for b in state.blanks]
+    record["pass_report"] = rep.build_pass_report(state.images, state.blanks)
     record["problems"] = list(state.problems)
     # The strip's own ends, when seen (global mm): a later pass pins its
     # move on them, and the advice reads whether an end can reach plastic.
@@ -1755,35 +1901,126 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
             free_end.append(n)
     other = (None if state.placement in (None, "free") else
              "B" if state.placement == "A" else "A")
-    # `done`: what digitize.roll_is_done will say once this record is
-    # appended -- at least one image numbered in some pass, nothing
-    # missing, nothing with the strip end free, AND no room for an image
-    # the driver has never seen: each end of the strip must have been
-    # seen in some pass, unless the strip's outermost image on that side
-    # lies within a film pitch of the holder's end wall (then the end is
-    # under the wall and nothing can lie beyond it). Test 104, load 2:
-    # strip 2's first photograph was covered by strip 1's cassette end in
-    # pass 1, the roll was declared done with three of four delivered.
-    done = bool(numbers) and not missing and not free_end
-    if done:
-        from . import film110
-        pitch = film110.FILM_110.pitch_mm
-        length = film110.FILM_110.image_mm[0]
-        holder_end = 6 * film110.STRIP.pitch_mm
+    unseen: list = []
+    nxt = None
+    not_done: list = []
+    positions_total: list = list(numbers)
+    positions_have: list = [n for n in numbers if n not in missing]
+    if state.strips == 1:
+        # Numbers count frame positions from the strip's front end
+        # (docs/film-110.md §15): "strip_start" once any pass has seen it.
+        turned = state.orientation == "turned"
+        sight = [(e["number"], float(e["position_mm"])) for e in state.images
+                 if e.get("number") is not None and e.get("position_mm") is not None
+                 and not e.get("uncertain")]
+        sight += [(b["number"], float(b["position_mm"])) for b in state.blanks]
+        front, rear = rep.strip_bounds(sight, (state.film_start_mm, state.film_end_mm), turned)
+        anchored_prior = any(r.get("number_basis") == "strip_start" for r in prior)
+        basis = "strip_start" if (anchored_prior or front is not None) else "provisional"
+        record["number_basis"] = basis
+        if front is not None and not anchored_prior and front != 1:
+            record["anchor_shift"] = 1 - int(front)
+        if rear is not None:
+            record["rear_number"] = int(rear)
+        rear_n = int(rear) if rear is not None else next(
+            (r["rear_number"] for r in reversed(prior) if r.get("rear_number") is not None), None)
+        blank_nums = ({b["number"] for r in prior for b in r.get("blanks") or []}
+                      | {b["number"] for b in state.blanks})
+        seen_all = set(numbers) | blank_nums
+        universe: list = []
+        if seen_all:
+            lo = 1 if basis == "strip_start" else min(seen_all)
+            hi = max(seen_all | ({rear_n} if rear_n is not None else set()))
+            universe = list(range(lo, hi + 1))
+            for m in universe:
+                if m in seen_all:
+                    continue
+                if not (Path(rdir) / f"image{m}.tiff").exists():
+                    unseen.append(m)
+        positions_total = [m for m in universe if m not in blank_nums]
+        positions_have = [m for m in positions_total
+                          if digitize.delivered_image(records, roll, prefix, m) is not None
+                          or (Path(rdir) / f"image{m}.tiff").exists()]
+        done = bool(numbers) and not missing and not free_end and not unseen
         positions = [e["position_mm"] for r in records for e in r.get("images") or []
                      if e.get("position_mm") is not None]
-        start_seen = any(r.get("film_start_mm") is not None for r in records) \
-            or state.film_start_mm is not None
-        end_seen = any(r.get("film_end_mm") is not None for r in records) \
-            or state.film_end_mm is not None
-        left_wall = (state.strips != 2 or state.slot == 1)
-        right_wall = (state.strips != 2 or state.slot == 2)
-        if positions:
-            at_left = left_wall and min(positions) <= pitch
-            at_right = right_wall and max(positions) + length >= holder_end - pitch
-            done = (start_seen or at_left) and (end_seen or at_right)
+        at_left = bool(positions) and min(positions) <= film110.FILM_110.pitch_mm
+        at_right = bool(positions) and (max(positions) + film110.FILM_110.image_mm[0]
+                                        >= 6 * film110.STRIP.pitch_mm - film110.FILM_110.pitch_mm)
+        if done:
+            # An end wall hides what lies beyond it: a strip whose outermost
+            # image lies within a film pitch of the holder's end needs no
+            # sighting of that end (Test 104). A front end never seen leaves
+            # the numbers provisional.
+            done = (basis == "strip_start" or at_left) and (rear_n is not None or at_right)
+        if not done:
+            if not numbers:
+                not_done.append({"reason": "no_image", "numbers": []})
+            else:
+                if basis != "strip_start" and not at_left:
+                    not_done.append({"reason": "front_end_not_seen", "numbers": []})
+                if rear_n is None and not at_right:
+                    not_done.append({"reason": "rear_end_not_seen", "numbers": []})
+                if missing:
+                    not_done.append({"reason": "seen_only_split", "numbers": list(missing)})
+                if free_end:
+                    not_done.append({"reason": "strip_end_free", "numbers": list(free_end)})
+                if unseen:
+                    not_done.append({"reason": "not_seen", "numbers": list(unseen)})
+        nxt = _film110_plan(state, record["pass_report"], missing, free_end, unseen,
+                            seen_all, sight, turned)
+        if nxt is not None:
+            suggest = nxt["text"]
+        elif not numbers:
+            suggest = ("no image found: check that the film lies in the apertures "
+                       "and that its printed borders and the edge with the small "
+                       "holes are visible, then seat the strip again and run the "
+                       "roll again")
+        elif missing or free_end or unseen:
+            wanted = sorted(set(missing) | set(free_end) | set(unseen))
+            suggest = ("no placement of the strip brings "
+                       + ", ".join(f"image {n}" for n in wanted)
+                       + " into an aperture without losing another: accept the "
+                         "copies delivered, or stop")
+        else:
+            suggest = "nothing missing; every delivered image is supported"
+    else:
+        suggest = _film110_suggest(state, prior, missing, free_end)
+        # `done`: what digitize.roll_is_done will say once this record is
+        # appended -- at least one image numbered in some pass, nothing
+        # missing, nothing with the strip end free, AND no room for an image
+        # the driver has never seen: each end of the strip must have been
+        # seen in some pass, unless the strip's outermost image on that side
+        # lies within a film pitch of the holder's end wall (then the end is
+        # under the wall and nothing can lie beyond it). Test 104, load 2:
+        # strip 2's first photograph was covered by strip 1's cassette end in
+        # pass 1, the roll was declared done with three of four delivered.
+        done = bool(numbers) and not missing and not free_end
+        if done:
+            pitch = film110.FILM_110.pitch_mm
+            length = film110.FILM_110.image_mm[0]
+            holder_end = 6 * film110.STRIP.pitch_mm
+            positions = [e["position_mm"] for r in records for e in r.get("images") or []
+                         if e.get("position_mm") is not None]
+            start_seen = any(r.get("film_start_mm") is not None for r in records) \
+                or state.film_start_mm is not None
+            end_seen = any(r.get("film_end_mm") is not None for r in records) \
+                or state.film_end_mm is not None
+            left_wall = (state.strips != 2 or state.slot == 1)
+            right_wall = (state.strips != 2 or state.slot == 2)
+            if positions:
+                at_left = left_wall and min(positions) <= pitch
+                at_right = right_wall and max(positions) + length >= holder_end - pitch
+                done = (start_seen or at_left) and (end_seen or at_right)
     record["advice"] = {"missing": missing, "free_end": free_end,
-                        "suggest": _film110_suggest(state, prior, missing, free_end),
+                        "unseen": unseen,
+                        "suggest": suggest,
+                        "next": ({k: v for k, v in nxt.items() if k != "text"}
+                                 if nxt else None),
+                        "not_done": not_done,
+                        "frame_positions": {"delivered": len(positions_have),
+                                            "of": len(positions_total),
+                                            "needed": sorted(set(positions_total) - set(positions_have))},
                         "done": done,
                         "images": sorted(set(missing) | set(free_end)),
                         "other_placement": other}
@@ -1859,21 +2096,67 @@ def _film110_feed_aperture(args: argparse.Namespace, state: Film110State,
                               irr if args.ir else None, emit)
 
 
+_NOT_DONE_TEXT = {
+    "no_image": "no image was found",
+    "front_end_not_seen": "the strip's front end has not been seen: seat it so that "
+                          "its first frame lies in aperture 1",
+    "rear_end_not_seen": "the strip's rear end has not been seen: seat it so that "
+                         "its last frame lies inside an aperture",
+}
+
+
+def _film110_not_done_text(adv: dict) -> str:
+    """The reasons a roll is not done, from advice.not_done."""
+    bits = []
+    for item in adv.get("not_done") or []:
+        r, nums = item["reason"], item.get("numbers") or []
+        lst = ", ".join(f"image {n}" for n in nums)
+        if r in _NOT_DONE_TEXT:
+            bits.append(_NOT_DONE_TEXT[r])
+        elif r == "seen_only_split":
+            bits.append(f"{lst} seen only split by a bar")
+        elif r == "strip_end_free":
+            bits.append(f"{lst} delivered with the strip end free")
+        elif r == "not_seen":
+            bits.append("frame position " + ", ".join(str(n) for n in nums)
+                        + " between the strip's ends has not been seen")
+    return "; ".join(bits)
+
+
 def _film110_print_roll_summary(roll: int, state: Film110State, per_frame: list,
-                                rdir, adv: dict, note: str = "") -> None:
-    """The closing line of a single-strip 110 run (live or rebuilt)."""
+                                rdir, adv: dict, note: str = "",
+                                record: "dict | None" = None) -> None:
+    """The closing report of a single-strip 110 run (live or rebuilt): the
+    convention legend, the pass report in holder language, what has been
+    delivered, and either "done" or why not plus the ONE next placement
+    (docs/film-110.md section 15)."""
+    from . import film110_report as rep
     pl = state.placement or "undecided"
-    if adv["images"]:
-        nxt = (f"Missing {adv['missing']}, strip end free {adv['free_end']}. "
-               f"Suggestion: {adv['suggest']}. Re-seat the strip (slide "
-               f"or turn it) and run 'of135i digitize --film 110 "
-               f"--roll {roll}' again, or stop here.")
-    elif adv.get("done"):
-        nxt = (f"Nothing missing, nothing with the strip end free. "
-               f"Next strip: roll {roll + 1}.")
+    record = record or {}
+    report = record.get("pass_report") or []
+    print(rep.legend())
+    head = f"Pass {state.pass_index} report"
+    if record.get("number_basis") == "provisional":
+        head += (" (the numbers are provisional: they count from the strip's "
+                 "front end once it has been seen)")
+    print(head + ":")
+    for ln in rep.format_pass_report(report):
+        print(ln)
+    if not report:
+        print("  no frame position found in this pass")
+    fp = adv.get("frame_positions")
+    if fp:
+        need = ", ".join(f"image {n}" for n in fp["needed"])
+        print(f"Delivered after this pass: {fp['delivered']} of {fp['of']} frame "
+              f"positions" + (f"; still needed: {need}" if need else "") + ".")
+    if adv.get("done"):
+        nxt = (f"Every frame position between the strip's ends is accounted for "
+               f"(delivered or blank). Next strip: roll {roll + 1}.")
     else:
-        nxt = (f"No image numbered. {adv['suggest']}; run "
-               f"'of135i digitize --film 110 --roll {roll}' again.")
+        why = _film110_not_done_text(adv)
+        nxt = ((f"Not done: {why}. " if why else "")
+               + f"{adv['suggest']}. Re-seat the strip (slide or turn it) and "
+                 f"run 'of135i digitize --film 110 --roll {roll}' again, or stop here.")
     word = "done" if adv.get("done") else "scanned, not done"
     print(f"roll {roll} {word} (110, placement {pl}): {len(per_frame)} "
           f"frames, {sum(1 for e in state.images if e['main'])} "
@@ -1984,6 +2267,42 @@ def _digitize_from_frames(args: argparse.Namespace) -> int:
                       f"in {rdir}; nothing to rebuild from")
 
     # ---- validated: from here on files move and records are written.
+    # A rebuild may have to run twice: when the strip's front end is first
+    # seen in a pass after the first, the numbers of the passes before it
+    # were provisional; the replay then restarts with the shift that makes
+    # the first frame position number 1 (docs/film-110.md section 15). The
+    # restart moves the first attempt's products to a superseded directory
+    # of its own; nothing is deleted.
+    shift = int(getattr(args, "_anchor_shift", 0) or 0)
+    attempt = 0
+    while True:
+        attempt += 1
+        rc, last, restart = _rebuild_attempt(args, roll, rdir, plan, recs[0], dpi, ir,
+                                             shift, attempt == 1 and not shift)
+        if restart is None:
+            break
+        shift = restart
+        print(f"=== the strip's front end is first seen in a later pass: "
+              f"renumbering roll {roll} from pass 1 (shift {shift:+d}) ===")
+    if rc != 0 or last is None:
+        return rc
+    state, record, per_frame = last
+    _film110_print_roll_summary(roll, state, per_frame, rdir, record["advice"],
+                                record=record)
+    return 0
+
+
+def _rebuild_attempt(args, roll, rdir, plan, default_rec, dpi, ir, shift, may_restart):
+    """One replay of the stored passes (see `_digitize_from_frames`).
+    Returns (rc, last, restart_shift): `restart_shift` is not None when a
+    pass reported that the front end was first seen there and the replay
+    must start over with that shift (only when `may_restart`)."""
+    import numpy as _np
+    import tifffile
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from . import digitize
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     print(f"=== rebuild roll {roll} from stored frames -> {rdir} "
           f"(passes {', '.join(str(k) for k, _r, _f in plan)}) ===")
@@ -1994,7 +2313,6 @@ def _digitize_from_frames(args: argparse.Namespace) -> int:
 
     prior: list = []                    # the rebuilt records so far (a new epoch)
     last = None                         # (state, record, per_frame)
-    default_rec = recs[0]
     for k, rec, frames in plan:
         src = rec or default_rec
         rotate = int(src.get("rotate") or 0)
@@ -2006,6 +2324,8 @@ def _digitize_from_frames(args: argparse.Namespace) -> int:
                      and rec.get("placement") in ("A", "B") else
                      getattr(args, "placement", None))
         state = Film110State(placement, slot=1, strips=1)
+        if shift:
+            state.number_shift, state.shift_decided, state.shift_forced = shift, True, True
         _film110_set_pass(state, k, prior)
         emit = _film110_digitize_emit(pargs, state, roll)
         started = datetime.now(timezone.utc).isoformat()
@@ -2047,6 +2367,8 @@ def _digitize_from_frames(args: argparse.Namespace) -> int:
             record["forced"] = True        # a new epoch: only the rebuild counts
         _film110_fill_record(record, state, rdir, prior)
         ok = not state.aborted
+        if ok and may_restart and record.get("anchor_shift"):
+            return 0, last, int(record["anchor_shift"])
         record.update(per_frame=per_frame, finished_utc=now,
                       status="ok" if ok else "failed",
                       stage=None if ok else "rebuild",
@@ -2058,13 +2380,10 @@ def _digitize_from_frames(args: argparse.Namespace) -> int:
             print(f"rebuild pass {k}: STOPPED -- {state.aborted}. Passes "
                   f"{[p for p, _r, _f in plan if p < k]} are rebuilt; this "
                   f"pass wrote no photograph.", file=sys.stderr)
-            return 5
+            return 5, last, None
         prior.append(record)
         last = (state, record, per_frame)
-
-    state, record, per_frame = last
-    _film110_print_roll_summary(roll, state, per_frame, rdir, record["advice"])
-    return 0
+    return 0, last, None
 
 
 def _cmd_digitize(args: argparse.Namespace) -> int:
@@ -2419,6 +2738,27 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                   file=sys.stderr)
 
     c0 = ctxs[0]
+    if (film110 and strips == 1 and rc == 0 and c0.record.get("status") == "ok"
+            and c0.record.get("anchor_shift")):
+        # The strip's front end was seen for the first time in this pass, so
+        # the numbers of the passes before it were provisional. The scanner
+        # is ejected and idle: replay the roll from its stored frames (no
+        # hardware, nothing deleted -- the old photographs go to superseded-*/)
+        # so that every record and product carries its final number.
+        print(f"The strip's front end is in view for the first time: renumbering "
+              f"roll {roll} from its stored frames (no scanning; the earlier "
+              f"photographs are moved to superseded-*/, not deleted).")
+        rargs = SimpleNamespace(**vars(args))
+        rargs.from_frames, rargs.roll = True, roll
+        rargs._anchor_shift = int(c0.record["anchor_shift"])
+        rrc = _digitize_from_frames(rargs)
+        if rrc != 0:
+            print(f"warning: the automatic renumbering of roll {roll} stopped "
+                  f"(exit {rrc}); the pass itself is recorded. Run 'of135i "
+                  f"digitize --film 110 --roll {roll} --from-frames' again once "
+                  f"the cause is clear; earlier photographs are in "
+                  f"superseded-*/.", file=sys.stderr)
+        return rrc
     if rc == 0:
         subs = [pf["frame"] for c in ctxs for pf in c.per_frame
                 if pf.get("dark_b_substituted")]
@@ -2427,7 +2767,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             _film110_print_pair_summary(args, ctxs, note)
         elif film110:
             _film110_print_roll_summary(roll, c0.state, c0.per_frame, c0.rdir,
-                                        c0.record["advice"], note)
+                                        c0.record["advice"], note, c0.record)
         else:
             print(f"roll {roll} done: {len(c0.per_frame)} frames -> {c0.rdir}{note}. "
                   f"Next: insert the next strip and run 'of135i digitize' again "
