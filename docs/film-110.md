@@ -863,10 +863,13 @@ touches USB):
    dpi, ir, rotate, no-clean and the placement label come from the stored
    records, never from the command line; flags that only steer hardware
    (`--park`, `--assume-loaded`, ...) are ignored.
-2. Before anything is written the roll's `image*.tiff` files (including
-   `-ir` and `-uncertain`) are **moved**, not deleted, into
-   `roll-NNN/superseded-<UTC yyyymmddThhmmssZ>/`. The `p<k>` frame files,
-   overscan files and diag sidecars are never touched.
+2. **The replay is atomic for the roll.** Products are written into a
+   staging directory inside the roll directory (`.rebuild-<UTC>/`) and the
+   records are collected in memory. Only when every pass succeeded are the
+   roll's current `image*.tiff` files (including `-ir` and `-uncertain`)
+   **moved**, not deleted, into `roll-NNN/superseded-<UTC yyyymmddThhmmssZ>/`,
+   the staged products moved into place and the records appended. The
+   `p<k>` frame files, overscan files and diag sidecars are never touched.
 3. Each replayed pass appends a manifest record like a live pass plus
    `"source": "frames"`, `"from_pass": k`, `"rebuilt_utc"`; the first one
    carries `"forced": true`, so it starts a new epoch (`roll_is_done`,
@@ -879,10 +882,13 @@ Exit codes: 0 ok; 2 refused before anything was touched (not `--film 110`,
 no `--roll`, `--strips 2` — a two-strip rebuild is not supported in this
 version —, no 110 records, no stored frame file, records that disagree on
 dpi or ir); 5 when a pass cannot be recognised against the rebuilt
-earlier ones: that pass writes no photograph, its record (status `failed`,
-`images` empty, `stop_reason`) is appended, the rebuild stops, and the
-earlier passes' products and records stay.
-
+earlier ones. On exit 5, and on any exception (a full disk, say), **nothing
+of the roll changes**: its photographs stay where they are and its current
+epoch is unchanged. ONE record is appended — `status: "failed"`,
+`source: "frames"`, `stop_reason`, `staging_dir` — which starts no epoch,
+owns no pass (`film110_next_pass`, `roll_is_done` and the numbering
+reference ignore it); the message names the staging directory, which is
+kept for inspection.
 
 ## 15. The pass report in holder language, one next placement, numbers from the strip's front end (2026-10-23, offline)
 
@@ -952,12 +958,27 @@ rescued images, then the largest minimum margin, then the smallest move.
 `advice.suggest` keeps this text for one release; the older keys (`images`,
 `other_placement`, `missing`, `free_end`, `done`) stay for one release.
 
-Two choices the specification left open: (1) the search is judged **at the
-quarter-image value the instruction names** (the operator has no ruler, and a
-rescue that holds only at an exact millimetre — a strip end on a 2 mm bar —
-would not survive "about 13 mm"); (2) margins above 5 mm count as equal when
-two placements are compared (otherwise a 50 mm move beats a 15 mm one for one
-more millimetre of margin). The suggestion is **content-agnostic geometry**
+`shift_mm` is the exact value found on the 0.5 mm grid. The operator places
+by the **visual target**, not by millimetres: the text gives the amount only
+as "about" (quarter images and mm) and always names what to look at — for a
+split image "so that image 2 … lies in the middle of aperture 2", for a
+free-end rescue the plastic the strip's end must rest on ("… and the strip's
+end rests on bar 3", or "… with the strip's end against the end wall at
+aperture 1"; machine-readable as `targets[].end_on`: `"bar N"` / `"end wall
+at aperture N"`). Margins above 5 mm count as equal when two placements are
+compared (otherwise a 50 mm move beats a 15 mm one for one more millimetre
+of margin).
+
+**When nothing can be rescued** `next` is null and `advice.not_done` carries
+the reason, derived from the geometry: `free_end_too_close` (the image lies
+nearer the strip's end than a bar is wide — about 2 mm — so no placement keeps
+it whole with the end resting on plastic: accept the free-end copy, or stop),
+`free_end_unmeasured` (the end beyond the image was never seen) or
+`no_placement` (no placement within the holder brings it whole into one
+aperture). Delivered images are never "lost" by a move; they may merely be
+split by it, and another pass can re-deliver them.
+
+The suggestion is **content-agnostic geometry**
 over positions the driver already identified by content; it never numbers or
 identifies anything (that stays with `decide_orientation`). Positions of
 images the pass did not see are carried over the film grid from the nearest

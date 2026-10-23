@@ -1483,9 +1483,36 @@ def test_rebuild_refusals_touch_nothing():
     print("test_rebuild_refusals_touch_nothing OK")
 
 
+def _snapshot(d):
+    rd = digitize.roll_dir(d, "", 1)
+    return ({n: (rd / n).read_bytes() for n in _products(d)},
+            digitize.roll_records_current(d, 1),
+            sorted(p.name for p in rd.iterdir() if p.name.startswith("superseded-")),
+            digitize.film110_next_pass(d, "", 1), digitize.roll_is_done(d, 1))
+
+
+def _assert_untouched_after_failed_rebuild(d, before, rc, err):
+    rd = digitize.roll_dir(d, "", 1)
+    files, recs, sup, nxt, done = before
+    assert rc != 0, rc
+    assert {n: (rd / n).read_bytes() for n in _products(d)} == files, "products changed"
+    cur = digitize.roll_records_current(d, 1)
+    failed = [r for r in cur[len(recs):]]
+    assert cur[:len(recs)] == recs and len(failed) == 1, (len(cur), len(recs))
+    f = failed[0]
+    assert f["status"] == "failed" and f["source"] == "frames" and f["stop_reason"], f
+    assert not f.get("forced") and f["images"] == [], f
+    assert sorted(p.name for p in rd.iterdir() if p.name.startswith("superseded-")) == sup
+    staging = Path(f["staging_dir"])
+    assert staging.is_dir() and staging.name in err, (staging, err[-300:])
+    assert digitize.film110_next_pass(d, "", 1) == nxt
+    assert digitize.roll_is_done(d, 1) == done
+
+
 def test_rebuild_stops_at_a_pass_it_cannot_recognise():
-    """I-B6: pass 2 shows other pictures -> exit 5, pass 1's products stay,
-    the stopped pass writes no photograph and its record claims no image."""
+    """I-B6, atomic: pass 2 shows other pictures -> exit 5; the roll's
+    photographs and current epoch are untouched, ONE failed record (no new
+    epoch) says why, the staging directory is kept."""
     with _content():
         with tempfile.TemporaryDirectory() as d:
             rc, rec1, *_ = _run(d, _holder_apertures(_starts_for(3.5), None))
@@ -1493,16 +1520,40 @@ def test_rebuild_stops_at_a_pass_it_cannot_recognise():
             other = _strip_spec(_starts(3.5 + 6.4, 4), "lo", ids=[5, 6, 7, 8])
             rc, rec2, *_ = _run(d, _holder_apertures(other, None))
             assert rc == 5
+            before = _snapshot(d)
             rc, out, err = _rebuild(d)
-            assert rc == 5 and "STOPPED" in err and "pass 2" in err, (rc, err[-400:])
-            recs = digitize.roll_records_current(d, 1)
-            assert [r["from_pass"] for r in recs] == [1, 2], recs
-            assert recs[0]["status"] == "ok" and recs[0]["images"], recs[0]
-            assert recs[1]["status"] == "failed" and recs[1]["images"] == []
-            products = _products(d)
-            assert {1, 3, 4} <= {int(n[5:].split(".")[0].split("-")[0]) for n in products}
-            assert digitize.film110_next_pass(d, "", 1) == 3
+            assert rc == 5 and "stopped" in err and "pass 2" in err, (rc, err[-400:])
+            _assert_untouched_after_failed_rebuild(d, before, rc, err)
+            assert before[3] == 3
     print("test_rebuild_stops_at_a_pass_it_cannot_recognise OK")
+
+
+def test_rebuild_with_an_exception_mid_write_changes_nothing():
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            _three_pass_roll(d)
+            before = _snapshot(d)
+            orig = cli._write_image
+            calls = {"n": 0}
+
+            def flaky(*a, **k):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise OSError("disk full (test)")
+                return orig(*a, **k)
+
+            cli._write_image = flaky
+            try:
+                rc, out, err = _rebuild(d)
+            finally:
+                cli._write_image = orig
+            assert calls["n"] >= 2
+            assert "disk full (test)" in err, err[-300:]
+            _assert_untouched_after_failed_rebuild(d, before, rc, err)
+            # a clean rebuild afterwards still works and leaves no staging behind
+            rc, out, err = _rebuild(d)
+            assert rc == 0, (rc, err[-300:])
+    print("test_rebuild_with_an_exception_mid_write_changes_nothing OK")
 
 
 def test_frame_located_image_reaches_the_manifest():
@@ -1708,6 +1759,7 @@ def main() -> int:
         test_rebuild_after_rotate_90_gives_identical_products,
         test_rebuild_refusals_touch_nothing,
         test_rebuild_stops_at_a_pass_it_cannot_recognise,
+        test_rebuild_with_an_exception_mid_write_changes_nothing,
         test_frame_located_image_reaches_the_manifest,
         test_leader_before_the_films_start_is_not_an_image_or_a_problem,
         test_report_fields_text_and_the_joint_suggestion,

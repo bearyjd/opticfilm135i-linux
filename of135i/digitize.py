@@ -291,8 +291,10 @@ def film110_next_pass(out_dir: str, prefix: str, roll: int) -> int:
     """Index of the next pass on this roll: one past the roll's 110 records
     since the last forced redo, and one past the highest p<k> frame tag on
     disk (a crash between scanning and recording still owns its pass)."""
+    # A failed rebuild leaves one record that owns no pass.
     recs = [r for r in roll_records_current(out_dir, roll, prefix)
-            if r.get("film") == "110"]
+            if r.get("film") == "110"
+            and not (r.get("source") == "frames" and r.get("status") == "failed")]
     nxt = len(recs) + 1
     for tag in film110_placements_on_disk(roll_dir(out_dir, prefix, roll)):
         if tag[0] == "p" and tag[1:].isdigit():

@@ -22,7 +22,11 @@ one exists; "offline" means implemented and tested without the scanner.
   no file. When a later pass first sees the strip's front end the roll is
   renumbered in-process from its stored frames (the old photographs move to
   `superseded-*/`). The closing text never says "No image numbered" when
-  images were numbered. A predicted image before a lone strip's film start
+  images were numbered. `--from-frames` and the automatic renumbering are
+  atomic for the roll (staging directory; a stop or an exception changes
+  nothing but one failed record). Shifts are exact on a 0.5 mm grid and the
+  text names the visual target (`targets[].end_on` for a free-end rescue); an
+  impossible free-end rescue says why (`free_end_too_close`). A predicted image before a lone strip's film start
   (the leader) or past its end (the tail) is dropped and reported as such.
 - Test 104 follow-up (2026-10-23, offline): **the holes are never a gate.**
   The printed border between pictures (a flat, dark ~8 mm gap along

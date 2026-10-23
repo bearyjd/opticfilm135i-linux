@@ -31,6 +31,7 @@ import errno
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -1642,7 +1643,8 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
 
 
 def _film110_digitize_emit(args: argparse.Namespace, state: Film110State,
-                           roll: int):
+                           roll: int, stage: "Path | None" = None,
+                           records_fn=None):
     """The photograph writer `digitize --film 110` hands to
     `_film110_number_aperture`: <roll_dir>/image<N>.tiff (+ image<N>-ir.tiff
     with --ir), N = strip position, oriented like pass 1's products (a
@@ -1662,13 +1664,18 @@ def _film110_digitize_emit(args: argparse.Namespace, state: Film110State,
                                                uncertain=uncertain)
         ir_path = digitize.film110_image_path(args.out, args.prefix, roll, n, ir=True,
                                               uncertain=uncertain)
+        if stage is not None:
+            # A rebuild writes into its staging directory only; the roll
+            # directory is touched when every pass has succeeded.
+            vis_path, ir_path = Path(stage) / vis_path.name, Path(stage) / ir_path.name
         replaced = False
         if uncertain and vis_path.exists():
             return {"kept": True,
                     "message": f"image {n}: {vis_path.name} exists -> kept"}
         if vis_path.exists():
             # state.images[-1] is the entry being written right now.
-            records = digitize.roll_records_current(args.out, roll, args.prefix)
+            records = (list(records_fn()) if records_fn is not None else
+                       digitize.roll_records_current(args.out, roll, args.prefix))
             records.append({"images": state.images[:-1]})
             prev = digitize.delivered_image(records, roll, args.prefix, n)
             if (prev is not None and prev.get("free_end_near")
@@ -2344,50 +2351,90 @@ def _digitize_from_frames(args: argparse.Namespace) -> int:
         return refuse(f"roll {roll} has no stored frame files (p<k>-f<N>.tiff) "
                       f"in {rdir}; nothing to rebuild from")
 
-    # ---- validated: from here on files move and records are written.
-    # A rebuild may have to run twice: when the strip's front end is first
-    # seen in a pass after the first, the numbers of the passes before it
-    # were provisional; the replay then restarts with the shift that makes
-    # the first frame position number 1 (docs/film-110.md section 15). The
-    # restart moves the first attempt's products to a superseded directory
-    # of its own; nothing is deleted.
+    # ---- validated. The replay is ATOMIC for the roll: products are written
+    # into a staging directory inside the roll directory and the records are
+    # collected in memory. Only when every pass succeeded are the current
+    # photographs moved to superseded-<stamp>/, the staged ones moved into
+    # place and the records appended. A stop (exit 5) or an exception leaves
+    # the roll's photographs and its current epoch untouched; ONE failed
+    # record (no new epoch, no pass of its own) says why, and the staging
+    # directory is kept for inspection.
+    #
+    # A rebuild may also have to run twice: when the strip's front end is
+    # first seen in a pass after the first, the numbers of the passes before
+    # it were provisional; the replay then restarts with the shift that makes
+    # the first frame position number 1 (docs/film-110.md section 15).
+    from datetime import datetime, timezone
     shift = int(getattr(args, "_anchor_shift", 0) or 0)
     attempt = 0
     while True:
         attempt += 1
-        rc, last, restart = _rebuild_attempt(args, roll, rdir, plan, recs[0], dpi, ir,
-                                             shift, attempt == 1 and not shift)
-        if restart is None:
-            break
-        shift = restart
-        print(f"=== the strip's front end is first seen in a later pass: "
-              f"renumbering roll {roll} from pass 1 (shift {shift:+d}) ===")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stage = rdir / f".rebuild-{stamp}" if attempt == 1 else rdir / f".rebuild-{stamp}-{attempt}"
+        n = 1
+        while stage.exists():
+            n += 1
+            stage = rdir / f".rebuild-{stamp}-{attempt}-{n}"
+        try:
+            rc, last, restart, records, why = _rebuild_attempt(
+                args, roll, rdir, plan, recs[0], dpi, ir, shift,
+                attempt == 1 and not shift, stage)
+        except Exception as e:
+            rc, last, restart, records = 1, None, None, []
+            why = f"{type(e).__name__}: {e}"
+        if restart is not None:
+            shutil.rmtree(stage, ignore_errors=True)    # our own scratch, nothing of the roll's
+            shift = restart
+            print(f"=== the strip's front end is first seen in a later pass: "
+                  f"renumbering roll {roll} from pass 1 (shift {shift:+d}) ===")
+            continue
+        break
     if rc != 0 or last is None:
-        return rc
+        now = datetime.now(timezone.utc).isoformat()
+        digitize.append_manifest(args.out, {
+            "roll": roll, "prefix": args.prefix, "dir": str(rdir), "film": "110",
+            "dpi": dpi, "ir": ir, "status": "failed", "stage": "rebuild",
+            "source": "frames", "stop_reason": why, "images": [],
+            "staging_dir": str(stage), "rebuilt_utc": now, "finished_utc": now})
+        print(f"error: the rebuild of roll {roll} stopped: {why}. The roll's "
+              f"photographs and records are unchanged; the partial result is in "
+              f"{stage} (kept for inspection).", file=sys.stderr)
+        return rc or 1
+    # Commit: nothing below can be undone by a failure above.
+    dest, moved = _film110_move_products(rdir, stamp)
+    if moved:
+        print(f"moved {len(moved)} existing photograph file(s) to {dest.name}/ "
+              f"(nothing is deleted)")
+    for f in sorted(stage.iterdir()):
+        os.replace(f, rdir / f.name)
+    try:
+        stage.rmdir()
+    except OSError:
+        pass
+    for record in records:
+        digitize.append_manifest(args.out, record)
     state, record, per_frame = last
     _film110_print_roll_summary(roll, state, per_frame, rdir, record["advice"],
                                 record=record)
     return 0
 
 
-def _rebuild_attempt(args, roll, rdir, plan, default_rec, dpi, ir, shift, may_restart):
-    """One replay of the stored passes (see `_digitize_from_frames`).
-    Returns (rc, last, restart_shift): `restart_shift` is not None when a
-    pass reported that the front end was first seen there and the replay
-    must start over with that shift (only when `may_restart`)."""
+def _rebuild_attempt(args, roll, rdir, plan, default_rec, dpi, ir, shift, may_restart, stage):
+    """One replay of the stored passes into `stage` (see
+    `_digitize_from_frames`). Writes nothing in the roll directory and
+    appends nothing to the manifest. Returns (rc, last, restart_shift,
+    records, why): `restart_shift` is not None when a pass reported that the
+    front end was first seen there and the replay must start over with that
+    shift (only when `may_restart`); `why` says what stopped it (rc 5)."""
     import numpy as _np
     import tifffile
     from datetime import datetime, timezone
     from types import SimpleNamespace
     from . import digitize
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     print(f"=== rebuild roll {roll} from stored frames -> {rdir} "
-          f"(passes {', '.join(str(k) for k, _r, _f in plan)}) ===")
-    dest, moved = _film110_move_products(rdir, stamp)
-    if moved:
-        print(f"moved {len(moved)} existing photograph file(s) to {dest.name}/ "
-              f"(nothing is deleted)")
+          f"(passes {', '.join(str(k) for k, _r, _f in plan)}; staging in {stage.name}) ===")
+    stage.mkdir()
 
     prior: list = []                    # the rebuilt records so far (a new epoch)
     last = None                         # (state, record, per_frame)
@@ -2405,7 +2452,8 @@ def _rebuild_attempt(args, roll, rdir, plan, default_rec, dpi, ir, shift, may_re
         if shift:
             state.number_shift, state.shift_decided, state.shift_forced = shift, True, True
         _film110_set_pass(state, k, prior)
-        emit = _film110_digitize_emit(pargs, state, roll)
+        emit = _film110_digitize_emit(pargs, state, roll, stage=stage,
+                                      records_fn=lambda: list(prior))
         started = datetime.now(timezone.utc).isoformat()
         per_frame = []
         out = _LinePrefixer(sys.stdout, f"rebuild pass {k}: ")
@@ -2443,25 +2491,18 @@ def _rebuild_attempt(args, roll, rdir, plan, default_rec, dpi, ir, shift, may_re
                   "frames": frames, "no_clean": pargs.no_clean, "rotate": rotate}
         if not prior:
             record["forced"] = True        # a new epoch: only the rebuild counts
-        _film110_fill_record(record, state, rdir, prior)
-        ok = not state.aborted
-        if ok and may_restart and record.get("anchor_shift"):
-            return 0, last, int(record["anchor_shift"])
-        record.update(per_frame=per_frame, finished_utc=now,
-                      status="ok" if ok else "failed",
-                      stage=None if ok else "rebuild",
+        _film110_fill_record(record, state, stage, prior)
+        if state.aborted:
+            return 5, last, None, prior, (
+                f"pass {k} cannot be recognised: {state.aborted} (passes "
+                f"{[p for p, _r, _f in plan if p < k]} replayed fine)")
+        if may_restart and record.get("anchor_shift"):
+            return 0, last, int(record["anchor_shift"]), prior, None
+        record.update(per_frame=per_frame, finished_utc=now, status="ok", stage=None,
                       source="frames", from_pass=k, rebuilt_utc=now)
-        if not ok:
-            record["stop_reason"] = state.aborted
-        digitize.append_manifest(args.out, record)
-        if not ok:
-            print(f"rebuild pass {k}: STOPPED -- {state.aborted}. Passes "
-                  f"{[p for p, _r, _f in plan if p < k]} are rebuilt; this "
-                  f"pass wrote no photograph.", file=sys.stderr)
-            return 5, last, None
         prior.append(record)
         last = (state, record, per_frame)
-    return 0, last, None
+    return 0, last, None, prior, None
 
 
 def _cmd_digitize(args: argparse.Namespace) -> int:
