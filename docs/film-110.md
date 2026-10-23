@@ -774,8 +774,9 @@ measured recommendation ("image 2: move 5.7 mm further in", "image 4: no
 seating puts the strip end under plastic"), advice not a requirement; the
 old `advice.images` / `other_placement` keys stay one release for the
 application. Exit codes
-are unchanged (0, 2 refused before hardware, 4 coverage, 5 numbering could
-not be established — nothing written, the frame files kept).
+(0, 2 refused before hardware, 4 coverage, 5 numbering could not be
+established): **exit 5 means "the whole photographs were written UNNUMBERED,
+numbering not established", not "nothing was written"** (§15.9).
 
 **Numbering from pass 2: recognise, never guess.** Pass 1 numbers as §5/§12.
 Every later pass holds its sightings until the slot's last aperture and
@@ -793,7 +794,9 @@ agree on *d* (or *c*) form a hypothesis; what is physically possible (every
 recorded image must still lie in the slot after the move) and the strip's
 own free end, when seen in both passes (`film_start_mm` / `film_end_mm`),
 prune the hypotheses; the best remaining one wins only with a mean
-correlation of at least 0.5 and 0.15 above every other. Otherwise exit 5.
+correlation of at least 0.5 and 0.15 above every other (or enough
+evidence, §15.8). Otherwise exit 5: the pass's whole images are written
+unnumbered (§15.9).
 Test 103 measured 0.74–0.96 for the same photograph against at most 0.52
 for different ones. A sighting predicted before the roll's first image
 that is not whole is the leader (ignored); a *whole* image there is a
@@ -881,14 +884,15 @@ touches USB):
 Exit codes: 0 ok; 2 refused before anything was touched (not `--film 110`,
 no `--roll`, `--strips 2` — a two-strip rebuild is not supported in this
 version —, no 110 records, no stored frame file, records that disagree on
-dpi or ir); 5 when a pass cannot be recognised against the rebuilt
-earlier ones. On exit 5, and on any exception (a full disk, say), **nothing
-of the roll changes**: its photographs stay where they are and its current
-epoch is unchanged. ONE record is appended — `status: "failed"`,
-`source: "frames"`, `stop_reason`, `staging_dir` — which starts no epoch,
-owns no pass (`film110_next_pass`, `roll_is_done` and the numbering
-reference ignore it); the message names the staging directory, which is
-kept for inspection.
+dpi or ir); 5 when numbering could not be established for some pass (§15.9):
+the rebuild still commits — that pass's whole images are written unnumbered
+into the staged set and the replay goes on with the last good reference. On
+any exception (a full disk, say) **nothing of the roll changes**: its
+photographs stay where they are and its current epoch is unchanged. ONE record
+is appended — `status: "failed"`, `source: "frames"`, `stop_reason`,
+`staging_dir` — which starts no epoch, owns no pass (`film110_next_pass`,
+`roll_is_done` and the numbering reference ignore it); the message names the
+staging directory, which is kept for inspection.
 
 ## 15. The pass report in holder language, one next placement, numbers from the strip's front end (2026-10-23, offline)
 
@@ -1120,3 +1124,30 @@ the harness reaches (Testigen rolls 5-8 and Test 106 pass 2) the decision is
 unchanged (orientation and key); the two-strip rolls (Testigen 3-4,
 Nastatestigen, Test 103) cannot be replayed by `--from-frames` and are not
 covered by that check.
+
+### 15.9 Scanned and complete images are never discarded (owner's founding requirement)
+
+When numbering cannot be established for a pass (`decide_orientation` finds
+no decision, or nothing of the pass can be compared with the reference), every
+WHOLE and near-whole image of that pass is still written, **unnumbered**, as
+`p<k>-a<aperture>-<i>.tiff` (+ `-ir.tiff`; `i` = order within the aperture;
+`--rotate` applied, no turn undone because the orientation is unknown). The
+manifest entries have `number: null`, `identified: false`, `position_mm`,
+`crop`, `free_end_near`, `cut_mm`, and `pass_report` lists them as "an image
+whole, not identified (delivered unnumbered)" (outcome `delivered_unnumbered`).
+
+* Nothing that carries a number is written or replaced in that pass: an
+  unidentified copy never overwrites or ranks against a numbered one.
+* The pass record is `status: "ok"` with `numbering: "unidentified"` (and
+  `numbering_note` = why). It is never the reference of the next pass
+  (`_film110_pick_ref` skips a record without numbered images) and changes no
+  `done` / `missing` / `free_end`.
+* **Application contract.** Exit 5 now means "photographs written unnumbered,
+  numbering not established", not "nothing written". The CLI text says how many
+  were delivered and why.
+* A later `--from-frames` rebuild that CAN number the pass supersedes the
+  unnumbered copies: they move to `superseded-*/` like any replaced product
+  (only a rebuild or `--force` removes them; a later live pass leaves them).
+* The atomic rebuild (§14) follows the same rule: a pass it cannot recognise is
+  written unnumbered into the staged set, the replay goes on with the last good
+  reference, the command exits 5 after committing.

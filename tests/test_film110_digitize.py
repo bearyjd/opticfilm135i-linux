@@ -485,23 +485,71 @@ def test_later_pass_numbers_by_shift_at_any_seating():
     print("test_later_pass_numbers_by_shift_at_any_seating OK")
 
 
-def test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing():
+def test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing_numbered():
+    """Exit 5 = "photographs written UNNUMBERED, numbering not established":
+    the whole images of the pass are written as p<k>-a<aperture>-<i>.tiff,
+    nothing that carries a number is written or replaced, the record is ok
+    with numbering "unidentified" and never serves as a reference."""
     with _content():
         with tempfile.TemporaryDirectory() as d:
             rc, rec1, *_ = _run(d, _holder_apertures(_starts_for(3.5), None))
             assert rc == 0
-            before = {p.name for p in digitize.roll_dir(d, "", 1).iterdir()}
+            rd = digitize.roll_dir(d, "", 1)
+            before = {p.name: p.read_bytes() for p in rd.iterdir() if p.name.startswith("image")}
             # The same positions, but other pictures: none of pass 1's images.
             other = _strip_spec(_starts(3.5 + 6.4, 4), "lo", ids=[5, 6, 7, 8])
             rc, rec, scans, out, err = _run(d, _holder_apertures(other, None))
             assert rc == 5, (rc, err[-300:])
-            assert "slid or was turned" in err, err
-            assert rec["status"] == "failed" and rec["images"] == [], rec
-            after = {p.name for p in digitize.roll_dir(d, "", 1).iterdir()}
-            assert not any(n.startswith("image") for n in after - before), after - before
-            assert {n for n in after - before} <= {n for n in after if n.startswith("p2-")}
+            assert "slid or was turned" in err and "UNNUMBERED" in err, err
+            assert rec["status"] == "ok" and rec["numbering"] == "unidentified", rec["status"]
+            un = [e for e in rec["images"]]
+            assert un and all(e["number"] is None and e["identified"] is False and e["main"]
+                              and e["position_mm"] is not None and e["crop"] for e in un), un
+            names = {p.name for p in rd.iterdir()}
+            assert all(Path(e["main"]).name in names for e in un), (un, names)
+            assert any(n.startswith("p2-a1-") for n in names), names
+            # nothing numbered written or replaced
+            assert {n: (rd / n).read_bytes() for n in names if n.startswith("image")} == before
+            row = rec["pass_report"][0]
+            assert row["number"] is None and row["identified"] is False and row["outcome"] == "delivered_unnumbered"
+            assert "not identified (delivered unnumbered)" in out + err, out
+            # done / missing / free_end are those of the earlier record
+            assert rec["advice"]["missing"] == rec1["advice"]["missing"]
+            assert rec["advice"]["free_end"] == rec1["advice"]["free_end"]
             assert scans[-1] == "eject"
-    print("test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing OK")
+    print("test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing_numbered OK")
+
+
+def test_unidentified_pass_is_no_reference_and_a_rebuild_numbers_it():
+    """The next pass numbers against the last GOOD record; a rebuild after the
+    recogniser is fixed numbers the unnumbered pass and moves its unnumbered
+    copies to superseded-*/."""
+    orig = film110.decide_orientation
+    with _content():
+        with tempfile.TemporaryDirectory() as d:
+            rc, rec1, *_ = _run(d, _holder_apertures(_starts_for(3.5), None))
+            assert rc == 0
+            film110.decide_orientation = lambda *a, **k: None       # a recogniser that fails
+            try:
+                rc, rec2, *_ = _run(d, _holder_apertures(_starts_for(3.5 + 10.6), None))
+            finally:
+                film110.decide_orientation = orig
+            assert rc == 5 and rec2["numbering"] == "unidentified", (rc, rec2["numbering"])
+            rc, rec3, *_ = _run(d, _holder_apertures(_starts_for(3.5 + 12.75), None))
+            assert rc == 0 and rec3["pass"] == 3 and rec3["numbering"] == "content", rec3["numbering"]
+            _expected_numbers(rec3, 3.5 + 12.75)             # numbered against pass 1
+            rd = digitize.roll_dir(d, "", 1)
+            assert any(p.name.startswith("p2-a") for p in rd.iterdir())
+            rc, out, err = _rebuild(d)
+            assert rc == 0, (rc, err[-400:])
+            recs = digitize.roll_records_current(d, 1)
+            assert [r["numbering"] for r in recs] == ["protocol", "content", "content"], \
+                [r["numbering"] for r in recs]
+            assert all(e["number"] is not None for e in recs[1]["images"]), recs[1]["images"]
+            assert not any(p.name.startswith("p2-a") for p in rd.iterdir())
+            sup = [p for p in rd.iterdir() if p.name.startswith("superseded-")]
+            assert sup and any(f.name.startswith("p2-a") for s_ in sup for f in s_.iterdir()), sup
+    print("test_unidentified_pass_is_no_reference_and_a_rebuild_numbers_it OK")
 
 
 def _image_thumb(path):
@@ -1514,10 +1562,11 @@ def _assert_untouched_after_failed_rebuild(d, before, rc, err):
     assert digitize.roll_is_done(d, 1) == done
 
 
-def test_rebuild_stops_at_a_pass_it_cannot_recognise():
-    """I-B6, atomic: pass 2 shows other pictures -> exit 5; the roll's
-    photographs and current epoch are untouched, ONE failed record (no new
-    epoch) says why, the staging directory is kept."""
+def test_rebuild_writes_an_unrecognised_pass_unnumbered_and_goes_on():
+    """I-B6, revised: pass 2 shows other pictures -> exit 5 ("numbering not
+    established"), but the rebuild commits: pass 1's products are numbered,
+    pass 2's whole images are written unnumbered, both records are ok, the
+    unidentified one is no reference."""
     with _content():
         with tempfile.TemporaryDirectory() as d:
             rc, rec1, *_ = _run(d, _holder_apertures(_starts_for(3.5), None))
@@ -1525,12 +1574,17 @@ def test_rebuild_stops_at_a_pass_it_cannot_recognise():
             other = _strip_spec(_starts(3.5 + 6.4, 4), "lo", ids=[5, 6, 7, 8])
             rc, rec2, *_ = _run(d, _holder_apertures(other, None))
             assert rc == 5
-            before = _snapshot(d)
             rc, out, err = _rebuild(d)
-            assert rc == 5 and "stopped" in err and "pass 2" in err, (rc, err[-400:])
-            _assert_untouched_after_failed_rebuild(d, before, rc, err)
-            assert before[3] == 3
-    print("test_rebuild_stops_at_a_pass_it_cannot_recognise OK")
+            assert rc == 5 and "UNNUMBERED" in err and "pass(es) 2" in err, (rc, err[-400:])
+            recs = digitize.roll_records_current(d, 1)
+            assert [r["status"] for r in recs] == ["ok", "ok"] and recs[0].get("forced"), recs
+            assert recs[1]["numbering"] == "unidentified" and recs[0]["images"], recs[1]
+            rd = digitize.roll_dir(d, "", 1)
+            names = {p.name for p in rd.iterdir()}
+            assert {"image1.tiff", "image3.tiff", "image4.tiff"} <= names, names
+            assert any(n.startswith("p2-a") for n in names), names
+            assert digitize.film110_next_pass(d, "", 1) == 3
+    print("test_rebuild_writes_an_unrecognised_pass_unnumbered_and_goes_on OK")
 
 
 def test_rebuild_with_an_exception_mid_write_changes_nothing():
@@ -1792,7 +1846,8 @@ def main() -> int:
         test_digitize_parser_and_validation,
         test_clear_helpers,
         test_later_pass_numbers_by_shift_at_any_seating,
-        test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing,
+        test_later_pass_that_matches_nothing_is_exit_5_and_writes_nothing_numbered,
+        test_unidentified_pass_is_no_reference_and_a_rebuild_numbers_it,
         test_turned_strip_is_recognised_and_its_products_are_rotated_back,
         test_pass_after_a_turned_pass_numbers_along_the_reversed_grid,
         test_turned_strip_with_other_pictures_is_exit_5,
@@ -1801,7 +1856,7 @@ def main() -> int:
         test_rebuild_reproduces_a_three_pass_roll_offline,
         test_rebuild_after_rotate_90_gives_identical_products,
         test_rebuild_refusals_touch_nothing,
-        test_rebuild_stops_at_a_pass_it_cannot_recognise,
+        test_rebuild_writes_an_unrecognised_pass_unnumbered_and_goes_on,
         test_rebuild_with_an_exception_mid_write_changes_nothing,
         test_frame_located_image_reaches_the_manifest,
         test_leader_before_the_films_start_is_not_an_image_or_a_problem,

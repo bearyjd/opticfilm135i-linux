@@ -6,6 +6,13 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- **Scanned and complete images are never discarded** (owner's founding
+  requirement, docs/film-110.md §15.9): when numbering cannot be established
+  for a pass, its whole and near-whole images are written unnumbered
+  (`p<k>-a<aperture>-<i>.tiff`, manifest `number: null`, `identified: false`),
+  the record is `ok` with `numbering: "unidentified"` and never a reference.
+  Exit 5 now means "photographs written unnumbered, numbering not
+  established", not "nothing written"; a rebuild supersedes them.
 - Test 106 pass 3 (2026-10-23, offline): `decide_orientation` accepts a
   cluster on evidence (sum of each distinct new sighting's best correlation)
   as well as on the best-pair margin, so a strip of near-duplicate shots is

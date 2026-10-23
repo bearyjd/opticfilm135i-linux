@@ -194,6 +194,22 @@ def build_pass_report(images: list, blanks: list) -> list:
     rows = []
     for e in images:
         if e.get("number") is None:
+            if e.get("identified") is False:
+                row = {"number": None, "identified": False,
+                       "where": where_of_entry(e),
+                       "state": "near_whole" if e.get("cut_mm") is not None else "whole_supported",
+                       "outcome": "delivered_unnumbered",
+                       "located_by": e.get("located_by") or "holes",
+                       "position_mm": e.get("position_mm")}
+                if e.get("free_end_near"):
+                    row["free_end"] = True
+                    if row["state"] == "whole_supported":
+                        row["state"] = "whole_free_end"
+                if e.get("cut_mm") is not None:
+                    row["cut_mm"] = e["cut_mm"]
+                    row["hidden_mm"] = e.get("cut_mm", 0.0)
+                    row["under"] = e.get("under") or ""
+                rows.append(row)
             continue
         row = {"number": e["number"], "where": where_of_entry(e),
                "state": _state(e), "outcome": _outcome(e),
@@ -246,6 +262,10 @@ def format_pass_report(report: list) -> list:
     for key in sorted(groups, key=sort_key):
         parts = []
         for r in groups[key]:
+            if r.get("identified") is False:
+                kind = "near-whole" if r["state"] == "near_whole" else "whole"
+                parts.append(f"an image {kind}, not identified (delivered unnumbered)")
+                continue
             unc = " (number uncertain)" if r.get("uncertain") else ""
             gap = (f", the strip's end is {r['end_gap_mm']:g} mm from it"
                    if r.get("end_gap_mm") is not None else "")

@@ -509,6 +509,7 @@ class Film110State:
         # end when it is in view (`shift_decided`), or handed in by a rebuild
         # that already knows it (`shift_forced`).
         self.blanks: list = []
+        self.unidentified: list = []       # whole images written unnumbered (numbering not established)
         self.number_shift = 0
         self.shift_decided = False
         self.shift_forced = False
@@ -1054,6 +1055,51 @@ def _film110_load_ref_patches(args: argparse.Namespace, roll: int,
     return out
 
 
+def _film110_write_unidentified(args: argparse.Namespace, state: Film110State,
+                                deferred: list, emit) -> None:
+    """Numbering could not be established for this pass (a later pass whose
+    pictures cannot be matched to the earlier ones): the driver must not
+    discard images that were scanned and complete. Every WHOLE (and
+    near-whole) image of the pass is written UNNUMBERED as
+    p<k>-a<aperture>-<i>.tiff (+ -ir), i = order within the aperture. Nothing
+    that carries a number is written or replaced; the entries (number null,
+    identified false) never serve as a reference and never change
+    done/missing/free_end."""
+    from . import film110
+    writer = getattr(emit, "unnumbered", None)
+    state.numbering_basis = "unidentified"
+    for aperture, _parts, items in deferred:
+        idx = 0
+        for it in items:
+            fr = it.get("fr")
+            if fr is None or not (fr.whole or fr.cut_mm is not None):
+                continue
+            idx += 1
+            g = film110.global_position_mm(aperture, fr.line0, args.dpi)
+            entry = {"number": None, "identified": False, "aperture": aperture,
+                     "index": idx, "whole": bool(fr.whole), "split": fr.split,
+                     "free_end_near": bool(fr.free_end_near),
+                     "located_by": getattr(fr, "located_by", "holes"),
+                     "position_mm": round(float(g), 2), "crop": it["vis_bounds"],
+                     "extent_mm": [round(float(it["extent"][0]), 2),
+                                   round(float(it["extent"][1]), 2)],
+                     "main": None, "ir": None, "kept": False, "uncertain": False,
+                     "size_mm": [round(float(fr.size_mm[0]), 2),
+                                 round(float(fr.size_mm[1]), 2)],
+                     "replaced_free_end_copy": False}
+            if fr.cut_mm is not None:
+                entry["cut_mm"] = round(float(fr.cut_mm), 2)
+            if fr.end_gap_mm is not None:
+                entry["end_gap_mm"] = round(float(fr.end_gap_mm), 2)
+            if writer is not None:
+                res = writer(state.pass_index, aperture, idx, it["crops"])
+                entry["main"], entry["ir"] = res.get("main"), res.get("ir")
+            state.unidentified.append(entry)
+    print(f"110: {len(state.unidentified)} whole image(s) of this pass written "
+          f"UNNUMBERED (p{state.pass_index}-a<aperture>-<i>.tiff): numbering was "
+          f"not established")
+
+
 def _film110_finalize(args: argparse.Namespace, state: Film110State, roll: int,
                       emit) -> None:
     """The end of a slot in a later pass: decide how the strip lies --
@@ -1091,9 +1137,10 @@ def _film110_finalize(args: argparse.Namespace, state: Film110State, roll: int,
         state.aborted = (
             f"nothing of this run's images can be compared with pass "
             f"{ref.get('pass', '?')} (no sighting on one side), so the "
-            f"strip's move cannot be read from the pictures -> nothing "
-            f"written; seat the strip so that an image seen before is seen "
-            f"again, or --force")
+            f"strip's move cannot be read from the pictures -> the whole "
+            f"images are written unnumbered; seat the strip so that an image "
+            f"seen before is seen again, or --force")
+        _film110_write_unidentified(args, state, deferred, emit)
         return
     # What is physically possible: every recorded image must still lie in
     # the slot after the move; and when the strip's own free end was seen
@@ -1115,9 +1162,10 @@ def _film110_finalize(args: argparse.Namespace, state: Film110State, roll: int,
             f"could not tell whether the strip slid or was turned since "
             f"pass {ref.get('pass', '?')} (the images do not match the "
             f"earlier ones clearly enough, or none overlaps an earlier "
-            f"sighting by {film110.OVERLAP_MIN_MM:g} mm) -> nothing "
-            f"written; seat the strip so that an image seen before is seen "
-            f"again, or --force")
+            f"sighting by {film110.OVERLAP_MIN_MM:g} mm) -> the whole "
+            f"images are written unnumbered; seat the strip so that an image "
+            f"seen before is seen again, or --force")
+        _film110_write_unidentified(args, state, deferred, emit)
         return
     turned = dec["orientation"] == "turned"
     # The reference record's grid runs backwards along the holder when
@@ -1728,6 +1776,27 @@ def _film110_digitize_emit(args: argparse.Namespace, state: Film110State,
                            f"{fr.size_mm[1]:.1f} mm)"
                            f"{' [replaced the free-end copy]' if replaced else ''}"}
 
+    def unnumbered(k, aperture, i, crops):
+        base = Path(stage) if stage is not None else digitize.roll_dir(args.out, args.prefix, roll)
+        vis_path = base / f"p{k}-a{aperture}-{i}.tiff"
+        ir_path = base / f"p{k}-a{aperture}-{i}-ir.tiff"
+        vis_img, ir_img = crops()
+        if args.rotate:
+            kk = args.rotate // 90
+            vis_img = _np.ascontiguousarray(_np.rot90(vis_img, k=kk))
+            if ir_img is not None:
+                ir_img = _np.ascontiguousarray(_np.rot90(ir_img, k=kk))
+        _write_image(vis_img, str(vis_path), positive=False, dpi=_axis_dpi(args, False))
+        print(f"wrote {vis_path} ({vis_img.shape[1]}x{vis_img.shape[0]}, 16-bit RGB "
+              f"negative, UNNUMBERED image of pass {k})")
+        ir_out = None
+        if ir_img is not None:
+            image.write_tiff16(_np.stack([ir_img, ir_img, ir_img], axis=-1),
+                               str(ir_path), dpi=_axis_dpi(args, False))
+            ir_out = str(ir_path)
+        return {"main": str(vis_path), "ir": ir_out}
+
+    emit.unnumbered = unnumbered
     return emit
 
 
@@ -1848,7 +1917,15 @@ def _film110_plan(state: Film110State, prior: list, report: list, missing: list,
     film grid to the frame positions it did not see."""
     from . import film110, film110_report as rep
     if not sight:
-        return None, {}
+        gaps0 = {}
+        for n in free_end:
+            for r in reversed(list(prior)):
+                m = next((x.get("end_gap_mm") for x in r.get("images") or []
+                          if x.get("number") == n and x.get("end_gap_mm") is not None), None)
+                if m is not None:
+                    gaps0[n] = float(m)
+                    break
+        return None, gaps0
     measured = dict(sight)
     L = film110.FILM_110.image_mm[0]
 
@@ -1944,9 +2021,12 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
     record["placement_given"] = bool(state.placement_given)
     record["orientation"] = state.orientation
     record["numbering"] = state.numbering_basis
-    record["images"] = state.images
+    record["images"] = state.images + state.unidentified
     record["blanks"] = [dict(b) for b in state.blanks]
-    record["pass_report"] = rep.build_pass_report(state.images, state.blanks)
+    record["pass_report"] = rep.build_pass_report(state.images + state.unidentified,
+                                                  state.blanks)
+    if state.aborted and state.numbering_basis == "unidentified":
+        record["numbering_note"] = state.aborted
     record["problems"] = list(state.problems)
     # The strip's own ends, when seen (global mm): a later pass pins its
     # move on them, and the advice reads whether an end can reach plastic.
@@ -2045,7 +2125,8 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
         nxt, gaps = _film110_plan(state, prior, record["pass_report"], missing, free_end,
                                   unseen, seen_all, sight, turned)
         why_none: list = []
-        if nxt is None and (missing or free_end or unseen):
+        unid = state.numbering_basis == "unidentified"
+        if nxt is None and (missing or free_end or unseen) and not unid:
             # Why no placement helps, from the geometry: an image delivered
             # with the strip end free can only be rescued with the end resting
             # on plastic, which needs the end at least the aperture-edge margin
@@ -2066,7 +2147,11 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                     if item.get("reason") == "strip_end_free" and code != "no_placement":
                         item["detail"] = code
                 not_done.append({"reason": code, "numbers": nums})
-        if nxt is not None:
+        if unid:
+            suggest = ("numbering was not established in this pass (its whole images "
+                       "were written unnumbered): seat the strip so that an image "
+                       "seen before is seen again")
+        elif nxt is not None:
             suggest = nxt["text"]
         elif not numbers:
             suggest = ("no image found: check that the film lies in the apertures "
@@ -2295,7 +2380,8 @@ class _LinePrefixer:
         self._t.flush()
 
 
-_FILM110_PRODUCT_RE = re.compile(r"^image-?\d+(-uncertain)?(-ir)?\.tiff$")
+_FILM110_PRODUCT_RE = re.compile(
+    r"^(image-?\d+(-uncertain)?(-ir)?|p\d+-a\d+-\d+(-ir)?)\.tiff$")
 
 
 def _film110_move_products(rdir: Path, stamp: str) -> "tuple[Path | None, list]":
@@ -2404,11 +2490,11 @@ def _digitize_from_frames(args: argparse.Namespace) -> int:
             n += 1
             stage = rdir / f".rebuild-{stamp}-{attempt}-{n}"
         try:
-            rc, last, restart, records, why = _rebuild_attempt(
+            rc, last, restart, records, why, unident = _rebuild_attempt(
                 args, roll, rdir, plan, recs[0], dpi, ir, shift,
                 attempt == 1 and not shift, stage)
         except Exception as e:
-            rc, last, restart, records = 1, None, None, []
+            rc, last, restart, records, unident = 1, None, None, [], []
             why = f"{type(e).__name__}: {e}"
         if restart is not None:
             shutil.rmtree(stage, ignore_errors=True)    # our own scratch, nothing of the roll's
@@ -2444,6 +2530,12 @@ def _digitize_from_frames(args: argparse.Namespace) -> int:
     state, record, per_frame = last
     _film110_print_roll_summary(roll, state, per_frame, rdir, record["advice"],
                                 record=record)
+    if unident:
+        print(f"roll {roll}: numbering could NOT be established for pass(es) "
+              f"{', '.join(map(str, unident))}; their whole photographs were written "
+              f"UNNUMBERED (p<pass>-a<aperture>-<i>.tiff), the other passes are "
+              f"numbered and rebuilt.", file=sys.stderr)
+        return 5
     return 0
 
 
@@ -2466,6 +2558,7 @@ def _rebuild_attempt(args, roll, rdir, plan, default_rec, dpi, ir, shift, may_re
 
     prior: list = []                    # the rebuilt records so far (a new epoch)
     last = None                         # (state, record, per_frame)
+    unidentified: list = []             # passes whose numbering could not be established
     for k, rec, frames in plan:
         src = rec or default_rec
         rotate = int(src.get("rotate") or 0)
@@ -2521,16 +2614,14 @@ def _rebuild_attempt(args, roll, rdir, plan, default_rec, dpi, ir, shift, may_re
             record["forced"] = True        # a new epoch: only the rebuild counts
         _film110_fill_record(record, state, stage, prior)
         if state.aborted:
-            return 5, last, None, prior, (
-                f"pass {k} cannot be recognised: {state.aborted} (passes "
-                f"{[p for p, _r, _f in plan if p < k]} replayed fine)")
-        if may_restart and record.get("anchor_shift"):
-            return 0, last, int(record["anchor_shift"]), prior, None
+            unidentified.append(k)             # written unnumbered; the rebuild goes on
+        elif may_restart and record.get("anchor_shift"):
+            return 0, last, int(record["anchor_shift"]), prior, None, unidentified
         record.update(per_frame=per_frame, finished_utc=now, status="ok", stage=None,
                       source="frames", from_pass=k, rebuilt_utc=now)
         prior.append(record)
         last = (state, record, per_frame)
-    return 0, last, None, prior, None
+    return 0, last, None, prior, None, unidentified
 
 
 def _cmd_digitize(args: argparse.Namespace) -> int:
@@ -2864,7 +2955,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         raise
     finished = datetime.now(timezone.utc).isoformat()
     for c in ctxs:
-        ok = rc == 0 or (rc == 4 and not c.incomplete)
+        ok = (rc == 0 or (rc == 4 and not c.incomplete)
+              or (rc == 5 and film110 and c.state.numbering_basis == "unidentified"))
         c.record.update(finished_utc=finished, per_frame=c.per_frame,
                         status="ok" if ok else "failed",
                         stage=None if ok else "scan")
@@ -2920,10 +3012,20 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                   f"Next: insert the next strip and run 'of135i digitize' again "
                   f"(roll {roll + 1}).")
     elif rc == 5 and film110:
+        from . import film110_report as rep
         why = next(c.state.aborted for c in ctxs if c.state.aborted)
-        print(f"roll {roll} STOPPED: {why}. The strip was ejected; no "
-              f"photograph was written (the frame files of this pass are "
-              f"kept).", file=sys.stderr)
+        n_un = sum(len(c.state.unidentified) for c in ctxs)
+        if strips == 1:
+            print(rep.legend())
+            print(f"Pass {c0.state.pass_index} report (numbering NOT established):")
+            for ln in rep.format_pass_report(c0.record.get("pass_report") or []):
+                print(ln)
+        print(f"roll {roll}: numbering NOT established: {why}. {n_un} whole "
+              f"photograph(s) were written UNNUMBERED (p<pass>-a<aperture>-<i>.tiff); "
+              f"nothing numbered was written or replaced. The roll's earlier "
+              f"photographs and its reference are unchanged; the frame files of "
+              f"this pass are kept (re-run with --from-frames once the cause is "
+              f"clear).", file=sys.stderr)
     elif rc == 4:
         # Coverage failure: the pass and eject completed normally -- the
         # transport needs no recovery, the roll just is not complete.

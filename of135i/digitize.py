@@ -314,6 +314,9 @@ def clear_film110_outputs(out_dir: str, prefix: str, roll: int) -> list[str]:
              for frame in FRAMES for suf in _FILM110_FRAME_SUFFIXES]
     for n in range(1, FILM110_MAX_IMAGE + 1):
         names += [f"image{n}.tiff", f"image{n}-ir.tiff"]
+    # unnumbered copies of a pass whose numbering could not be established
+    names += [f"{tag}-a{ap}-{i}{suf}" for tag in FILM110_FRAME_TAGS
+              for ap in FRAMES for i in range(1, 4) for suf in (".tiff", "-ir.tiff")]
     removed: list[str] = []
     for name in names:
         f = d / name
