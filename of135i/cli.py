@@ -1911,7 +1911,7 @@ def _film110_now_text(n: int, report: list, windows: dict, unseen: set) -> str:
 
 def _film110_plan(state: Film110State, prior: list, report: list, missing: list,
                   free_end: list, unseen: list, seen_all: set, sight: list,
-                  turned: bool):
+                  turned: bool, optional: tuple = ()):
     """advice.next for a lone strip: the joint placement (film110_report.
     plan_next_pass) over the positions this pass measured, carried over the
     film grid to the frame positions it did not see."""
@@ -1947,7 +1947,7 @@ def _film110_plan(state: Film110State, prior: list, report: list, missing: list,
                            "film_end_mm": state.film_end_mm,
                            "orientation": state.orientation}]
     end_beyond = {}
-    for n in free_end:
+    for n in list(free_end) + list(optional):
         w = known.get(n)
         if w is None:
             continue
@@ -1974,6 +1974,10 @@ def _film110_plan(state: Film110State, prior: list, report: list, missing: list,
     needed = {n: "split" for n in missing}
     needed.update({n: "free_end" for n in free_end})
     needed.update({n: "unseen" for n in unseen})
+    # Optional improvements (a near-whole copy that a whole supported one
+    # would replace): with the strip end known beyond the image the end must
+    # rest on plastic too, else only the window matters.
+    needed.update({n: ("free_end" if n in end_beyond else "split") for n in optional})
     windows = dict(extra)
     windows.update(known)
     now = {n: _film110_now_text(n, report, windows, set(unseen)) for n in needed if n in windows}
@@ -2122,8 +2126,32 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                     not_done.append({"reason": "strip_end_free", "numbers": list(free_end)})
                 if unseen:
                     not_done.append({"reason": "not_seen", "numbers": list(unseen)})
+        # Near-whole copies that are the best copy and supported: delivered and
+        # counted for `done`, but a whole supported copy would be better.
+        optional = []
+        if not (missing or free_end or unseen):
+            for n in numbers:
+                got = digitize.delivered_image(records, roll, prefix, n)
+                if got is not None and got.get("cut_mm") is not None and not got.get("free_end_near"):
+                    optional.append((n, got))
         nxt, gaps = _film110_plan(state, prior, record["pass_report"], missing, free_end,
-                                  unseen, seen_all, sight, turned)
+                                  unseen, seen_all, sight, turned,
+                                  tuple(n for n, _g in optional))
+        if nxt is not None and optional and not (missing or free_end or unseen):
+            got = dict(optional)
+            hit = [n for n in nxt["rescues"] if n in got]
+            if hit:
+                n = hit[0]
+                e = got[n]
+                under = e.get("under") or "plastic"
+                under = ("the " + under) if under.startswith("end wall") else under
+                body = nxt["text"].replace("Next pass: ", "", 1).rstrip(".")
+                nxt["optional"] = True
+                nxt["text"] = (f"Optional: {body}; this would replace image {n}'s near-whole "
+                               f"copy ({e.get('cut_mm', 0):.2f} mm under {under}) with a "
+                               f"whole, supported one.")
+            else:
+                nxt = None
         why_none: list = []
         unid = state.numbering_basis == "unidentified"
         if nxt is None and (missing or free_end or unseen) and not unid:
@@ -2344,7 +2372,8 @@ def _film110_print_roll_summary(roll: int, state: Film110State, per_frame: list,
               f"positions" + (f"; still needed: {need}" if need else "") + ".")
     if adv.get("done"):
         nxt = (f"Every frame position between the strip's ends is accounted for "
-               f"(delivered or blank). Next strip: roll {roll + 1}.")
+               f"(delivered or blank). Next strip: roll {roll + 1}."
+               + (f" {adv['suggest']}" if (adv.get("next") or {}).get("optional") else ""))
     else:
         why = _film110_not_done_text(adv)
         wants = adv.get("next") or adv.get("images") or adv.get("unseen") \
