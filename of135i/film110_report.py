@@ -312,20 +312,10 @@ def plan_next_pass(known: dict, needed: dict, ends: list,
     for p in known.values():
         points += [p, p + L]
     points += list(ends)
-    plastic = [(a, b) for _k, _i, a, b in plastic_spans()]
     best = None
     steps = int(round(SUGGEST_RANGE_MM / SUGGEST_STEP_MM))
-    quarter = FILM_110.pitch_mm / 4
-    tried = set()
     for i in range(-steps, steps + 1):
-        # The instruction is given in quarter image lengths ("about"), so the
-        # placement is judged at the quarter-image value it names: a rescue
-        # that only holds at an exact millimetre the operator cannot seat
-        # (a strip end on a 2 mm bar) is not offered.
-        s = round(i * SUGGEST_STEP_MM / quarter) * quarter
-        if s in tried:
-            continue
-        tried.add(s)
+        s = i * SUGGEST_STEP_MM
         if not _inside_limits(points, s, lo, hi):
             continue
         rescued, margins, targets = [], [], []
@@ -345,8 +335,16 @@ def plan_next_pass(known: dict, needed: dict, ends: list,
                 continue
             if kind == "free_end":
                 e = end_beyond.get(n)
-                if e is None or not any(a <= e + s <= b for a, b in plastic):
+                span = None if e is None else next(
+                    ((kd, ix) for kd, ix, a, b in plastic_spans() if a <= e + s <= b), None)
+                if span is None:
                     continue
+                rescued.append(n)
+                margins.append(hit[1])
+                targets.append({"number": n, "aperture": hit[0],
+                                "end_on": (f"bar {span[1]}" if span[0] == "bar"
+                                           else f"end wall at aperture {span[1]}")})
+                continue
             rescued.append(n)
             margins.append(hit[1])
             targets.append({"number": n, "aperture": hit[0]})
@@ -365,8 +363,13 @@ def plan_next_pass(known: dict, needed: dict, ends: list,
         n = t["number"]
         a0, a1 = aperture_span(t["aperture"])
         centred = abs((windows[n] + s + L / 2) - (a0 + a1) / 2) <= 2.0
-        bits.append(f"image {n} ({now.get(n, 'not yet delivered')}) lies "
-                    f"{'in the middle of' if centred else 'inside'} aperture {t['aperture']}")
+        bit = (f"image {n} ({now.get(n, 'not yet delivered')}) lies "
+               f"{'in the middle of' if centred else 'inside'} aperture {t['aperture']}")
+        if t.get("end_on"):
+            bit += (f" with the strip's end against the {t['end_on']}"
+                    if t["end_on"].startswith("end wall")
+                    else f" and the strip's end rests on {t['end_on']}")
+        bits.append(bit)
     if s == 0:
         text = ("Next pass: keep the strip where it is; " + " and ".join(bits) + ".")
     else:

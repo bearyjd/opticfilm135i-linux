@@ -1826,7 +1826,7 @@ def _film110_plan(state: Film110State, prior: list, report: list, missing: list,
     film grid to the frame positions it did not see."""
     from . import film110, film110_report as rep
     if not sight:
-        return None
+        return None, {}
     measured = dict(sight)
     L = film110.FILM_110.image_mm[0]
 
@@ -1878,7 +1878,13 @@ def _film110_plan(state: Film110State, prior: list, report: list, missing: list,
     windows = dict(extra)
     windows.update(known)
     now = {n: _film110_now_text(n, report, windows, set(unseen)) for n in needed if n in windows}
-    return rep.plan_next_pass(known, needed, ends, end_beyond, now, extra)
+    # How far the strip's end lies beyond each free-end image (None = not seen).
+    gaps = {}
+    for n in free_end:
+        e, w = end_beyond.get(n), known.get(n)
+        gaps[n] = (None if e is None or w is None
+                   else (e - (w + L) if e >= w + L else w - e))
+    return rep.plan_next_pass(known, needed, ends, end_beyond, now, extra), gaps
 
 
 def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
@@ -2001,8 +2007,30 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                     not_done.append({"reason": "strip_end_free", "numbers": list(free_end)})
                 if unseen:
                     not_done.append({"reason": "not_seen", "numbers": list(unseen)})
-        nxt = _film110_plan(state, prior, record["pass_report"], missing, free_end,
-                            unseen, seen_all, sight, turned)
+        nxt, gaps = _film110_plan(state, prior, record["pass_report"], missing, free_end,
+                                  unseen, seen_all, sight, turned)
+        why_none: list = []
+        if nxt is None and (missing or free_end or unseen):
+            # Why no placement helps, from the geometry: an image delivered
+            # with the strip end free can only be rescued with the end resting
+            # on plastic, which needs the end at least the aperture-edge margin
+            # (a bar is as wide) beyond the image.
+            for n in free_end:
+                g = gaps.get(n)
+                if g is None:
+                    why_none.append(("free_end_unmeasured", n, None))
+                elif g < rep.SUGGEST_MARGIN_MM:
+                    why_none.append(("free_end_too_close", n, g))
+                else:
+                    why_none.append(("no_placement", n, None))
+            for n in list(missing) + list(unseen):
+                why_none.append(("no_placement", n, None))
+            for code in dict.fromkeys(c for c, _n, _g in why_none):
+                nums = [n for c, n, _g in why_none if c == code]
+                for item in not_done:
+                    if item.get("reason") == "strip_end_free" and code != "no_placement":
+                        item["detail"] = code
+                not_done.append({"reason": code, "numbers": nums})
         if nxt is not None:
             suggest = nxt["text"]
         elif not numbers:
@@ -2011,11 +2039,20 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                        "holes are visible, then seat the strip again and run the "
                        "roll again")
         elif missing or free_end or unseen:
-            wanted = sorted(set(missing) | set(free_end) | set(unseen))
-            suggest = ("No placement of the strip brings "
-                       + ", ".join(f"image {n}" for n in wanted)
-                       + " into an aperture without losing another: accept the "
-                         "copies delivered, or stop")
+            bits = []
+            for code, n, g in why_none:
+                if code == "free_end_too_close":
+                    bits.append(f"image {n} lies only {g:.1f} mm from the strip's end, "
+                                f"closer than the {rep.SUGGEST_MARGIN_MM:g} mm a bar "
+                                f"needs; no placement keeps it whole with the end "
+                                f"resting on plastic")
+                elif code == "free_end_unmeasured":
+                    bits.append(f"the strip's end beyond image {n} has not been seen, "
+                                f"so no placement can be judged for it")
+                else:
+                    bits.append(f"no placement within the holder brings image {n} "
+                                f"whole into one aperture")
+            suggest = ("; ".join(bits) + ": accept the delivered copies, or stop")
         else:
             suggest = "nothing missing; every delivered image is supported"
     else:
@@ -2151,6 +2188,8 @@ def _film110_not_done_text(adv: dict) -> str:
             bits.append(f"{lst} seen only split by a bar")
         elif r == "strip_end_free":
             bits.append(f"{lst} delivered with the strip end free")
+        elif r in ("free_end_too_close", "free_end_unmeasured", "no_placement"):
+            continue
         elif r == "not_seen":
             bits.append("frame position " + ", ".join(str(n) for n in nums)
                         + " between the strip's ends has not been seen")
@@ -2191,6 +2230,7 @@ def _film110_print_roll_summary(roll: int, state: Film110State, per_frame: list,
         wants = adv.get("next") or adv.get("images") or adv.get("unseen") \
             or not adv.get("frame_positions", {}).get("of")
         sug = adv["suggest"].rstrip(".")
+        sug = sug[:1].upper() + sug[1:]
         nxt = ((f"Not done: {why}. " if why else "")
                + (f"{sug}. " if wants else "")
                + f"Re-seat the strip (slide or turn it) and run "

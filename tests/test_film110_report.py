@@ -170,6 +170,34 @@ def test_planner_prefers_the_smaller_move_when_margins_are_comfortable():
     print("test_planner_prefers_the_smaller_move_when_margins_are_comfortable OK")
 
 
+def test_planner_shift_is_exact_and_the_text_names_the_target():
+    known = {1: 3.5, 2: 29.0, 3: 54.5, 4: 80.0}
+    nxt = rep.plan_next_pass(known, {2: "split"}, [], {}, {2: "now split by bar 1"})
+    assert abs(nxt["shift_mm"] * 2 - round(nxt["shift_mm"] * 2)) < 1e-6, nxt      # the 0.5 mm grid, not quarters
+    assert "(about " in nxt["text"] and "image 2 (now split by bar 1) lies" in nxt["text"], nxt["text"]
+    assert "aperture 2" in nxt["text"] and "end_on" not in nxt["targets"][0]
+    print("test_planner_shift_is_exact_and_the_text_names_the_target OK")
+
+
+def test_free_end_rescue_names_the_plastic_the_end_rests_on():
+    # end wall at aperture 1: image whole at 10 mm, the strip's end 3 mm before it
+    nxt = rep.plan_next_pass({1: 10.0}, {1: "free_end"}, [7.0], {1: 7.0}, {})
+    assert nxt is not None and nxt["targets"][0]["end_on"] == "end wall at aperture 1", nxt
+    assert nxt["direction"] == "towards aperture 1" and "end against the end wall at aperture 1" in nxt["text"]
+    e = 7.0 + nxt["shift_mm"]
+    assert -2.1 <= e <= 0.0, e
+    # a bar: image in aperture 3 with the end 3 mm beyond it
+    p4 = 2 * STRIP.pitch_mm + 8.0
+    end = p4 + L + 3.0
+    nxt = rep.plan_next_pass({4: p4}, {4: "free_end"}, [end], {4: end}, {})
+    if nxt is not None:
+        eo = nxt["targets"][0]["end_on"]
+        assert eo.startswith("bar ") or eo.startswith("end wall at aperture "), eo
+        if eo.startswith("bar "):
+            assert f"the strip's end rests on {eo}" in nxt["text"], nxt["text"]
+    print("test_free_end_rescue_names_the_plastic_the_end_rests_on OK")
+
+
 def main() -> int:
     tests = [
         test_legend_is_one_line_built_from_the_one_constant,
@@ -181,6 +209,8 @@ def main() -> int:
         test_planner_never_pushes_the_strip_out_of_the_holder,
         test_planner_rescues_a_free_end_image_only_with_the_end_on_plastic,
         test_planner_prefers_the_smaller_move_when_margins_are_comfortable,
+        test_planner_shift_is_exact_and_the_text_names_the_target,
+        test_free_end_rescue_names_the_plastic_the_end_rests_on,
     ]
     for t in tests:
         t()
