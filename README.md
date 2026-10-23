@@ -465,6 +465,12 @@ Test 104, 2026-10-22, slides and a turned strip included). `--strips 2` carries
 two strips of up to four images in one load (strip 1 against the holder's
 left end, strip 2 against its right end) and writes them as two rolls, N
 and N+1 (first hardware pass Test 103, `docs/film-110.md` §12).
+`digitize --film 110 --roll N --from-frames` rebuilds a roll offline from
+its stored `p<k>-f<N>.tiff` frames (renumbered, photographs rewritten, the
+old `image*.tiff` moved to `superseded-<UTC>/`, no scanner touched) after a
+driver correction (`docs/film-110.md` §14). The printed border between
+pictures now locates 110 images when the holes cannot be read
+(`docs/film-110.md` §8 step 9).
 Resume is **between strips**: the roll number advances past the highest
 recorded or on-disk roll, an existing roll is not overwritten without
 `--force` (which first clears that roll's previous `f*.tiff`/`.diag.json`
