@@ -107,6 +107,14 @@ deadline/failure checks. It never opens a physical USB device:
 python -m pytest -q tests/test_vendor_startup.py
 ```
 
+The eject outcome and deadline suites check truthful CLI reporting,
+manifest failure stages, stale diagnostics and strict completion deadlines
+with synthetic USB devices and clocks:
+
+```
+python -m pytest -q tests/test_eject_outcome.py tests/test_eject_deadline.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```

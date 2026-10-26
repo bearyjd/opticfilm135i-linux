@@ -168,7 +168,7 @@ Every public path that can cause a USB write or physical movement:
 | entry point | protection |
 |---|---|
 | `of135i scan` / `Scanner.scan()` | operation; requires `initialize()` first, before every frame |
-| `of135i eject` / `Scanner.eject()` | operation; cold-init first only from `0x00`; refused read-only (`UnejectableStateError`) if regs 0x3b/0x3c read 0xff/0xff, the base-table-only state the eject stalled from (Test 44/46) |
+| `of135i eject` / `Scanner.eject()` | operation; cold-init first only from `0x00`; refused read-only (`UnejectableStateError`) if regs 0x3b/0x3c read 0xff/0xff, the base-table-only state the eject stalled from (Test 44/46); returns `EJECT_COMPLETED` only when the status word reads idle after the move (well-formed 2-byte reply, ack 0x55, `(byte & 0x21) == 0x20`, before the 10 s deadline; each status read uses the remaining budget as its USB timeout), `EJECT_SKIPPED_NO_MAGAZINE` when the sensor read clear and nothing was sent (never printed as "ejected"; `last_eject` records whether that reading came after `initialize()`, i.e. from the unreliable sensor); an unconfirmed completion raises `EjectIncompleteError` after the eject's usual closing `0x09=0x00` write — session FAILED, nothing else sent (offline-verified only, 2026-10) |
 | `Scanner.initialize()` | operation; cold-init first only from `0x00` |
 | `Scanner.cold_init()` | operation; only from `0x00`, only once per session; each of its nine motor completions is strict (a timeout stops the sequence before the next motor start, `StrictPollTimeoutError`, power cycle); post-verified by reg 0x01 = 0x22 |
 | `Scanner.load_magazine()` / `tools/load_magazine.py` | operation; requires `initialize()` first |

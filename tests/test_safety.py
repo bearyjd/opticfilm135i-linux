@@ -427,14 +427,37 @@ class _FastClock:
         return self.t
 
 
+class _EjectClock(_FastClock):
+    """Allow an immediate eject completion read; expire after a mismatch."""
+
+    def __call__(self) -> float:
+        self.t += 0.001
+        return self.t
+
+    def sleep(self, seconds):
+        self.t += 1000.0
+
+
 @contextmanager
 def fast_time():
     real_sleep, real_mono = time.sleep, time.monotonic
+    original_eject_body = Scanner._eject_body
+
+    def eject_body(scanner):
+        # Eject checks its deadline before reading and after the reply.
+        # Scope small ticks to this body: captured PREP/scan polls rely on
+        # the shared clock expiring after their first mismatch for parity.
+        clock = _EjectClock()
+        with patched(time, "sleep", clock.sleep), patched(time, "monotonic", clock):
+            return original_eject_body(scanner)
+
     time.sleep = lambda s: None
     time.monotonic = _FastClock()
+    Scanner._eject_body = eject_body
     try:
         yield
     finally:
+        Scanner._eject_body = original_eject_body
         time.sleep, time.monotonic = real_sleep, real_mono
 
 
@@ -2182,6 +2205,122 @@ def test_cli_eject_and_watch_paths():
     print("test_cli_eject_and_watch_paths OK")
 
 
+def _eject_stuck_after_go(value=0xF9):
+    """Status high byte: the default (0xF8, magazine present) until the
+    eject's GO, then `value` for ever (busy 0xf9 never clears)."""
+    return lambda f: value if f.pulses >= 1 else None
+
+
+def test_eject_reports_honest_outcome_and_fails_closed_when_unconfirmed():
+    """eject() says what happened. Confirmed move -> EJECT_COMPLETED with
+    the completion wait recorded; sensor clear -> EJECT_SKIPPED_NO_MAGAZINE
+    with nothing sent and never "ejected"; a status word that never reads
+    idle (busy forever, or a malformed reply the old read_status() would
+    have taken byte 0 of) -> EjectIncompleteError after the unchanged
+    closing 0x09=0x00 write, session FAILED and frozen. Formerly that case
+    logged "stuck -- continuing" and the CLI printed "ejected"."""
+    # Confirmed.
+    fake = FakeUsbDevice(reg01=0x22)
+    scanner = make_scanner(fake)
+    with fast_time():
+        assert scanner.eject() == device.EJECT_COMPLETED
+    le = scanner.last_eject
+    assert le["outcome"] == device.EJECT_COMPLETED and le["magazine_sensor"] is True
+    assert le["sensor_after_initialize"] is False
+    c = le["completion"]
+    assert c["reads"] >= 1 and c["last"] == "f855" and not c["timed_out"], c
+    assert fake.pulses == 1 and fake.out_log[-1]["data"] == bytes([0x09, 0x00])
+    assert scanner.session.state is SessionState.ARMED
+
+    # Sensor clear: nothing sent, outcome says so, both before and after
+    # initialize() (the latter flagged as the unreliable reading).
+    for init in (False, True):
+        fake = FakeUsbDevice(reg01=0x22, magazine=False, cal_buffers=_cal_buffers())
+        scanner = make_scanner(fake)
+        with fast_time():
+            if init:
+                scanner.initialize()
+            n, p = fake.out_count, fake.pulses
+            assert scanner.eject() == device.EJECT_SKIPPED_NO_MAGAZINE
+        assert fake.out_count == n and fake.pulses == p, init
+        assert scanner.last_eject["sensor_after_initialize"] is init
+        assert scanner.last_eject["completion"] is None
+        assert scanner.session.state is SessionState.ARMED
+
+    # Predicate: only a well-formed idle reply confirms.
+    m = device.eject_complete_status_matches
+    assert m(bytes.fromhex("f855")) and m(bytes.fromhex("e855")) and m(bytes.fromhex("f055"))
+    for bad in ("d955", "f955", "d855", "f8", "", "f800", "f85500"):
+        assert not m(bytes.fromhex(bad)), bad
+
+    # Unconfirmed: busy never clears, and a malformed 1-byte reply.
+    for label, setup, want_word in (
+            ("busy forever", lambda f: setattr(f, "status_high", _eject_stuck_after_go()), 0xF955),
+            ("malformed reply", None, None)):
+        fake = FakeUsbDevice(reg01=0x22)
+        if setup is not None:
+            setup(fake)
+        else:
+            real = fake.ctrl_transfer
+
+            def short_status(bm, br, wv=0, wi=0, data=None, timeout=None, real=real, fake=fake):
+                if bm & 0x80 and wv == 0x018E and wi == 0x0122 and fake.pulses >= 1:
+                    return b"\xf8"
+                return real(bm, br, wv, wi, data, timeout)
+            fake.ctrl_transfer = short_status
+        scanner = make_scanner(fake)
+        with fast_time():
+            e = expect(safety.EjectIncompleteError, scanner.eject)
+        assert e.status_word == want_word and e.reads >= 1, (label, e.status_word, e.reads)
+        msg = str(e)
+        assert "did NOT confirm completion" in msg and "NOT a completed eject" in msg, msg
+        assert "No recovery commands" in msg, msg
+        _assert_power_cycle_message(msg)
+        # Exactly one GO; the last OUT is the eject's usual closing write.
+        assert fake.pulses == 1 and fake.out_log[-1]["data"] == bytes([0x09, 0x00]), label
+        assert scanner.last_eject["completion"]["timed_out"] is True, label
+        assert scanner.last_eject["outcome"] is None, label
+        _assert_failed_and_frozen(fake, scanner, e, expect_pulses=1, operation="eject",
+                                  phase_prefix="eject")
+
+    # CLI: `of135i eject` with no magazine is not "ejected"; a stuck one
+    # fails with exit 1; watch stops after it; scan --eject reports it.
+    fake = FakeUsbDevice(reg01=0x22, magazine=False)
+    with cli_over(fake):
+        code, so, se = _cli(["eject"])
+    assert code == 0 and fake.out_count == 0, (code, se)
+    assert "ejected" not in so and "eject NOT run" in so, so
+
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.status_high = _eject_stuck_after_go()
+    with cli_over(fake) as opened:
+        code, so, se = _cli(["eject"])
+    assert code == 1 and "ejected" not in so, (code, so)
+    assert opened[0].session.state is SessionState.FAILED and "did NOT confirm" in se, se
+    _assert_power_cycle_message(se)
+
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.status_high = _eject_stuck_after_go()
+    fake.button_events.extend([0x48, None, 0x48, None, 0x48])
+    with cli_over(fake) as opened:
+        code, so, se = _cli(["watch"])
+    assert code == 1 and fake.pulses == 1 and "ejected" not in so, (code, so)
+    assert len(fake.button_events) == 3, "watch kept polling after an unconfirmed eject"
+
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "x.tiff")
+        fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
+        with cli_over(fake) as opened:
+            fake.status_high = (lambda f: 0xF9 if opened and opened[-1].session.phase == "eject"
+                                else None)
+            code, so, se = _cli(["scan", "--frame", "1", "--eject", "-o", out, "--no-diag"])
+        assert code == 1 and "ejected" not in so, (code, so, se)
+        assert opened[0].session.failure["operation"] == "eject", opened[0].session.failure
+        _assert_power_cycle_message(se)
+    print("test_eject_reports_honest_outcome_and_fails_closed_when_unconfirmed OK")
+
+
 # ============================================================== doctor
 
 
@@ -2792,6 +2931,7 @@ def main() -> int:
         test_cli_scan_eject_watch_refuse_unsafe_states_with_zero_writes,
         test_cli_scan_normal_path_and_failure_reporting,
         test_cli_eject_and_watch_paths,
+        test_eject_reports_honest_outcome_and_fails_closed_when_unconfirmed,
         test_cli_load_and_version,
         test_interrupt_overflow_is_named_and_never_fatal,
         test_doctor_and_status_are_strictly_read_only,

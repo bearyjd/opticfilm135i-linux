@@ -227,6 +227,25 @@ class LoadIncompleteError(SafetyError):
         self.expected = expected
 
 
+class EjectIncompleteError(SafetyError):
+    """The eject move was commanded (execute pulse sent) but the status
+    word never confirmed that it finished: no well-formed reply with the
+    0x55 ack and (byte & 0x21) == 0x20 within the eject's budget. The
+    magazine may or may not have been released and the transport state
+    is unknown; the session is FAILED and a power cycle is required.
+    Until 2026-10 this case was logged ("stuck -- continuing") and the
+    CLI printed "ejected". ``status_word`` is the last 2-byte reply as an
+    int (None if no well-formed reply was read), ``reads`` how many
+    status reads were made, ``seconds`` the time waited."""
+
+    def __init__(self, message: str, *, status_word: int | None, reads: int,
+                 seconds: float, **kw):
+        super().__init__(message, **kw)
+        self.status_word = status_word
+        self.reads = reads
+        self.seconds = seconds
+
+
 class UnejectableStateError(SafetyError):
     """eject() was requested from a register state no vendor flow ejects
     from: regs 0x3b/0x3c both read 0xff, the scan-session base table
