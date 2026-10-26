@@ -17,7 +17,7 @@ scanning tests, and those are not offline — they live in
 
 | For | Needs |
 |---|---|
-| the Python suites | Python 3.10+, and `numpy`, `pillow`, `tifffile`, `pyusb` (the repo venv has them: `.venv/`) |
+| the Python suites | Python 3.10+, and `numpy`, `pillow`, `tifffile`, `pyusb`, `pytest` (the repo venv has them: `.venv/`) |
 | the generator check | Python only |
 | the compiler-based suites | a C/C++ compiler (`g++`) on `PATH`; they print `SKIPPED` and pass trivially without one |
 | the three backend suites | additionally a built `libsane-genesys.so` and `SANE_BACKENDS_DIR` (see below) — **not** in CI |
@@ -83,6 +83,13 @@ These cover the safety model, calibration maths, the park state machine,
 the image path, the DPI and IR logic, the overscan/coverage geometry and
 the bulk-digitisation workflow — the driver's own logic, all without
 hardware.
+
+The mounted-slide and DPI-aware cleaning regressions also run explicitly
+under pytest in CI (the standalone suites above remain in place):
+
+```
+python -m pytest -q tests/test_slides.py tests/test_ir.py tests/test_offline.py
+```
 
 ### 4. Compiler-based suites (need `g++`, no backend)
 
