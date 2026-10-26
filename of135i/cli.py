@@ -4,6 +4,7 @@ Layout per driver-design.md:
 
     of135i scan --frame N [--dpi 600|1200|2400|3600|7200] [--ir] -o out.tiff
     of135i scan --frames 1-4 [--ir] [--eject] -o out.tiff   # batch
+    of135i scan --slides 1-4 --ir [--dpi N] -o out.tiff     # slide holder
     of135i eject
     of135i preview
     of135i status
@@ -52,7 +53,7 @@ _MAX_OVERSCAN_MM = 5.0
 
 
 def _validate_overscan(overscan: float, frames, dpi: int = 3600,
-                       dual: bool = False) -> str | None:
+                       dual: bool = False, slide: bool = False) -> str | None:
     """Check a --overscan value and its whole resulting geometry BEFORE any
     hardware write. Returns an error message, or None if every frame's
     window (FEEDL, scan start/end, line and chunk count) is inside the
@@ -68,7 +69,20 @@ def _validate_overscan(overscan: float, frames, dpi: int = 3600,
                 f"sanity limit")
     for frame in frames:
         try:
-            if dual:
+            if slide:
+                # The exact geometry the device will command for this
+                # opening, including the slide-only travel check.
+                from .device import dual_tables
+                t = dual_tables(dpi)
+                holder.slide_dual_geometry(
+                    frame,
+                    dpi=dpi,
+                    lines_per_chunk=t.LINES_PER_CHUNK,
+                    colour_crop_lines=image.align_shift(dpi),
+                    default_wire_lines=t.DEFAULT_LINES,
+                    overscan_mm=overscan,
+                )
+            elif dual:
                 from .device import dual_tables
                 t = dual_tables(dpi)
                 holder.dual_overscan_geometry(
@@ -88,8 +102,12 @@ def _validate_overscan(overscan: float, frames, dpi: int = 3600,
                     overscan_mm=overscan,
                 )
         except (safety.FrameOutOfRangeError, safety.FeedlOutOfRangeError) as e:
-            return (f"--overscan {overscan} mm is out of range for frame "
-                    f"{frame}: {e}")
+            what = "slide" if slide else "frame"
+            hint = (f" (the slide default is {holder.SLIDE_OVERSCAN_MM} mm; slide 4 "
+                    f"is the furthest window, see docs/slide-scanning.md)"
+                    ) if slide else ""
+            return (f"--overscan {overscan} mm is out of range for {what} "
+                    f"{frame}: {e}{hint}")
     return None
 
 _STATUS_REGS = (0x01, 0x31, 0x32, 0x35)
@@ -215,7 +233,7 @@ def _write_image(arr, out: str, positive: bool = False, dpi=None) -> None:
                            dpi=dpi)
 
 
-def _parse_frames(spec: str) -> list[int]:
+def _parse_frames(spec: str, hold: holder.Holder = holder.DEFAULT) -> list[int]:
     """Parse a --frames spec: comma-separated frame numbers and/or
     inclusive ranges, e.g. "1-4", "2", "1,3-4". Order is preserved,
     duplicates are not removed (scanning a frame twice is a valid,
@@ -237,12 +255,12 @@ def _parse_frames(spec: str) -> list[int]:
     # driver refuses an out-of-range frame again at feedl_for_frame(),
     # before any write; checking here as well turns it into a usage
     # error that never opens the device.
-    bad = [f for f in frames if f < 1 or f > holder.DEFAULT.frames]
+    bad = [f for f in frames if f < 1 or f > hold.frames]
     if bad:
         raise ValueError(
             f"frame(s) {', '.join(str(f) for f in bad)} outside the "
-            f"{holder.DEFAULT.name}: it holds {holder.DEFAULT.frames} "
-            f"frames (1-{holder.DEFAULT.frames})")
+            f"{hold.name}: it holds {hold.frames} "
+            f"frames (1-{hold.frames})")
     return frames
 
 
@@ -251,6 +269,17 @@ def _frame_output(out: str, frame: int) -> str:
     suffix (out.tiff -> out-f2.tiff)."""
     p = Path(out)
     return str(p.with_name(f"{p.stem}-f{frame}{p.suffix}"))
+
+
+def _derived_outputs(out: str) -> list[str]:
+    """Every path a scan frame with output `out` can write: the product,
+    the overscan frame, the IR pair, the diag sidecar and the calibration
+    data -- all beside `out`, so they share its parent directory."""
+    p = Path(out)
+    return [out, _overscan_raw_path(out),
+            str(p.with_name(p.stem + "-ir.tiff")),
+            str(p.with_name(p.stem + "-ir.overscan.tiff")),
+            diag.sidecar_path(out), diag.cal_data_path(out)]
 
 
 def _validate_film110_args(args: argparse.Namespace) -> "str | None":
@@ -271,6 +300,27 @@ def _validate_film110_args(args: argparse.Namespace) -> "str | None":
     return None
 
 
+def _slide_spec(args: argparse.Namespace) -> "str | None":
+    """The --slides/--slide spec as a _parse_frames string, or None."""
+    if getattr(args, "slides", None) is not None:
+        return args.slides
+    if getattr(args, "slide", None) is not None:
+        return str(args.slide)
+    return None
+
+
+def _validate_slide_args(args: argparse.Namespace, dual: bool) -> "str | None":
+    """Slide scans: a dual-light profile only, 35 mm only. Checked before
+    any device I/O."""
+    if not dual:
+        return ("--slides needs a dual-light profile: add --ir (or pick a "
+                "--dpi other than 3600). Plain 3600 covers 26.5 mm "
+                "laterally and clips a mounted slide (Test 85)")
+    if getattr(args, "film", "135") != "135":
+        return "--slides is the 35 mm mounted-slide holder; --film 110 does not apply"
+    return None
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
     if args.dpi not in SUPPORTED_DPIS:
         print(f"error: --dpi must be one of {', '.join(map(str, SUPPORTED_DPIS))}", file=sys.stderr)
@@ -284,6 +334,14 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     # dual flow; --ir then only decides whether the IR channel is used
     # (dust removal) and written out.
     dual = args.ir or args.dpi != 3600
+    slide_spec = _slide_spec(args)
+    if slide_spec is not None:
+        err = _validate_slide_args(args, dual)
+        if err is not None:
+            print(f"error: {err}", file=sys.stderr)
+            return 2
+        if getattr(args, "overscan", None) is None:
+            args.overscan = holder.SLIDE_OVERSCAN_MM
     if getattr(args, "overscan", None) is None:
         # The production default on BOTH paths: the A+C contract
         # (corrected mapping + overscan + per-scan coverage + registered
@@ -291,10 +349,19 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         # profiles in visible-line units. --overscan only tunes the
         # margin; there is no fixed-window path any more.
         args.overscan = holder.OVERSCAN_MM
-    if (args.frame is None) == (args.frames is None):
-        print("error: give exactly one of --frame or --frames", file=sys.stderr)
+    given = [a for a in ("frame", "frames", "slide", "slides")
+             if getattr(args, a, None) is not None]
+    if len(given) != 1:
+        print("error: give exactly one of --frame, --frames, --slide or "
+              "--slides", file=sys.stderr)
         return 2
-    if args.frames is not None:
+    if slide_spec is not None:
+        try:
+            frames = _parse_frames(slide_spec, holder.SLIDE)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+    elif args.frames is not None:
         try:
             frames = _parse_frames(args.frames)
         except ValueError as e:
@@ -306,12 +373,15 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
-    multi = args.frames is not None
+    # Slides always carry the -f<N> suffix (also --slide N): downstream
+    # consumers read <stem>-f<N>.overscan.tiff / <stem>-f<N>-ir.overscan.tiff.
+    multi = args.frames is not None or slide_spec is not None
 
     # Validate --overscan and its whole geometry before opening the device,
     # so a bad value is refused with zero hardware activity (Astra point 3).
     if getattr(args, "overscan", None) is not None:
-        err = _validate_overscan(args.overscan, frames, dpi=args.dpi, dual=dual)
+        err = _validate_overscan(args.overscan, frames, dpi=args.dpi, dual=dual,
+                                 slide=slide_spec is not None)
         if err is not None:
             print(f"error: {err}", file=sys.stderr)
             return 2
@@ -333,6 +403,14 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             print(f"error: output directory {parent} is not writable "
                   f"(for {o}); nothing was sent to the scanner", file=sys.stderr)
             return 2
+        # Every file this frame can produce (all beside `o`, same parent):
+        # an existing DIRECTORY at any of those names would only fail after
+        # the scan and PARK, losing the pass.
+        for target in _derived_outputs(o):
+            if Path(target).is_dir():
+                print(f"error: output path {target} is an existing directory; "
+                      f"nothing was sent to the scanner", file=sys.stderr)
+                return 2
 
     # One device session for the whole batch, initialize() per frame:
     # the post-scan PARK phase turns the lamp off and tears the scan
@@ -343,6 +421,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     def body(scanner: Scanner) -> int:
         scanner.park_mode = args.park
         scanner.recalibrate = bool(getattr(args, 'recalibrate', False))
+        scanner.dark_fallback = getattr(args, "dark_fallback", "strict")
         if getattr(args, 'warmup_budget', None) is not None:
             scanner.warmup_budget_s = float(args.warmup_budget)
         # Read-only start-state check up front, so an unsafe scanner
@@ -367,7 +446,20 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             log.info("scanning frame %d @ %d dpi%s", frame, args.dpi,
                       " (dual-light pass)" if dual else "")
             cov = None
-            if dual:
+            if slide_spec is not None:
+                # One slide = the strip path's load-position-scan-PARK
+                # with the slide geometry. No coverage check (cov stays
+                # None): the strip crossbar detector does not apply, and
+                # the full overscan pair IS the slide product.
+                raw, width, _meta = scanner.scan(
+                    frame=frame, ir=True, dpi=args.dpi,
+                    overscan_mm=args.overscan, slide=True)
+                # The IR overscan frame is ALWAYS written for a slide (the
+                # visible + IR pair is the product); --ir/--no-clean only
+                # decide the dust cleaning (see _finish_dual_scan).
+                _finish_dual_scan(args, raw, width, out, write_ir=True,
+                                  frame=frame, slide=True)
+            elif dual:
                 raw, width, _meta = scanner.scan(
                     frame=frame, ir=True, dpi=args.dpi,
                     overscan_mm=getattr(args, "overscan", None))
@@ -1299,7 +1391,7 @@ def _finish_plain_scan(args: argparse.Namespace, raw: bytes, width: int,
 
 def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
                       out: str, write_ir: bool = True, frame: int = 1,
-                      film110_state=None):
+                      film110_state=None, slide: bool = False):
     """Split a dual-light scan's raw buffer into visible/IR images and
     write <out> (visible, color) and, with write_ir, <out stem>-ir.tiff
     (the IR channel, replicated into R=G=B so it opens in any RGB
@@ -1330,6 +1422,12 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
     `film110_state`, when not None (--film 110), runs the 110 hook on
     the SAME aperture-registered visible/IR crop pair right after they
     are computed, before orientation -- see `_film110_hook`.
+
+    `slide=True` (mounted-slide holder): the full overscan frame(s) are
+    the product. No coverage is measured (the detector looks for the
+    strip holder's crossbars, which a slide holder does not have), nothing
+    is cropped, and None is returned -- so a slide is never counted as a
+    coverage failure.
     """
     import numpy as _np
 
@@ -1352,15 +1450,18 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
     if _shift:
         ir = ir[_shift:-_shift]
 
-    if write_ir and not args.no_clean:
-        visible = image.remove_dust(visible, ir)
+    # Cleaning follows --ir (and --no-clean). For a slide the IR file is
+    # always written, so write_ir no longer implies --ir there.
+    clean = (args.ir if slide else write_ir) and not args.no_clean
+    if clean:
+        visible = image.remove_dust(visible, ir, dpi=args.dpi)
 
     from . import aperture_crop
     # `visible` (aligned, cropped by the colour shift at both ends) and `ir`
     # (split_ir rolled it into register, then cropped by the same shift
     # above) share one line grid; measure_coverage_dual checks that. The IR
     # array is used for coverage even when no IR file is written.
-    cov = aperture_crop.measure_coverage_dual(visible, ir, dpi=args.dpi)
+    cov = None if slide else aperture_crop.measure_coverage_dual(visible, ir, dpi=args.dpi)
 
     # _orient_pair is the module-level helper above (shared with the
     # --film 110 hook): same orientation fix as the plain path, applied
@@ -1393,6 +1494,11 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
         print(f"wrote {ir_over} ({ov_ir.shape[1]}x{ov_ir.shape[0]}, full "
               f"overscan frame, IR channel)")
     del ov_vis, ov_ir
+
+    if slide:
+        print("aperture coverage: not applicable (mounted-slide holder); the "
+              "full overscan frame(s) above are the product")
+        return None
 
     if not cov.verified:
         print(f"aperture coverage: NOT verified — {cov.reason}. Kept the full "
@@ -1451,6 +1557,13 @@ def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
                                "saturated_share": film["saturated_share"]}
             if not film["present"]:
                 sidecar["coverage"]["reason"] = "empty aperture"
+    elif _slide_spec(args) is not None:
+        sidecar["coverage"] = {
+            "applicable": False,
+            "verified": None,
+            "reason": "mounted-slide holder: no strip crossbars to detect; "
+                      "the full overscan frame(s) are the product",
+        }
     sidecar["cli"] = {
         "frame": frame,
         "frames": args.frames,
@@ -1460,6 +1573,8 @@ def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
         "rotate": args.rotate,
         "no_clean": args.no_clean,
         "overscan": getattr(args, "overscan", None),
+        "slides": _slide_spec(args),
+        "dark_fallback": getattr(args, "dark_fallback", "strict"),
     }
     # Per-pixel calibration data (device.Scanner.last_cal_data): only a
     # fresh calibration has any, and --no-cal-data skips it. Decided and
@@ -1583,7 +1698,7 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         if _shift:
             ir = ir[_shift:-_shift]
         if args.ir and not args.no_clean:
-            visible = image.remove_dust(visible, ir)
+            visible = image.remove_dust(visible, ir, dpi=args.dpi)
         # visible and ir share one line grid (both trimmed by the same
         # colour shift above); the IR array is used for coverage even when
         # no IR file is written (dpi != 3600 without --ir).
@@ -3210,6 +3325,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--frames",
         help="batch scan: comma/range spec of frames, e.g. '1-4' or '1,3'; "
              "output files get a -f<N> suffix per frame")
+    p_scan.add_argument("--slide", type=int, default=None, metavar="N",
+        help="mounted-slide holder: scan opening N (1-4); dual-light only "
+             "(--ir, or any --dpi but 3600). Always writes "
+             "<stem>-fN.overscan.tiff and <stem>-fN-ir.overscan.tiff; --ir "
+             "additionally enables IR dust cleaning (unless --no-clean). "
+             "docs/slide-scanning.md")
+    p_scan.add_argument("--slides", default=None, metavar="SPEC",
+        help="mounted-slide holder: openings to scan, e.g. 1-4 or 1,3; same "
+             "rules and naming as --slide. Mutually exclusive with --frame/--frames")
+    p_scan.add_argument("--dark-fallback", choices=("strict", "default"), default="strict",
+        help="when dark_b is residual and no healthy dark_b exists yet this "
+             "session: 'strict' (default) stops the scan (CalibrationError, "
+             "power cycle); 'default' uses the vendor's default AFE offset "
+             "codes and records dark_b_fallback in the .diag.json")
     p_scan.add_argument("--eject", action="store_true",
         help="eject the film magazine after the last frame")
     p_scan.add_argument("--dpi", type=int, default=3600, choices=SUPPORTED_DPIS,
@@ -3229,7 +3358,9 @@ def build_parser() -> argparse.ArgumentParser:
              "also <stem>-ir.tiff, cropped to the same lines) and the full "
              "overscan frame(s) to <o>.overscan.<ext> (and "
              "<stem>-ir.overscan.tiff); on a coverage failure only the "
-             "overscan raw is kept and the exit status is non-zero")
+             "overscan raw is kept and the exit status is non-zero. With "
+             "--slide/--slides the default is 1.5 (holder.SLIDE_OVERSCAN_MM) "
+             "and only the overscan frame(s) are written")
     p_scan.add_argument("--no-diag", action="store_true",
         help="skip writing the <output>.diag.json calibration/timing sidecar")
     p_scan.add_argument("--no-cal-data", action="store_true",

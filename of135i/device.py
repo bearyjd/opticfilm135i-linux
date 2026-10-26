@@ -359,6 +359,20 @@ def park_complete_status_matches(reply) -> bool:
     return (b[0] & PARK_COMPLETE_REQUIRED_MASK) == PARK_COMPLETE_REQUIRED_VALUE
 
 
+def check_line_count(n_lines: int) -> int:
+    """Return ``n_lines`` if it can be encoded as a scan line count; raise
+    otherwise. Called immediately before the count is encoded on every
+    profile. The upper bound is the 24-bit register (as before); the lower
+    bound (>= 1) is a purely additional guard: no valid geometry produces
+    fewer than one line, and a negative count would otherwise encode as a
+    huge two's-complement value (e.g. -490 -> 0xFFFE16)."""
+    if n_lines < 1:
+        raise Of135iError(f"line count {n_lines} is not a positive scan length")
+    if n_lines > 0xFFFFFF:
+        raise Of135iError(f"line count {n_lines} does not fit the 24-bit register")
+    return n_lines
+
+
 def position_timeout_scale(t, feedl: int) -> float:
     """How much longer than the captured POSITION move (frame 1 of the
     table's capture) a move of ``feedl`` steps may take: the completion
@@ -533,6 +547,12 @@ class Scanner:
         # frame-independent, so reusing a healthy one is a proven fix, not
         # a cover-up. Reset naturally per Scanner (a new session = None).
         self._last_good_dark_b: np.ndarray | None = None
+        # What to do when dark_b is residual AND no healthy one exists yet
+        # this session (_dark_b_for_offsets): "strict" (default) fails
+        # closed with CalibrationError, exactly as before; "default" (opt-
+        # in, CLI --dark-fallback default) uses the vendor's own offset
+        # codes calibrate._OFFSET_DEFAULT and records that in last_diag.
+        self.dark_fallback: str = "strict"
 
         # Per-session calibration cache (see _scan_plain, _calibration_
         # rewrite(), docs/driver-design.md's calibration-cache section).
@@ -1897,6 +1917,7 @@ class Scanner:
     def scan(
         self, frame: int = 1, lines: int | None = None, ir: bool = False,
         dpi: int = 3600, overscan_mm: float | None = None,
+        slide: bool = False,
     ) -> tuple[bytes, int] | tuple[bytes, int, dict]:
         """Run the full calibration + scan sequence for one frame.
 
@@ -1922,6 +1943,14 @@ class Scanner:
         image.split_ir() for turning raw_bytes into separate visible/IR
         arrays.
 
+        slide=True: ``frame`` is a mounted-slide holder opening (1-4) and
+        the dual window comes from holder.slide_dual_geometry() (the slide
+        fiducial model, default overscan holder.SLIDE_OVERSCAN_MM) instead
+        of the strip model -- the only difference: the same calibration,
+        POSITION, scan and PARK phases run. Dual profiles only (plain
+        3600 clips a slide laterally, Test 85), and not with lines=.
+        slide=False (default) is the strip path, unchanged.
+
         Safety: runs as a hardware operation (start-state guard on the
         session's first write; any exception marks the session failed
         and nothing -- no PARK -- is sent afterwards). Requires
@@ -1941,6 +1970,8 @@ class Scanner:
         t = dual_tables(dpi) if (ir or dpi != 3600) else None
         if self.park_mode not in ("verbatim", "semantic"):
             raise ValueError(f"unknown park_mode {self.park_mode!r} (want 'verbatim' or 'semantic')")
+        if self.dark_fallback not in ("strict", "default"):
+            raise ValueError(f"unknown dark_fallback {self.dark_fallback!r} (want 'strict' or 'default')")
         if self.session.cold_init_done and not self._loaded_this_session:
             raise OperationNotAllowedError(
                 "scan() after a cold start requires the magazine load flow first "
@@ -1953,6 +1984,32 @@ class Scanner:
             raise OperationNotAllowedError(
                 "scan() requires initialize() first (before every frame) in this session. "
                 f"{safety.NO_COMMANDS_SENT}", session=self.session.snapshot())
+        if slide:
+            # Validated BEFORE the operation, like every other argument:
+            # the slide geometry is dual-only and has no capture grid.
+            if t is None:
+                raise ValueError(
+                    "slide scans need a dual-light profile (ir=True or dpi != "
+                    "3600): plain 3600 covers 26.5 mm laterally and clips a "
+                    f"mounted slide (Test 85). {safety.NO_COMMANDS_SENT}")
+            if lines is not None:
+                raise ValueError(
+                    "lines= is the strip capture-grid path; slide scans are "
+                    f"sized by overscan_mm. {safety.NO_COMMANDS_SENT}")
+            if overscan_mm is None:
+                overscan_mm = holder.SLIDE_OVERSCAN_MM
+            # The whole slide geometry -- slide number, FEEDL, model end
+            # and the slide-only travel check -- BEFORE the operation, so a
+            # refusal sends nothing and leaves the session unfailed
+            # (_scan_dual recomputes the same values after calibration).
+            holder.slide_dual_geometry(
+                frame,
+                dpi=dpi,
+                lines_per_chunk=t.LINES_PER_CHUNK,
+                colour_crop_lines=image_mod.align_shift(dpi),
+                default_wire_lines=t.DEFAULT_LINES,
+                overscan_mm=overscan_mm,
+            )
         if t is not None:
             # Dual: the production default (lines=None, overscan_mm=None)
             # is the same A+C geometry as plain, in visible lines
@@ -1985,7 +2042,7 @@ class Scanner:
                 self._cal_capture.set_frame(frame)
             if t is not None:
                 return self._scan_dual(t, frame=frame, lines=lines,
-                                       overscan_mm=overscan_mm)
+                                       overscan_mm=overscan_mm, slide=slide)
             return self._scan_plain(frame=frame, overscan_mm=overscan_mm)
 
     def _cal_white_line(self) -> np.ndarray:
@@ -2019,6 +2076,44 @@ class Scanner:
                 f"{safety.POWER_CYCLE_INSTRUCTION}",
                 session=self.session.snapshot())
         return self._last_good_dark_b, True
+
+    def _dark_b_for_offsets(self, dark_b):
+        """_healthy_dark_b() plus the opt-in fallback. Returns (dark_b,
+        substituted, fallback): ``fallback`` is None when the offset codes
+        are computed from the bracket as always, or "default_offset_codes"
+        when they must be calibrate._OFFSET_DEFAULT instead.
+
+        The fallback applies ONLY when self.dark_fallback == "default" AND
+        dark_b is residual AND no healthy dark_b has been measured this
+        session -- precisely the case where _healthy_dark_b() would raise.
+        Every other case (healthy dark_b, the A10 later-frame substitution,
+        strict mode) goes through _healthy_dark_b() unchanged. The residual
+        buffer is returned as-is for the records (dark_b_mean, cal_data)
+        and is never remembered as healthy.
+
+        Why this is safe: dark_b's only computational consumer is
+        calibrate.offset_codes() (the two-point dark bracket, dark_a at
+        offset code 0x80, dark_b at 0xFF -> AFE offset regs 5/6/7);
+        everything else that touches it is a record. _OFFSET_DEFAULT
+        (0x010B, 0x010A, 0x010B) are the vendor's own codes, which
+        offset_codes() itself already returns when the bracket slope is
+        abnormal, and which measured calibrations land within 1-2 codes of
+        (Tests 84/85: 266/265/266 and 0x010a/0x0109/0x010a). One code is
+        ~18 counts of 65535 (bracket slope 17.6-18 counts/code), so a
+        1-code error shifts the black level by ~0.03 % of full scale. The
+        motor/phase sequence is unchanged; the A10 substitution already
+        continues a scan after a residual dark_b on later frames."""
+        if (self.dark_fallback == "default" and self._last_good_dark_b is None
+                and calibrate.dark_is_residual(dark_b)):
+            log.warning(
+                "dark_b is residual and no healthy dark_b has been measured "
+                "this session; --dark-fallback default: using the vendor's "
+                "default AFE offset codes %s instead of a measured bracket "
+                "(recorded as dark_b_fallback in the .diag.json)",
+                ["%#06x" % c for c in calibrate._OFFSET_DEFAULT])
+            return dark_b, False, "default_offset_codes"
+        dark_b, substituted = self._healthy_dark_b(dark_b)
+        return dark_b, substituted, None
 
     def _calibration_rewrite(self, gain_r: int, gain_g: int, gain_b: int) -> None:
         """Re-apply cached AFE gain codes without a full recalibration.
@@ -2076,6 +2171,9 @@ class Scanner:
             dark_a_mean = cache["dark_a_mean"]
             dark_b_mean = cache["dark_b_mean"]
             dark_b_substituted = cache["dark_b_substituted"]
+            # A cached calibration carries its offset codes' provenance: a
+            # frame reusing fallback codes must say so too.
+            dark_b_fallback = cache.get("dark_b_fallback")
             warmup = cache["warmup"]
             shading_stats = cache["shading_stats"]
             shading2_stats = cache["shading2_stats"]
@@ -2096,7 +2194,7 @@ class Scanner:
                 self._cal_capture.note_buffer("dark_b", tables.CAL_DARK_B.name, dark_b_raw)
             dark_a = np.frombuffer(dark_a_raw, dtype="<u2").reshape(-1, 3)
             dark_b = np.frombuffer(dark_b_raw, dtype="<u2").reshape(-1, 3)
-            dark_b, dark_b_substituted = self._healthy_dark_b(dark_b)
+            dark_b, dark_b_substituted, dark_b_fallback = self._dark_b_for_offsets(dark_b)
 
             # ---- white line (gain=0) -> compute AFE gain -----------------
             gain_r, gain_g, gain_b = self._gain_with_warmup(
@@ -2113,7 +2211,10 @@ class Scanner:
             self._run_phase(tables.CAL_GAIN_CHECK_B)
 
             # ---- shading measurement (offset=computed final) -------------
-            off_r, off_g, off_b = calibrate.offset_codes(dark_a, dark_b)
+            if dark_b_fallback is None:
+                off_r, off_g, off_b = calibrate.offset_codes(dark_a, dark_b)
+            else:
+                off_r, off_g, off_b = calibrate._OFFSET_DEFAULT
             log.info("offset codes: R=%#06x G=%#06x B=%#06x", off_r, off_g, off_b)
             shading_meas_raw = self._run_phase(
                 tables.CAL_SHADING_MEASURE,
@@ -2181,6 +2282,7 @@ class Scanner:
                 "dark_a_mean": dark_a_mean,
                 "dark_b_mean": dark_b_mean,
                 "dark_b_substituted": dark_b_substituted,
+                "dark_b_fallback": dark_b_fallback,
                 "warmup": warmup,
                 "shading_stats": shading_stats,
                 "shading2_stats": shading2_stats,
@@ -2225,8 +2327,7 @@ class Scanner:
             )
 
             # ---- scan: 3 slope tables, line count, execute, image data ----
-            if n_lines > 0xFFFFFF:
-                raise Of135iError(f"line count {n_lines} does not fit the 24-bit register")
+            check_line_count(n_lines)
             buffers = self._run_phase(
                 scan_phase,
                 lines_hi=bytes([(n_lines >> 8) & 0xFF]),
@@ -2267,6 +2368,7 @@ class Scanner:
             "dark_a_mean": dark_a_mean,
             "dark_b_mean": dark_b_mean,
             "dark_b_substituted": dark_b_substituted,
+            "dark_b_fallback": dark_b_fallback,
             "white_mean": warmup.get("white_mean"),
             "white_max": warmup.get("white_max"),
             "gain_codes": [gain_r, gain_g, gain_b],
@@ -2299,7 +2401,8 @@ class Scanner:
     # ----------------------------------------------------------- scan (IR)
 
     def _scan_dual(self, t, frame: int = 1, lines: int | None = None,
-                   overscan_mm: float | None = None) -> tuple[bytes, int, dict]:
+                   overscan_mm: float | None = None,
+                   slide: bool = False) -> tuple[bytes, int, dict]:
         """Dual-light (alternating IR/visible line) counterpart of scan(),
         driven by the phases of table module `t` -- tables_ir (3600 dpi,
         trace 04) or a tables_dpi<N> module (the 2026-09-02 captures);
@@ -2372,7 +2475,7 @@ class Scanner:
             self._cal_capture.note_buffer("dark_b", t.CAL_DARK_B.name, dark_b_raw)
         dark_a = np.frombuffer(dark_a_raw, dtype="<u2").reshape(-1, 3)
         dark_b = np.frombuffer(dark_b_raw, dtype="<u2").reshape(-1, 3)
-        dark_b, dark_b_substituted = self._healthy_dark_b(dark_b)
+        dark_b, dark_b_substituted, dark_b_fallback = self._dark_b_for_offsets(dark_b)
         self._last_white = None
 
         # ---- white line (gain=0) -> compute AFE gain -------------------
@@ -2397,7 +2500,10 @@ class Scanner:
         self._run_phase(t.CAL_GAIN_CHECK_B)
 
         # ---- shading measurement (offset=computed final) ---------------
-        off_r, off_g, off_b = calibrate.offset_codes(dark_a, dark_b)
+        if dark_b_fallback is None:
+            off_r, off_g, off_b = calibrate.offset_codes(dark_a, dark_b)
+        else:
+            off_r, off_g, off_b = calibrate._OFFSET_DEFAULT
         log.info("offset codes (%d dpi dual): R=%#06x G=%#06x B=%#06x", dpi, off_r, off_g, off_b)
         shading_meas_raw = self._run_phase(
             t.CAL_SHADING_MEASURE,
@@ -2464,7 +2570,28 @@ class Scanner:
         # in visible lines (holder.dual_overscan_geometry); explicit
         # lines= = the diagnostic/capture path on the historical grid.
         geom = None
-        if lines is None:
+        if slide:
+            # Mounted-slide opening `frame` (1-4): the slide fiducial model
+            # through the same dual geometry, plus the slide-only travel
+            # check (holder.slide_dual_geometry). Everything after this --
+            # POSITION, scan, PARK -- is the strip path verbatim.
+            if lines is not None:
+                raise ValueError("slide scans do not take lines=")
+            geom, wire_lines = holder.slide_dual_geometry(
+                frame,
+                dpi=dpi,
+                lines_per_chunk=t.LINES_PER_CHUNK,
+                colour_crop_lines=image_mod.align_shift(dpi),
+                default_wire_lines=t.DEFAULT_LINES,
+                overscan_mm=(overscan_mm if overscan_mm is not None
+                             else holder.SLIDE_OVERSCAN_MM),
+            )
+            feedl = holder.check_feedl(geom.feedl, holder.SLIDE)
+            log.info("dual slide %d (%d dpi): FEEDL=%d chunks=%d "
+                     "wire_lines=%d margins lead=%.3f trail=%.3f mm",
+                     frame, dpi, feedl, geom.chunks, wire_lines,
+                     geom.leading_margin_mm, geom.trailing_margin_mm)
+        elif lines is None:
             geom, wire_lines = holder.dual_overscan_geometry(
                 frame,
                 dpi=dpi,
@@ -2501,8 +2628,7 @@ class Scanner:
         else:
             n_chunks = max(1, -(-lines // t.LINES_PER_CHUNK))
             n_lines = n_chunks * t.LINES_PER_CHUNK
-        if n_lines > 0xFFFFFF:
-            raise Of135iError(f"line count {n_lines} does not fit the 24-bit register")
+        check_line_count(n_lines)
         buffers = self._run_phase(
             t.scan_phase(n_chunks),
             lines_top=bytes([(n_lines >> 16) & 0xFF]),
@@ -2544,13 +2670,15 @@ class Scanner:
             "raw_bytes": len(image),
             "chunk_count": n_chunks,
             "overscan_mm": (overscan_mm if overscan_mm is not None
-                            else holder.OVERSCAN_MM) if geom is not None else None,
+                            else (holder.SLIDE_OVERSCAN_MM if slide
+                                  else holder.OVERSCAN_MM)) if geom is not None else None,
             # Dual has no skip-calibration path (see _scan_dual's opening
             # comment) -- always a fresh measurement.
             "calibration": "fresh",
             "dark_a_mean": [float(x) for x in dark_a.astype(np.float64).mean(axis=0)],
             "dark_b_mean": [float(x) for x in dark_b.astype(np.float64).mean(axis=0)],
             "dark_b_substituted": dark_b_substituted,
+            "dark_b_fallback": dark_b_fallback,
             "white_mean": warmup.get("white_mean"),
             "white_max": warmup.get("white_max"),
             "gain_codes": [gain_r, gain_g, gain_b],
@@ -2577,5 +2705,9 @@ class Scanner:
             "finished_utc": datetime.now(timezone.utc).isoformat(),
             "session": self.session.snapshot(),
         }
+        if slide:
+            # Only on slide scans, so a strip scan's record is unchanged.
+            self.last_diag["holder"] = holder.SLIDE.name
+            self.last_diag["slide"] = frame
 
         return image, W, {"width": W, "alternating": True, "dpi": dpi}

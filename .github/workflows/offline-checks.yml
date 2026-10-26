@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies
-        run: python -m pip install --upgrade numpy pillow tifffile pyusb
+        run: python -m pip install --upgrade numpy pillow tifffile pyusb pytest
 
       - name: g++ version (compiler-based suites need it)
         run: g++ --version
@@ -42,6 +42,9 @@ jobs:
             echo "== $t"
             python tests/$t.py
           done
+
+      - name: Mounted-slide and DPI-aware cleaning regressions
+        run: python -m pytest -q tests/test_slides.py tests/test_ir.py tests/test_offline.py
 
       - name: Compiler-based suites (mark, ops, geometry, install)
         run: |
