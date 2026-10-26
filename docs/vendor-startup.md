@@ -18,6 +18,19 @@ prior write attempts, read-only, COLD00, FAILED, REFUSED and unknown states are
 refused without startup writes. A COLD power-on state remains unsupported by
 this operation: the capture did not record register 01 before its first write.
 
+After the captured chip-ID acknowledgement (packets 6807-6811), the read at
+packet 6813 is the DLL's presence/cancel preflight (`0x180002c71` →
+`0x1800272e0` → `0x180087030` → 0702 leaf `0x1800aac80`, a live reg101 read
+returning bit08). Bit08 clear skips a possible cancel/drain path. A set
+bit alone does not prove that the vendor takes that path: the branch also
+requires a configuration lookup to return 1 and helper `559d0(1, 0)` to return
+0; the caller/alias mapping remains partly unproven. This implementation
+conservatively refuses a set bit08 because the possible cancel/drain path
+is unimplemented. It stops before the base-register write (6825) and any GO;
+the session is FAILED (one chip-ID write was already sent). Other bits in
+that reply stay informational. This predicate does not prove register01 or
+COLD eligibility.
+
 The sequence preserves all 63 captured control/bulk writes through motor
 disable, including eight identical 512-byte loader slopes, the full first JOG
 profile, register31 toggles before traverse, and extended-register configuration
