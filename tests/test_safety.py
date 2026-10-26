@@ -415,12 +415,20 @@ def vendor_like_load_status(fake: FakeUsbDevice, after_traverse: int = 0xDC,
 
 
 class _FastClock:
-    """Small clock ticks keep immediate replies within their budget.
-    Sleeping jumps ahead so a mismatched captured poll still expires
-    quickly without waiting in real time."""
+    """time.monotonic() that jumps 1000 s per call: every captured poll
+    that does not match the fake register model "times out" on its
+    first mismatch (device.py logs and continues, as on hardware)."""
 
     def __init__(self):
         self.t = 0.0
+
+    def __call__(self) -> float:
+        self.t += 1000.0
+        return self.t
+
+
+class _EjectClock(_FastClock):
+    """Allow an immediate eject completion read; expire after a mismatch."""
 
     def __call__(self) -> float:
         self.t += 0.001
@@ -433,12 +441,23 @@ class _FastClock:
 @contextmanager
 def fast_time():
     real_sleep, real_mono = time.sleep, time.monotonic
-    clock = _FastClock()
-    time.sleep = clock.sleep
-    time.monotonic = clock
+    original_eject_body = Scanner._eject_body
+
+    def eject_body(scanner):
+        # Eject checks its deadline before reading and after the reply.
+        # Scope small ticks to this body: captured PREP/scan polls rely on
+        # the shared clock expiring after their first mismatch for parity.
+        clock = _EjectClock()
+        with patched(time, "sleep", clock.sleep), patched(time, "monotonic", clock):
+            return original_eject_body(scanner)
+
+    time.sleep = lambda s: None
+    time.monotonic = _FastClock()
+    Scanner._eject_body = eject_body
     try:
         yield
     finally:
+        Scanner._eject_body = original_eject_body
         time.sleep, time.monotonic = real_sleep, real_mono
 
 
