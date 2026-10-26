@@ -96,7 +96,7 @@ def _raw_frame(vis):
 
 
 def _run(d, strip, *, roll=1, force=False, placement=None, frames="1-4",
-         **flags):
+         eject_outcome=None, eject_error=None, **flags):
     """One `_cmd_digitize --film 110` run against `d`. Returns (rc, record,
     scan-call list, stdout, stderr)."""
     scans: list = []
@@ -114,7 +114,11 @@ def _run(d, strip, *, roll=1, force=False, placement=None, frames="1-4",
             scans.append(frame)
             raw, w = _raw_frame(strip[frame])
             return raw, w, None
-        def eject(self): scans.append("eject")
+        def eject(self):
+            scans.append("eject")
+            if eject_error is not None:
+                raise eject_error
+            return eject_outcome
 
     args = argparse.Namespace(
         out=d, prefix="", roll=roll, force=force, assume_loaded=True,

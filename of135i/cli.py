@@ -203,6 +203,30 @@ def _print_session_failure(scanner: Scanner | None) -> None:
         print(safety.NO_COMMANDS_SENT, file=sys.stderr)
 
 
+def _report_eject(outcome, *, nothing_to_do_ok: bool = False) -> None:
+    """Say what Scanner.eject() actually did. "ejected" only when the
+    driver confirmed an idle status (device.EJECT_COMPLETED). Unknown
+    outcomes remain unconfirmed. A sensor-clear skip sent nothing
+    and is never reported as an eject: on stdout for `of135i eject`
+    (``nothing_to_do_ok``), as a warning on stderr where the operator
+    expected the strip to come out (scan --eject, digitize). An
+    unconfirmed completion never gets here: eject() raises
+    EjectIncompleteError and the session is failed."""
+    from .device import EJECT_COMPLETED, EJECT_SKIPPED_NO_MAGAZINE
+    if outcome == EJECT_SKIPPED_NO_MAGAZINE:
+        msg = ("eject NOT run: the loader sensor reads no magazine, so no motor command "
+               "was sent. The sensor is only trustworthy before the first initialize() "
+               "of a power cycle -- check the slot by hand.")
+        print(msg if nothing_to_do_ok else f"warning: {msg}",
+              file=sys.stdout if nothing_to_do_ok else sys.stderr)
+        return
+    if outcome != EJECT_COMPLETED:
+        print("warning: eject completion was not confirmed; check the slot by hand.",
+              file=sys.stderr)
+        return
+    print("ejected (eject move completed: status word read idle)")
+
+
 def _axis_dpi(args, positive: bool):
     """The (x_dpi, y_dpi) to stamp on the TIFF, accounting for the profile's
     anisotropy and the orientation transform applied before writing.
@@ -475,8 +499,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 incomplete.append(frame)
             _write_diag_sidecar(args, scanner, out, frame, coverage=cov)
         if args.eject:
-            scanner.eject()
-            print("ejected")
+            _report_eject(scanner.eject())
         if incomplete:
             # Fail closed on image integrity: a coverage failure is not a
             # normal complete scan. The full overscan raw is preserved, but
@@ -2912,7 +2935,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             try:
                 if film110:
                     _film110_fill_record(c.record, c.state, c.rdir, c.prior)
-                if stage == "scan":
+                if stage in ("scan", "eject"):
                     extra["per_frame"] = c.per_frame
                 c.record.update(status="failed", stage=stage,
                                 finished_utc=datetime.now(timezone.utc).isoformat(),
@@ -2964,6 +2987,9 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         # Strip 2's start seen in slot 1's last aperture belongs to slot 2.
         if s2.film_start_mm is None and s1.next_strip_start_mm is not None:
             s2.film_start_mm = s1.next_strip_start_mm
+
+    # Which step a non-zero rc belongs to ("scan" unless the eject failed).
+    fail_stage = {"stage": "scan"}
 
     def body(scanner: Scanner) -> int:
         scanner.park_mode = args.park
@@ -3071,8 +3097,11 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         if film110:
             for c in ctxs:
                 _film110_finalize(args, c.state, c.roll, emits[c.slot])
-        scanner.eject()
-        print("ejected")
+        # The frame loop is done: a failure from here on is the eject's
+        # (e.g. EjectIncompleteError), and the record says so.
+        fail_stage["stage"] = "eject"
+        _report_eject(scanner.eject())
+        fail_stage["stage"] = "scan"
         if film110 and any(c.state.aborted for c in ctxs):
             return 5
         incomplete = [f for c in ctxs for f in c.incomplete]
@@ -3095,7 +3124,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     try:
         rc = _run_writing_session(body)
     except BaseException as e:
-        record_failed("scan", error=repr(e))
+        record_failed(fail_stage["stage"], error=repr(e))
         raise
     finished = datetime.now(timezone.utc).isoformat()
     for c in ctxs:
@@ -3103,7 +3132,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
               or (rc == 5 and film110 and c.state.numbering_basis == "unidentified"))
         c.record.update(finished_utc=finished, per_frame=c.per_frame,
                         status="ok" if ok else "failed",
-                        stage=None if ok else "scan")
+                        stage=None if ok else fail_stage["stage"])
         if film110:
             _film110_fill_record(c.record, c.state, c.rdir, c.prior)
         if strips == 2:
@@ -3176,6 +3205,11 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         print(f"roll {roll} recorded FAILED: aperture coverage did not "
               f"verify on every frame (see per_frame in the manifest). "
               f"Re-run the roll with --force.", file=sys.stderr)
+    elif fail_stage["stage"] == "eject":
+        print(f"roll {roll} FAILED at eject (rc {rc}); recorded. The frame loop had "
+              f"finished (per_frame in the manifest says what was written), but the "
+              f"eject failed or did not confirm completion: the strip may still be in the "
+              f"scanner. Power-cycle before the next strip.", file=sys.stderr)
     else:
         print(f"roll {roll} FAILED at scan (rc {rc}); recorded. "
               f"Power-cycle before the next strip.", file=sys.stderr)
@@ -3239,8 +3273,7 @@ def _cmd_vendor_startup(args: argparse.Namespace) -> int:
 
 def _cmd_eject(args: argparse.Namespace) -> int:
     def body(scanner: Scanner) -> int:
-        scanner.eject()
-        print("ejected")
+        _report_eject(scanner.eject(), nothing_to_do_ok=True)
         return 0
 
     return _run_writing_session(body)
@@ -3277,8 +3310,8 @@ def _cmd_watch(args: argparse.Namespace) -> int:
                 elif name == "eject":
                     print("eject button pressed", flush=True)
                     if scanner.is_magazine_present():
-                        scanner.eject()
-                        print("ejected", flush=True)
+                        _report_eject(scanner.eject(), nothing_to_do_ok=True)
+                        sys.stdout.flush()
                     else:
                         print("magazine not detected, ignoring", flush=True)
                 else:

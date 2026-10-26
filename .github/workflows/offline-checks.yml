@@ -52,6 +52,9 @@ jobs:
       - name: Experimental vendor startup regressions
         run: python -m pytest -q tests/test_vendor_startup.py
 
+      - name: Eject outcome and deadline regressions
+        run: python -m pytest -q tests/test_eject_outcome.py tests/test_eject_deadline.py
+
       - name: Compiler-based suites (mark, ops, geometry, install)
         run: |
           set -e

@@ -379,6 +379,42 @@ def park_complete_status_matches(reply) -> bool:
     return (b[0] & PARK_COMPLETE_REQUIRED_MASK) == PARK_COMPLETE_REQUIRED_VALUE
 
 
+# eject(): what happened, stated honestly (Scanner.eject()'s return value;
+# Scanner.last_eject holds the detail). EJECT_COMPLETED: the eject move
+# was commanded and the status word then read idle. EJECT_SKIPPED_NO_
+# MAGAZINE: the loader sensor read clear and NOTHING was sent -- not an
+# eject (the sensor is only trustworthy before the first initialize() of
+# a power cycle, docs/hardware-safety.md, so after a scan this may be a
+# wrong reading). A move whose completion is never confirmed is not an
+# outcome: it raises safety.EjectIncompleteError (session FAILED).
+EJECT_COMPLETED = "completed"
+EJECT_SKIPPED_NO_MAGAZINE = "skipped-no-magazine"
+# Completion budget after the eject's GO. Unchanged value: the vendor's
+# own poll reads d9 -> f9 -> f8 over ~0.9 s (protocol-notes.md pass 14).
+EJECT_WAIT_TIMEOUT = 10.0
+EJECT_POLL_INTERVAL = 0.02
+# Completion rule, unchanged from the original eject: status byte has
+# 0x20 set and busy 0x01 clear. Added only: the reply must be 2 bytes
+# with the 0x55 ack -- a short or malformed reply never confirms (the old
+# read_status() took byte 0 of anything, and 0 of an empty reply).
+EJECT_DONE_MASK = 0x21
+EJECT_DONE_VALUE = 0x20
+
+
+def eject_complete_status_matches(reply) -> bool:
+    """True when a raw status-word reply (wValue 0x018e, wIndex 0x0122)
+    confirms the eject move finished: 2 bytes, ack 0x55, (byte & 0x21)
+    == 0x20. Anything else -- short, empty, long, bad ack, busy (d9, f9)
+    -- is not a confirmation."""
+    try:
+        b = bytes(reply)
+    except Exception:
+        return False
+    if len(b) != 2 or b[1] != 0x55:
+        return False
+    return (b[0] & EJECT_DONE_MASK) == EJECT_DONE_VALUE
+
+
 def check_line_count(n_lines: int) -> int:
     """Return ``n_lines`` if it can be encoded as a scan line count; raise
     otherwise. Called immediately before the count is encoded on every
@@ -534,6 +570,13 @@ class Scanner:
         # Lamp warmup budget for this scanner object (see _WARMUP_BUDGET_S).
         self.warmup_budget_s: float = _WARMUP_BUDGET_S
         self._diag_park_waits: dict | None = None
+        # Record of the last eject() call (outcome, loader-sensor reading
+        # and whether it was taken after an initialize() in this session,
+        # and the completion wait: reads, seconds, first/last status word,
+        # whether a busy word was seen, timed out). Survives every exit of
+        # the wait -- timeout, USB error, Ctrl-C -- like _diag_park_waits.
+        # Host-side bookkeeping only; adds no USB traffic.
+        self.last_eject: dict | None = None
 
         # PARK phase implementation switch (see park_semantic() and
         # docs/replay-analysis.md): "semantic" (default since 2026-09-17)
@@ -1895,7 +1938,7 @@ class Scanner:
             log.info("load_magazine: complete, status word %#06x", word)
             self._loaded_this_session = True
 
-    def eject(self) -> None:
+    def eject(self) -> str:
         """Eject the film magazine the way the vendor driver does it from
         a LOADED magazine (its app-start "jog": feed 6690, eject 3090 --
         load-only capture ops 151-169, ramval ops 736-760; protocol-
@@ -1925,21 +1968,43 @@ class Scanner:
           written with no scan phase after it): refused read-only with
           UnejectableStateError. The eject stalled twice from that state
           (Test 44) and no vendor flow ejects from it (Test 46).
+
+        Honest outcome (2026-10): returns EJECT_COMPLETED only when the
+        status word confirmed the move finished, EJECT_SKIPPED_NO_MAGAZINE
+        when nothing was sent because the sensor read clear (recorded in
+        last_eject with whether that reading came after an initialize()
+        in this session, i.e. from the unreliable sensor). A completion
+        that is never confirmed raises safety.EjectIncompleteError after
+        the eject's usual closing write (0x09=0x00, sent exactly as
+        before): the session is FAILED and nothing else follows -- no
+        retry, no second move, no park. Formerly that case was logged
+        and the caller reported "ejected".
         """
         # The film is leaving the gate -- any cached calibration (see
         # __init__'s _cal_cache comment) no longer applies to whatever
         # comes next, refused or not.
         self._cal_cache = None
+        sensor_after_init = bool(self._base_initialized or self._vendor_open)
         with self._operation("eject", cold_ok=True):
-            if not self.is_magazine_present():
-                log.info("eject: no magazine detected — nothing to do")
-                return
+            self.last_eject = {"outcome": None, "magazine_sensor": None,
+                               "sensor_after_initialize": sensor_after_init,
+                               "completion": None}
+            present = self.is_magazine_present()
+            self.last_eject["magazine_sensor"] = present
+            if not present:
+                log.info("eject: no magazine detected -- nothing sent%s",
+                         " (sensor read after initialize(): unreliable)"
+                         if sensor_after_init else "")
+                self.last_eject["outcome"] = EJECT_SKIPPED_NO_MAGAZINE
+                return EJECT_SKIPPED_NO_MAGAZINE
             if self.session.state is SessionState.COLD:
                 log.info("eject: reg 0x01=0x00 (cold state) — running cold_init() first")
                 self.cold_init()
             self._refuse_eject_from_base_table_state()
             self.session.phase = "eject"
             self._eject_body()
+            self.last_eject["outcome"] = EJECT_COMPLETED
+            return EJECT_COMPLETED
 
     def _refuse_eject_from_base_table_state(self) -> None:
         """Fail-closed guard before the eject sequence's first write.
@@ -1981,16 +2046,54 @@ class Scanner:
         # 0xd9 -> 0xf9 -> 0xf8 over ~0.9 s; done at 0xf8. The 0x008e
         # reg-0x01 engine bit used elsewhere stays clear after an eject
         # (observed 2026-09-02: 90 s timeout on a successful eject).
-        deadline = time.monotonic() + 10.0
-        last = None
-        while time.monotonic() < deadline:
-            last = self.io.read_status()
-            if (last & 0x21) == 0x20:
-                break
-            time.sleep(0.02)
-        else:
-            log.warning("eject: status word stuck at %#04x -- continuing", last)
+        # Bound every status read by the remaining 10 s budget and reject
+        # replies at or after its deadline before accepting completion.
+        # Keep the existing closing 0x09=0x00 write after an unconfirmed
+        # wait; transfer exceptions still propagate without further writes.
+        wait = {"reads": 0, "seconds": None, "first": None, "last": None,
+                "busy_seen": False, "timed_out": False}
+        if self.last_eject is not None:
+            self.last_eject["completion"] = wait
+        t0 = time.monotonic()
+        deadline = t0 + EJECT_WAIT_TIMEOUT
+        try:
+            while True:
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms < 1:
+                    wait["timed_out"] = True
+                    break
+                reply = bytes(self.io.dev.ctrl_transfer(
+                    0xC0, 0x04, 0x018E, 0x0122, 2, timeout=remaining_ms))
+                wait["reads"] += 1
+                wait["last"] = reply.hex()
+                if wait["first"] is None:
+                    wait["first"] = reply.hex()
+                if len(reply) == 2 and reply[0] & 0x01:
+                    wait["busy_seen"] = True
+                if time.monotonic() >= deadline:
+                    wait["timed_out"] = True
+                    break
+                if eject_complete_status_matches(reply):
+                    break
+                time.sleep(EJECT_POLL_INTERVAL)
+        finally:
+            wait["seconds"] = round(time.monotonic() - t0, 3)
         self.io.write_regs([(0x09, 0x00)])
+        if wait["timed_out"]:
+            last = bytes.fromhex(wait["last"]) if wait["last"] else b""
+            raise safety.EjectIncompleteError(
+                f"eject did NOT confirm completion: after the eject move's execute pulse the "
+                f"status word never read idle ((byte & {EJECT_DONE_MASK:#04x}) == "
+                f"{EJECT_DONE_VALUE:#04x}, ack 0x55) within {EJECT_WAIT_TIMEOUT:.0f}s: last "
+                f"{last.hex() or '(empty)'} after {wait['reads']} read(s), busy "
+                f"{'seen' if wait['busy_seen'] else 'never seen'}. The eject's closing motor-"
+                f"disable write (0x09=0x00) was sent as always; nothing else follows. The "
+                f"magazine may or may not have been released and the transport state is "
+                f"unknown -- this is NOT a completed eject. "
+                f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
+                status_word=int.from_bytes(last, "big") if len(last) == 2 else None,
+                reads=wait["reads"], seconds=wait["seconds"],
+                observed=self.session.start_reg01, session=self.session.snapshot())
 
     # -------------------------------------------------- lamp warmup retry
 
