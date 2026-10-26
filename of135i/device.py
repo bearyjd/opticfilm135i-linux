@@ -1579,6 +1579,130 @@ class Scanner:
         return frozenset(i for i, op in enumerate(phase.ops)
                          if op.kind == "poll" and op.wv == 0x018E)
 
+    def vendor_startup(self, experimental: bool = False) -> None:
+        """Explicit, experimental vendor startup; offline verified only.
+
+        Requires a fresh ARMED session, a fresh exact reg01=2255 read,
+        and exact F055 before any vendor OUT. Mechanical state is unverified.
+        Four moves: mode1c traverse71490, then mode18 6690/6690/3090.
+        Completion reports protocol progress, never physical release/load.
+        """
+        from . import tables_startup
+
+        session = self.session
+        session.write_allowed_or_final()
+        if not experimental:
+            raise OperationNotAllowedError(
+                "vendor_startup() requires explicit experimental=True. "
+                f"{safety.NO_COMMANDS_SENT}", session=session.snapshot())
+        if session.operations_started or session.operations or session.writes_attempted:
+            raise OperationNotAllowedError(
+                "vendor_startup() requires a fresh session with no earlier operations or writes.",
+                session=session.snapshot())
+        with self._operation("vendor_startup"):
+            session.write_allowed()  # rejects read-only; COLD is refused by _operation
+            session.phase = "vendor_startup_entry"
+            got = bytes(self.io.dev.ctrl_transfer(0xc0, 4, 0x008e, 0x0122, 2))
+            if got != b'\x22\x55':
+                raise OperationNotAllowedError(
+                    f"vendor_startup() requires exact live reg01 2255, got {got.hex()}. "
+                    f"{safety.NO_COMMANDS_SENT}", session=session.snapshot())
+            got = bytes(self.io.dev.ctrl_transfer(0xc0, 4, 0x018e, 0x0122, 2))
+            if got != b'\xf0\x55':
+                raise OperationNotAllowedError(
+                    f"vendor_startup() requires exact pre-write F055, got {got.hex()}. "
+                    f"{safety.NO_COMMANDS_SENT}", session=session.snapshot())
+            self._run_vendor_startup_phase(tables_startup.CONFIGURE)
+            for phase, busy, done, budget in tables_startup.MOTOR_PHASES:
+                self._run_vendor_startup_phase(phase)
+                self._wait_vendor_startup_motor(busy, done, budget)
+            self._run_vendor_startup_phase(tables_startup.DISABLE)
+            log.info("vendor_startup: startup sequence complete; mechanical position unverified")
+
+    def _run_vendor_startup_phase(self, phase: Phase) -> None:
+        """Validate startup replies before any dependent write.
+
+        Preserve shared execution behavior for existing operations. Captured
+        RMW inputs are gated rather than overwriting different live bits.
+        Informational values may vary; lengths/ACKs must always be valid.
+        """
+        from . import tables_startup
+
+        self.session.phase = phase.name
+        t0 = time.monotonic()
+        try:
+            for op in phase.ops:
+                if op.kind not in ("cr", "poll"):
+                    self._exec_ops([op])
+                    continue
+                if op.dt > _PACE_THRESHOLD:
+                    time.sleep(min(op.dt, _PACE_CAP))
+                got = bytes(self.io.dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.length))
+                ack_reply = (op.br == 4 and op.wv in (0x008e, 0x018e)
+                             and op.length == 2)
+                if len(got) != op.length or (ack_reply and got[1] != 0x55):
+                    raise OperationNotAllowedError(
+                        f"vendor startup control reply malformed at {op.wv:#06x}/{op.wi:#06x}: "
+                        f"{got.hex()}; stopping.", session=self.session.snapshot())
+                # ACK55, slope completion02 and pre-traverse D055 are exact.
+                if op.kind == "poll" and got != op.resp:
+                    raise OperationNotAllowedError(
+                        f"vendor startup protocol check failed at {op.wv:#06x}/{op.wi:#06x}: "
+                        f"got {got.hex()}, expected {op.resp.hex()}; stopping.",
+                        session=self.session.snapshot())
+                if op.wv == 0x008e and op.wi in (0x3122, 0x3222, 0x3522):
+                    if got != op.resp:
+                        raise OperationNotAllowedError(
+                            f"vendor startup captured read/modify/write input changed at "
+                            f"{op.wi:#06x}: got {got.hex()}, expected {op.resp.hex()}; stopping.",
+                            session=self.session.snapshot())
+                # DLL eligibility: TWO fresh reg100 reads, each bit02 clear.
+                if phase is tables_startup.TRAVERSE and op.wv == 0x018e and op.wi == 0x0022:
+                    if got[0] & 0x02:
+                        raise OperationNotAllowedError(
+                            "vendor startup traverse refused: live register100 bit02 is set; "
+                            "no motor GO was sent.", session=self.session.snapshot())
+                if op.resp and got != op.resp:
+                    self._diag_cr_mismatches += 1
+                    log.debug("startup informational read %04x/%04x: got %s, captured %s",
+                              op.wv, op.wi, got.hex(), op.resp.hex())
+        finally:
+            elapsed = time.monotonic() - t0
+            self._diag_phase_seconds[phase.name] = self._diag_phase_seconds.get(phase.name, 0.0) + elapsed
+
+    def _wait_vendor_startup_motor(self, busy: frozenset[bytes], done: bytes,
+                                   budget: float) -> None:
+        """Require a captured busy word after EACH GO before exact done.
+
+        Consecutive JOGs share F855 completion, so a stale F855 must never
+        complete a later move. All reads share one bounded phase deadline.
+        """
+        deadline = time.monotonic() + budget
+        observed_busy = False
+        got = b''
+        while True:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms < 1:
+                raise safety.StrictPollTimeoutError(
+                    f"vendor startup motor deadline exhausted before next status read. "
+                    f"{safety.NO_RECOVERY_ATTEMPTED}",
+                    last=got, want=done, session=self.session.snapshot())
+            got = bytes(self.io.dev.ctrl_transfer(
+                0xc0, 4, 0x018e, 0x0122, 2, timeout=remaining_ms))
+            if len(got) != 2 or got[1] != 0x55:
+                raise OperationNotAllowedError(
+                    f"vendor startup motor status malformed: {got.hex()}; stopping.",
+                    session=self.session.snapshot())
+            if time.monotonic() >= deadline:
+                raise safety.StrictPollTimeoutError(
+                    f"vendor startup motor did not reach busy then {done.hex()} within "
+                    f"{budget:.1f}s; last {got.hex()}. {safety.NO_RECOVERY_ATTEMPTED}",
+                    last=got, want=done, session=self.session.snapshot())
+            observed_busy |= got in busy
+            if observed_busy and got == done:
+                return
+            time.sleep(0.004)
+
     def jog_magazine(self) -> None:
         """Run the vendor's app-start jog (tables_load.JOG, clean-load
         capture ops 88-170): interrupt/sensor acks, motor enable, feed

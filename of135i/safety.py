@@ -306,6 +306,7 @@ class HardwareSession:
         self.last_write_utc: str | None = None
         self.phase: str | None = None
         self.operations: list[str] = []
+        self.operations_started = 0     # includes completed zero-write operations
         self.failure: dict | None = None
         self.refusal: dict | None = None
         self._lock = threading.RLock()
@@ -464,6 +465,7 @@ class HardwareSession:
             if self.state in _FINAL_STATES:
                 self.write_allowed()   # raises SessionFailedError with the reason
             self.operations.append(name)
+            self.operations_started += 1
         try:
             yield self
         except BaseException as e:
@@ -493,6 +495,7 @@ class HardwareSession:
                 "last_write_utc": self.last_write_utc,
                 "phase": self.phase,
                 "operations": list(self.operations),
+                "operations_started": self.operations_started,
                 "failure": dict(self.failure) if self.failure else None,
                 "refusal": dict(self.refusal) if self.refusal else None,
             }

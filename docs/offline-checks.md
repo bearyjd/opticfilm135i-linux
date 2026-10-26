@@ -91,6 +91,14 @@ under pytest in CI (the standalone suites above remain in place):
 python -m pytest -q tests/test_slides.py tests/test_ir.py tests/test_offline.py
 ```
 
+The experimental vendor startup has a separate pytest suite, including
+parameterized refusals, exact sanitized write-transcript checks and motor
+deadline/failure checks. It never opens a physical USB device:
+
+```
+python -m pytest -q tests/test_vendor_startup.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```

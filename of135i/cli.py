@@ -3224,6 +3224,19 @@ def _cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_vendor_startup(args: argparse.Namespace) -> int:
+    if not args.experimental:
+        print("vendor-startup requires --experimental; no device was opened.", file=sys.stderr)
+        return 2
+
+    def body(scanner: Scanner) -> int:
+        scanner.vendor_startup(experimental=True)
+        print("Startup sequence complete; mechanical position unverified.")
+        return 0
+
+    return _run_writing_session(body)
+
+
 def _cmd_eject(args: argparse.Namespace) -> int:
     def body(scanner: Scanner) -> int:
         scanner.eject()
@@ -3429,6 +3442,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_version = sub.add_parser("version", help="print the driver version and git revision")
     p_version.set_defaults(func=_cmd_version)
+
+    p_startup = sub.add_parser("vendor-startup", help="experimental captured vendor startup (offline verified only)")
+    p_startup.add_argument("--experimental", action="store_true",
+        help="explicitly opt in; requires a fresh writing session with reg01=22 and exact F055")
+    p_startup.set_defaults(func=_cmd_vendor_startup)
 
     p_eject = sub.add_parser("eject", help="eject the film magazine")
     p_eject.set_defaults(func=_cmd_eject)

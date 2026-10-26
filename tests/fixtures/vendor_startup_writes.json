@@ -1,0 +1,551 @@
+{
+  "provenance": {
+    "capture_sha256": "dc6f2ca6b69c88f445f5e07805ad2fd48c12c1e8e601066a91fe72754cf8c4eb",
+    "selection": "Vendor control OUT and bulk OUT, packets 6807..9945; no other-device data, EEPROM responses or image payloads. Frozen directly from decoded capture, independent of production tables."
+  },
+  "writes": [
+    {
+      "packet": 6809,
+      "kind": "cw",
+      "bm": 64,
+      "br": 12,
+      "wv": 139,
+      "wi": 9982,
+      "data": "00"
+    },
+    {
+      "packet": 6825,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0122027803200402054806180700080009000a480b6c0c000d00110012041308140115801601170c181419001a001b001c001d001e101f00200c2100221a2300"
+    },
+    {
+      "packet": 6831,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "241a2500260027002b202c122dc030ee3180321f338e348035fb36fc3721386039023a003b003c003d003e003f014f6352075309540b5501560357055a125b00"
+    },
+    {
+      "packet": 6835,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "5c005e1f5f07600061006320677f687f690170067109720873097400750076007700780079007a007b007c007d007e757f308000812282008301841885008600"
+    },
+    {
+      "packet": 6839,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "87009300940095009d08a009a400a520a600a700a800a900aa00ab30b800b938ba00bd00be00bf00"
+    },
+    {
+      "packet": 6843,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 387,
+      "wi": 0,
+      "data": "14801580"
+    },
+    {
+      "packet": 6847,
+      "kind": "cw",
+      "bm": 64,
+      "br": 12,
+      "wv": 140,
+      "wi": 16,
+      "data": "0d"
+    },
+    {
+      "packet": 6851,
+      "kind": "cw",
+      "bm": 64,
+      "br": 12,
+      "wv": 140,
+      "wi": 19,
+      "data": "0d"
+    },
+    {
+      "packet": 6855,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0b64"
+    },
+    {
+      "packet": 6859,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "130f"
+    },
+    {
+      "packet": 6863,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0b6c"
+    },
+    {
+      "packet": 6867,
+      "kind": "cw",
+      "bm": 64,
+      "br": 12,
+      "wv": 139,
+      "wi": 7,
+      "data": "01"
+    },
+    {
+      "packet": 6871,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 139,
+      "wi": 9,
+      "data": "00000000"
+    },
+    {
+      "packet": 6877,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 139,
+      "wi": 11,
+      "data": "00000100"
+    },
+    {
+      "packet": 6883,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 139,
+      "wi": 11,
+      "data": "40000100"
+    },
+    {
+      "packet": 6893,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0310"
+    },
+    {
+      "packet": 6897,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0300"
+    },
+    {
+      "packet": 6901,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "51005d005ef8"
+    },
+    {
+      "packet": 6905,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "51015d005e80"
+    },
+    {
+      "packet": 6909,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "51025d005e00"
+    },
+    {
+      "packet": 6913,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "51035d005e00"
+    },
+    {
+      "packet": 6917,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "51045d005e00"
+    },
+    {
+      "packet": 6921,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "51055d005e00"
+    },
+    {
+      "packet": 6925,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "51065d005e00"
+    },
+    {
+      "packet": 6929,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "51075d005e00"
+    },
+    {
+      "packet": 7517,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "317c"
+    },
+    {
+      "packet": 7523,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "31fc"
+    },
+    {
+      "packet": 7529,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "321d"
+    },
+    {
+      "packet": 7539,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "021cae00afff3d013e173f42"
+    },
+    {
+      "packet": 7543,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 130,
+      "wi": 1,
+      "data": "00c0001000020000"
+    },
+    {
+      "packet": 7547,
+      "kind": "bo",
+      "length": 512,
+      "sha256": "66dabfa4175687e6a3f09a7f9d0461d5fee30bd61c9754ab1b4b582600bcec41"
+    },
+    {
+      "packet": 7551,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 130,
+      "wi": 1,
+      "data": "0000011000020000"
+    },
+    {
+      "packet": 7555,
+      "kind": "bo",
+      "length": 512,
+      "sha256": "66dabfa4175687e6a3f09a7f9d0461d5fee30bd61c9754ab1b4b582600bcec41"
+    },
+    {
+      "packet": 7559,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0f01"
+    },
+    {
+      "packet": 9219,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "36fc"
+    },
+    {
+      "packet": 9225,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "338e"
+    },
+    {
+      "packet": 9233,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "3207"
+    },
+    {
+      "packet": 9239,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0908"
+    },
+    {
+      "packet": 9243,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "1c0002183d003e1a3f227d007e757f308a008b008c008d008e008f00900091009200ae00afff"
+    },
+    {
+      "packet": 9251,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 130,
+      "wi": 1,
+      "data": "00c0001000020000"
+    },
+    {
+      "packet": 9255,
+      "kind": "bo",
+      "length": 512,
+      "sha256": "66dabfa4175687e6a3f09a7f9d0461d5fee30bd61c9754ab1b4b582600bcec41"
+    },
+    {
+      "packet": 9259,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 130,
+      "wi": 1,
+      "data": "0000011000020000"
+    },
+    {
+      "packet": 9263,
+      "kind": "bo",
+      "length": 512,
+      "sha256": "66dabfa4175687e6a3f09a7f9d0461d5fee30bd61c9754ab1b4b582600bcec41"
+    },
+    {
+      "packet": 9267,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0f01"
+    },
+    {
+      "packet": 9507,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0900"
+    },
+    {
+      "packet": 9513,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "321f"
+    },
+    {
+      "packet": 9519,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "35bb"
+    },
+    {
+      "packet": 9531,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "321d"
+    },
+    {
+      "packet": 9539,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "1c0002183d003e1a3f227d007e757f308a008b008c008d008e008f00900091009200ae00afff"
+    },
+    {
+      "packet": 9543,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 130,
+      "wi": 1,
+      "data": "00c0001000020000"
+    },
+    {
+      "packet": 9547,
+      "kind": "bo",
+      "length": 512,
+      "sha256": "66dabfa4175687e6a3f09a7f9d0461d5fee30bd61c9754ab1b4b582600bcec41"
+    },
+    {
+      "packet": 9551,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 130,
+      "wi": 1,
+      "data": "0000011000020000"
+    },
+    {
+      "packet": 9555,
+      "kind": "bo",
+      "length": 512,
+      "sha256": "66dabfa4175687e6a3f09a7f9d0461d5fee30bd61c9754ab1b4b582600bcec41"
+    },
+    {
+      "packet": 9559,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0f01"
+    },
+    {
+      "packet": 9797,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "321f"
+    },
+    {
+      "packet": 9801,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0908"
+    },
+    {
+      "packet": 9805,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "1c0002183d003e0c3f127d007e757f308a008b008c008d008e008f00900091009200ae00afff"
+    },
+    {
+      "packet": 9809,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 130,
+      "wi": 1,
+      "data": "00c0001000020000"
+    },
+    {
+      "packet": 9813,
+      "kind": "bo",
+      "length": 512,
+      "sha256": "66dabfa4175687e6a3f09a7f9d0461d5fee30bd61c9754ab1b4b582600bcec41"
+    },
+    {
+      "packet": 9817,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 130,
+      "wi": 1,
+      "data": "0000011000020000"
+    },
+    {
+      "packet": 9821,
+      "kind": "bo",
+      "length": 512,
+      "sha256": "66dabfa4175687e6a3f09a7f9d0461d5fee30bd61c9754ab1b4b582600bcec41"
+    },
+    {
+      "packet": 9825,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0f01"
+    },
+    {
+      "packet": 9943,
+      "kind": "cw",
+      "bm": 64,
+      "br": 4,
+      "wv": 131,
+      "wi": 0,
+      "data": "0900"
+    }
+  ]
+}
