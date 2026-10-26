@@ -1040,6 +1040,129 @@ def test_keyboard_interrupt_marks_session_failed_without_recovery():
     print("test_keyboard_interrupt_marks_session_failed_without_recovery OK")
 
 
+class _ShortBulkInFake(FakeUsbDevice):
+    """FakeUsbDevice whose ONE selected data bulk-IN (EP 0x81) returns
+    fewer bytes than requested -- what pyusb returns on a short packet.
+    `short(fake, length)` -> byte count to return, or None for a normal
+    read; it is consulted until it fires once. `short_at` records
+    (out_count, pulses) at that read, so a test can prove nothing was
+    sent afterwards."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.short = None
+        self.short_at = None
+
+    def read(self, endpoint, size_or_buffer, timeout=None):
+        data = super().read(endpoint, size_or_buffer, timeout)
+        if endpoint == 0x83 or self.short is None:
+            return data
+        n = self.short(self, int(size_or_buffer))
+        if n is None:
+            return data
+        self.short = None
+        self.short_at = (self.out_count, self.pulses)
+        return data[:n]
+
+
+def _run_scan_with_short_cal_read(phase, *, ir=False, keep=lambda ln: ln // 2,
+                                  capture_dir=None):
+    if ir:
+        from test_ir import _build_cal_buffers
+        cal_buffers = _build_cal_buffers()
+    else:
+        cal_buffers = _cal_buffers()
+    fake = _ShortBulkInFake(reg01=0x22, cal_buffers=cal_buffers)
+    scanner = make_scanner(fake)
+    if capture_dir is not None:
+        scanner._cal_capture = device._CalCapture(capture_dir)
+    fake.short = lambda f, ln: keep(ln) if scanner.session.phase == phase else None
+    exc = None
+    with fast_time():
+        try:
+            scanner.initialize(ir=ir)
+            scanner.scan(frame=1, ir=ir)
+        except BaseException as e:   # noqa: BLE001
+            exc = e
+    return fake, scanner, exc
+
+
+def test_short_calibration_bulk_in_fails_closed():
+    """Acquisition validity (device.CAL_ACQUISITION_PHASES): a short
+    bulk-IN chunk inside a calibration measurement raises
+    CalibrationError at once -- no further transfer of that phase, no
+    execute pulse, no PARK -- the session is FAILED and frozen, as the
+    SANE runner's ShortBulk rule does. Includes a 0-byte read and a
+    one-byte-short read (a whole-pixel short dark buffer used to be
+    accepted silently by reshape(-1, 3))."""
+    cases = [(p, lambda ln: ln // 2) for p in (
+        "cal_dark_a", "cal_dark_b", "cal_white", "cal_shading_measure", "cal_shading_verify")]
+    cases += [("cal_dark_b", lambda ln: 0), ("cal_dark_a", lambda ln: ln - 6)]
+    for phase, keep in cases:
+        fake, scanner, exc = _run_scan_with_short_cal_read(phase, keep=keep)
+        assert isinstance(exc, safety.CalibrationError), (phase, exc)
+        assert "bytes; the measurement is incomplete" in str(exc), str(exc)
+        assert fake.short_at == (fake.out_count, fake.pulses), (phase, fake.short_at,
+                                                                fake.out_count, fake.pulses)
+        _assert_failed_and_frozen(fake, scanner, exc, operation="scan", phase_prefix=phase)
+    # Dual-light profile: same rule, same phase names.
+    fake, scanner, exc = _run_scan_with_short_cal_read("cal_dark_b", ir=True)
+    assert isinstance(exc, safety.CalibrationError), exc
+    assert fake.short_at == (fake.out_count, fake.pulses)
+    _assert_failed_and_frozen(fake, scanner, exc, operation="scan", phase_prefix="cal_dark_b")
+    print("test_short_calibration_bulk_in_fails_closed OK")
+
+
+def test_short_gain_checks_fail_closed_with_capture_parity():
+    """Both discarded gain-check measurements still require complete reads.
+
+    Capture records the same short transfer and must not change the USB
+    stream, failure point, or terminal-session behavior in either profile.
+    """
+    for ir in (False, True):
+        for phase in ("cal_gain_check_a", "cal_gain_check_b"):
+            baseline = None
+            for capture in (False, True):
+                with tempfile.TemporaryDirectory() as capture_dir:
+                    fake, scanner, exc = _run_scan_with_short_cal_read(
+                        phase, ir=ir, capture_dir=capture_dir if capture else None)
+                    assert fake.short_at is not None, (ir, phase, exc)
+                    assert isinstance(exc, safety.CalibrationError), (ir, phase, exc)
+                    assert fake.short_at == (fake.out_count, fake.pulses)
+                    wire = list(fake.wire_log)
+                    if capture:
+                        assert wire == baseline, (ir, phase)
+                        cap = scanner._cal_capture
+                        record = cap.reads[-1]
+                        assert record["phase"] == phase
+                        assert record["returned"] == record["requested"] // 2
+                        assert record["exception"] is None
+                        partial = cap.buffers[-1]
+                        assert partial["name"] == f"partial:{phase}"
+                        assert len(partial["raw"]) == record["returned"]
+                    else:
+                        baseline = wire
+                    _assert_failed_and_frozen(fake, scanner, exc,
+                                              operation="scan", phase_prefix=phase)
+    print("test_short_gain_checks_fail_closed_with_capture_parity OK")
+
+
+def test_cal_acquisition_phases_are_exactly_the_calibration_reads():
+    """The short-read rule names every profile's calibration measurement
+    phases and nothing else (prep/position/scan/park reads keep their
+    previous tolerance)."""
+    from of135i import tables_ir
+    attrs = ("CAL_DARK_A", "CAL_DARK_B", "CAL_WHITE", "CAL_GAIN_CHECK_A",
+             "CAL_GAIN_CHECK_B", "CAL_SHADING_MEASURE", "CAL_SHADING_VERIFY")
+    mods = [tables, tables_ir] + [device.dual_tables(d) for d in (600, 1200, 2400, 7200)]
+    for t in mods:
+        names = {getattr(t, a).name for a in attrs}
+        assert names == device.CAL_ACQUISITION_PHASES, (t.__name__, names)
+        for other in ("PREP", "AFE_BASE", "POSITION", "PARK", "CAL_SHADING_UPLOAD"):
+            assert getattr(t, other).name not in device.CAL_ACQUISITION_PHASES, (t.__name__, other)
+    print("test_cal_acquisition_phases_are_exactly_the_calibration_reads OK")
+
+
 def test_load_magazine_requires_initialize_and_matches_trace():
     fake = FakeUsbDevice(reg01=0x22)
     vendor_like_load_status(fake)    # a load that completes like the capture
@@ -2640,6 +2763,9 @@ def main() -> int:
         test_fault_during_eject,
         test_fault_during_magazine_load,
         test_keyboard_interrupt_marks_session_failed_without_recovery,
+        test_short_calibration_bulk_in_fails_closed,
+        test_cal_acquisition_phases_are_exactly_the_calibration_reads,
+        test_short_gain_checks_fail_closed_with_capture_parity,
         test_short_control_out_before_execute_pulse,
         test_short_control_out_containing_execute_pulse,
         test_short_control_out_after_completed_execute_pulse,

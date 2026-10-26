@@ -167,6 +167,26 @@ NONSTRICT_POLL_FLOOR_S = 0.3
 # Per-scan cap on recorded poll settle entries (diag "poll_settle").
 _POLL_SETTLE_CAP = 48
 
+# Calibration acquisition validity. In these phases every bulk-IN chunk
+# routed into a measurement buffer must return exactly the captured chunk
+# length; a short chunk raises CalibrationError right there, before the
+# phase's next op, so the session is FAILED and nothing further is sent.
+# Same rule as the SANE op-program runner, which fails closed with
+# ShortBulk on these phases (tools/gen_sane_tables.py docstring,
+# tests/test_sane_ops.py test_short_bulk_fails_closed). Before this rule
+# a short dark/white read silently fed offset_codes()/gain_codes() a
+# partial measurement (reshape(-1, 3) accepts any whole pixel count) and
+# a short shading read kept writing the rest of its phase before the
+# fixed reshape failed. Image (scan) and drain reads are NOT covered:
+# their tolerance is unchanged. The dark_b residual substitution (Test
+# 32) and the --dark-fallback option are content rules on a complete
+# buffer and are unchanged.
+CAL_ACQUISITION_PHASES = frozenset({
+    "cal_dark_a", "cal_dark_b", "cal_white",
+    "cal_gain_check_a", "cal_gain_check_b",
+    "cal_shading_measure", "cal_shading_verify",
+})
+
 # Semantic PARK (see park_semantic() and docs/replay-analysis.md's
 # "Conversion order" step 1): timeout and poll interval for the two
 # condition waits that replace the captured trace's pacing.
@@ -778,6 +798,18 @@ class Scanner:
                         raise
                     cap.note_read(self.session.phase, op.length, len(data),
                                   _t0, time.monotonic(), None)
+                if (cur is not None and len(data) != op.length
+                        and self.session.phase in CAL_ACQUISITION_PHASES):
+                    if cap is not None:
+                        cap.note_buffer(f"partial:{self.session.phase}",
+                                        self.session.phase, bytes(cur) + bytes(data))
+                    raise safety.CalibrationError(
+                        f"calibration bulk read in phase {self.session.phase} returned "
+                        f"{len(data)} of {op.length} bytes; the measurement is incomplete "
+                        f"and was not used. The scan stops here, before the phase's next "
+                        f"transfer. {safety.NO_RECOVERY_ATTEMPTED} "
+                        f"{safety.POWER_CYCLE_INSTRUCTION}",
+                        session=self.session.snapshot())
                 if cur is not None:
                     cur.extend(data)
             else:
@@ -1583,7 +1615,9 @@ class Scanner:
         """Explicit, experimental vendor startup; offline verified only.
 
         Requires a fresh ARMED session, a fresh exact reg01=2255 read,
-        and exact F055 before any vendor OUT. Mechanical state is unverified.
+        and exact F055 before any vendor OUT. The packet 6813 reg101
+        bit08 preflight must read clear before the base-register write.
+        Mechanical state and COLD eligibility remain unverified.
         Four moves: mode1c traverse71490, then mode18 6690/6690/3090.
         Completion reports protocol progress, never physical release/load.
         """
@@ -1598,6 +1632,16 @@ class Scanner:
         if session.operations_started or session.operations or session.writes_attempted:
             raise OperationNotAllowedError(
                 "vendor_startup() requires a fresh session with no earlier operations or writes.",
+                session=session.snapshot())
+        pre = tables_startup.CONFIGURE.ops[tables_startup.PRESENCE_PREFLIGHT_INDEX]
+        first_reg_write = next(i for i, op in enumerate(tables_startup.CONFIGURE.ops)
+                               if op.kind == "cw" and op.wv == 0x0083)
+        if not (pre.kind == "cr" and pre.bm == 0xc0 and pre.br == 4 and pre.wv == 0x018e
+                and pre.wi == 0x0122 and pre.length == 2
+                and tables_startup.PRESENCE_PREFLIGHT_INDEX < first_reg_write):
+            raise OperationNotAllowedError(
+                "vendor_startup() table invariant failed: presence preflight read is not the "
+                f"reg101 read before the first register write. {safety.NO_COMMANDS_SENT}",
                 session=session.snapshot())
         with self._operation("vendor_startup"):
             session.write_allowed()  # rejects read-only; COLD is refused by _operation
@@ -1631,7 +1675,7 @@ class Scanner:
         self.session.phase = phase.name
         t0 = time.monotonic()
         try:
-            for op in phase.ops:
+            for index, op in enumerate(phase.ops):
                 if op.kind not in ("cr", "poll"):
                     self._exec_ops([op])
                     continue
@@ -1656,6 +1700,18 @@ class Scanner:
                             f"vendor startup captured read/modify/write input changed at "
                             f"{op.wi:#06x}: got {got.hex()}, expected {op.resp.hex()}; stopping.",
                             session=self.session.snapshot())
+                # Conservatively require live reg101 bit08 clear at packet 6813:
+                # a set bit can enter an unimplemented vendor cancel/drain path,
+                # subject to additional configuration and helper predicates.
+                # Stop before base write 6825; see docs/vendor-startup.md.
+                if (phase is tables_startup.CONFIGURE
+                        and index == tables_startup.PRESENCE_PREFLIGHT_INDEX
+                        and got[0] & tables_startup.PRESENCE_BIT):
+                    raise OperationNotAllowedError(
+                        f"vendor startup refused: live register101 bit08 set at the vendor "
+                        f"presence preflight ({got.hex()}); a possible vendor cancel/drain path is "
+                        f"not implemented. No base-register write or motor GO was sent. "
+                        f"{safety.NO_RECOVERY_ATTEMPTED}", session=self.session.snapshot())
                 # DLL eligibility: TWO fresh reg100 reads, each bit02 clear.
                 if phase is tables_startup.TRAVERSE and op.wv == 0x018e and op.wi == 0x0022:
                     if got[0] & 0x02:

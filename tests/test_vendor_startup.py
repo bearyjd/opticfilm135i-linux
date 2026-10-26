@@ -269,7 +269,10 @@ class CorruptedRead(StartupDevice):
         got = super().ctrl_transfer(bm,br,wv,wi,data_or_wLength,timeout)
         if bm & 0x80 and (wv,wi) == self.target[:2]:
             self.seen += 1
-            if self.seen == self.target[2]: return self.reply
+            if self.seen == self.target[2]:
+                if isinstance(self.reply, BaseException):
+                    raise self.reply
+                return self.reply
         return got
 
 
@@ -325,6 +328,80 @@ def test_unrelated_register_bits_may_differ(wv,wi,n,reply):
     fake = CorruptedRead(wv,wi,n,reply)
     run(fake)
     assert fake.pulses == 4
+
+
+@pytest.mark.parametrize('reply',[b'\xd8\x55',b'\xf8\x55',b'\x08\x55'])
+def test_vendor_presence_preflight_bit08_set_stops_before_base_write(reply):
+    # Occurrence 1 is the native entry gate; occurrence 2 is packet 6813,
+    # the DLL preflight read (0x1800272e0 -> 0x180087030 -> 0x1800aac80).
+    fake = CorruptedRead(0x18e,0x122,2,reply)
+    scanner = Scanner(UsbIo(fake))
+    with pytest.raises(safety.SafetyError): scanner.vendor_startup(experimental=True)
+    assert scanner.session.state is safety.SessionState.FAILED
+    assert fake.pulses == 0
+    # Only the captured chip-ID acknowledgement precedes the refusal.
+    assert [(e['wv'],e['wi'],e['data']) for e in fake.out_log] == [(0x8b,0x26fe,b'\x00')]
+    assert not any(e['wv'] == 0x83 for e in fake.out_log)
+    before = fake.touched
+    with pytest.raises(safety.SessionFailedError): scanner.vendor_startup(experimental=True)
+    assert fake.touched == before
+
+
+@pytest.mark.parametrize('failure', [usb.core.USBError('preflight failed'), KeyboardInterrupt()])
+def test_vendor_presence_preflight_exception_stops_before_base_write(failure):
+    fake = CorruptedRead(0x18e, 0x122, 2, failure)
+    scanner = Scanner(UsbIo(fake))
+    with pytest.raises(type(failure)):
+        scanner.vendor_startup(experimental=True)
+    assert scanner.session.state is safety.SessionState.FAILED
+    assert fake.pulses == 0
+    assert [(e['wv'], e['wi'], e['data']) for e in fake.out_log] == [(0x8b, 0x26fe, b'\x00')]
+    before = (fake.touched, fake.in_count)
+    with pytest.raises(safety.SessionFailedError):
+        scanner.vendor_startup(experimental=True)
+    assert (fake.touched, fake.in_count) == before
+
+
+@pytest.mark.parametrize('reply',[b'\xd0\x55',b'\xf4\x55',b'\x70\x55'])
+def test_vendor_presence_preflight_other_bits_informational(reply):
+    fake = CorruptedRead(0x18e,0x122,2,reply)
+    run(fake)
+    assert fake.pulses == 4
+
+
+@pytest.mark.parametrize('reply',[b'\xf0',b'\xf0\x00',b''])
+def test_vendor_presence_preflight_malformed_fails_closed(reply):
+    fake = CorruptedRead(0x18e,0x122,2,reply)
+    with pytest.raises(safety.SafetyError): run(fake)
+    assert fake.pulses == 0
+    assert not any(e['wv'] == 0x83 for e in fake.out_log)
+
+
+def test_presence_preflight_table_invariant_checked_before_any_write(monkeypatch):
+    from of135i import tables_startup
+    monkeypatch.setattr(tables_startup,'PRESENCE_PREFLIGHT_INDEX',4)  # base write 6825
+    fake = StartupDevice()
+    with pytest.raises(safety.SafetyError): run(fake)
+    assert fake.touched == 0 and fake.pulses == 0
+
+
+def test_startup_tables_keep_vendor_predicate_order():
+    from of135i import tables_startup as ts
+    ops = ts.CONFIGURE.ops
+    pre = ops[ts.PRESENCE_PREFLIGHT_INDEX]
+    assert (pre.kind,pre.wv,pre.wi,pre.length,pre.resp) == ('cr',0x18e,0x122,2,b'\xf0\x55')
+    assert [(o.kind,o.wv,o.wi) for o in ops[:3]] == [('cr',0x8a,0x26fe),('cw',0x8b,0x26fe),('poll',0x8e,0x20)]
+    assert ops[4].kind == 'cw' and ops[4].wv == 0x83 and ops[4].data[:2] == b'\x01\x22'
+    tr = ts.TRAVERSE.ops
+    home = next(i for i,o in enumerate(tr) if o.kind=='cw' and o.data == b'\x32\x1d')
+    feed = next(i for i,o in enumerate(tr) if o.kind=='cw' and o.data == ts.TRAVERSE_FEED)
+    between = [(o.kind,o.wv,o.wi,o.resp) for o in tr[home+1:feed]]
+    # ACK, exact D055 (presence clear), then exactly two live reg100 reads; no write between.
+    assert between == [('poll',0x8e,0x20,b'\x55'),('poll',0x18e,0x122,b'\xd0\x55'),
+                       ('cr',0x18e,0x22,b'\x70\x55'),('cr',0x18e,0x22,b'\x70\x55')]
+    go = [i for i,o in enumerate(tr) if o.kind=='cw' and o.wv==0x83 and o.data==b'\x0f\x01']
+    assert len(go) == 1 and go[0] > feed
+    assert sum(o.kind=='cr' and o.wv==0x18e and o.wi==0x22 for o in tr) == 2
 
 
 @pytest.mark.parametrize('n,pulses',[(32,1),(40,2),(48,3),(54,4)])
