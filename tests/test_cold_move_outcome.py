@@ -167,7 +167,7 @@ def test_row2_early_exit_about_one_second_after_motor_stopped():
     _assert_stopped_after_first_move(fake, scanner, exc, "ended-off-sensor")
     assert exc.last.hex() == "f055"
     elapsed = st["reads"][-1][0] - _first_post_busy_idle(st)
-    assert 1.0 <= elapsed < 1.0 + 3 * STEP, elapsed
+    assert 1.0 <= elapsed < 1.0 + 4 * STEP, elapsed
     assert st["reads"][-1][0] < 2.0
 
 
@@ -203,6 +203,47 @@ def test_row6_malformed_never_counts(bad, early):
     assert st["reads"][-1][0] >= device.COLD_MOVE_TIMEOUT
 
 # ------------------------------------------------------------ window details
+
+
+def test_a_slow_read_never_shortens_the_window():
+    # Review finding: the loop's clock value is taken before the sleep and
+    # the transfer. A first stopped reply that took 1.1 s to arrive must
+    # not count that time as observed stop.
+    fake = FakeUsbDevice(reg01=0x00)
+    scanner = make_scanner(fake)
+    scanner.cold_move_early_fail = True
+    exc = None
+    with sim_clock() as clock:
+        st = _script_first_move(fake, clock, [("d955", 0), ("f055", None)])
+        scripted = fake.ctrl_transfer
+        done_at = {}
+
+        def slow(bm, br, wv=0, wi=0, data_or_wLength=None, timeout=None):
+            n = len(st["reads"])
+            got = scripted(bm, br, wv, wi, data_or_wLength, timeout)
+            if len(st["reads"]) == 2 and n == 1:      # the first f055
+                clock["t"] += 1.1
+                done_at["t"] = clock["t"]
+            return got
+        fake.ctrl_transfer = slow
+        try:
+            scanner.cold_init()
+        except safety.SafetyError as e:
+            exc = e
+    assert isinstance(exc, safety.ColdMoveEndedOffSensorError), exc
+    assert st["reads"][-1][0] - done_at["t"] >= 1.0, (st["reads"][:4], done_at)
+
+
+def test_default_mode_wire_is_the_same_whatever_the_outcome():
+    # In default mode every outcome waits the same 30 s with the same
+    # loop: the transfers (reads carry no reply data in the log) match the
+    # busy-forever run, whose read count the wire baseline pins.
+    logs = [_cold(script)[0].wire_log for script in (
+        [("d955", None)], [("f055", 0), ("d955", 0), ("f055", None)],
+        [("f055", None)], [("d155", None)], [("d955", 0), ("f0", None)],
+        [("d955", 0), ("fc55", None)])]
+    assert all(log == logs[0] for log in logs[1:])
+    assert len(logs[0]) > 100
 
 
 def test_busy_again_restarts_the_window():

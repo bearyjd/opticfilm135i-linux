@@ -317,12 +317,19 @@ class _ColdMoveWatch:
     """Read history of one cold-start motor completion wait (on_read hook
     of UsbIo.poll_status_word). Classifies a timeout; with ``early_fail``
     raises ColdMoveEndedOffSensorError (see COLD_MOVE_IDLE_WINDOW_S).
-    Uses only the clock value the poll loop already took."""
+    Uses only the clock value the poll loop already took.
+
+    ``t`` is taken BEFORE its read, so it is a lower bound on when that
+    reply was read. The window therefore starts at the ``t`` of the read
+    AFTER the first stopped-off-sensor reply (an upper bound on when that
+    reply was read), and a slow transfer can only lengthen the observed
+    stop, never shorten it."""
 
     def __init__(self, early_fail: bool):
         self.early_fail = early_fail
         self.busy_seen = False
         self.last = b""
+        self._idle_pending = False
         self._idle_since = None
 
     @staticmethod
@@ -331,14 +338,17 @@ class _ColdMoveWatch:
 
     def __call__(self, raw: bytes, t: float) -> None:
         self.last = raw
+        if self._idle_pending:
+            self._idle_since, self._idle_pending = t, False
         ok = self._well_formed(raw)
         if ok and raw[0] & 0x01:
             self.busy_seen = True
         if not (self.busy_seen and ok and not raw[0] & 0x09):
-            self._idle_since = None
+            self._idle_since, self._idle_pending = None, False
             return
         if self._idle_since is None:
-            self._idle_since = t
+            self._idle_pending = True
+            return
         if self.early_fail and t - self._idle_since >= COLD_MOVE_IDLE_WINDOW_S:
             raise safety.ColdMoveEndedOffSensorError(
                 "motor stopped off the home sensor", last=raw,
