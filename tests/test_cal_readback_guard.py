@@ -256,3 +256,67 @@ def test_parsers_default_to_log_and_accept_fail(cmd):
     parser = cli.build_parser()
     assert parser.parse_args(cmd).cal_readback_guard == "log"
     assert parser.parse_args(cmd + ["--cal-readback-guard", "fail"]).cal_readback_guard == "fail"
+
+
+# ------------------------------------------------------------ every phase, both profiles
+
+
+def _scan_with_signature_in(phase, mode, ir):
+    """Full scan where only ``phase`` answers the read-back signature
+    (f855, the fake's default); the other calibration phases answer ad55
+    (data present), every other phase the fake's default."""
+    fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
+    scanner = make_scanner(fake)
+    scanner.cal_readback_guard = mode
+    cal = device.CAL_ACQUISITION_PHASES
+
+    def high(f):
+        p = scanner.session.phase
+        return 0xAD if (p in cal and p != phase) else None
+    fake.status_high = high
+    exc = None
+    with fast_time():
+        try:
+            scanner.initialize(ir=ir)
+            scanner.scan(frame=1, ir=ir)
+        except safety.SafetyError as e:
+            exc = e
+    return fake, scanner, exc
+
+
+@pytest.mark.parametrize("ir", [False, True], ids=["plain", "dual"])
+@pytest.mark.parametrize("phase", sorted(device.CAL_ACQUISITION_PHASES))
+def test_fail_mode_refuses_in_every_phase_with_a_read_back_site(phase, ir):
+    fake_log, s_log, exc = _scan_with_signature_in(phase, "log", ir)
+    assert exc is None, exc
+    flagged = any(e.get("acq_not_observed") for e in s_log.last_diag["poll_settle"])
+    fake, scanner, exc = _scan_with_signature_in(phase, "fail", ir)
+    assert flagged, (phase, ir)     # every phase has a read-back site in both profiles
+    assert isinstance(exc, safety.CalibrationError), (phase, ir, exc)
+    n = len(fake.wire_log)
+    assert fake.wire_log == fake_log.wire_log[:n] and n < len(fake_log.wire_log)
+    assert fake.wire_log[-1]["t"] == "cr" and fake.wire_log[-1]["wi"] == 0x0122
+    assert scanner.session.failure["phase"] == phase
+    _assert_failed_and_frozen(fake, scanner, exc, operation="scan", phase_prefix=phase)
+
+
+def test_every_profile_has_read_back_sites_to_guard():
+    for ir in (False, True):
+        _f, s, exc = _scan_with_signature_in(None, "log", ir)
+        assert exc is None
+        # phase None: every calibration phase answers ad55, nothing flagged.
+        assert not any(e.get("acq_not_observed") for e in s.last_diag["poll_settle"])
+    _f, s, exc = _scan("log")
+    assert sum(bool(e.get("acq_not_observed")) for e in s.last_diag["poll_settle"]) >= 2
+
+
+def test_digitize_sets_the_mode_on_its_scanner(tmp_path):
+    # Unsafe start state: digitize stops at its start-state check, after
+    # its body has configured the scanner. Nothing is written.
+    fake = FakeUsbDevice(reg01=0x23)
+    with cli_over(fake) as opened:
+        _cli(["digitize", "-o", str(tmp_path), "--assume-loaded",
+              "--cal-readback-guard", "fail"])
+    scanners = [o for o in opened if isinstance(o, Scanner)]
+    assert scanners and scanners[0].cal_readback_guard == "fail"
+    assert fake.out_count == 0
