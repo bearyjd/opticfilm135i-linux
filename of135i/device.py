@@ -302,6 +302,60 @@ COLD_SETTLE_INTERVAL = 0.05
 # runs the same nine waits as PollMasked, fail-closed.
 COLD_MOVE_TIMEOUT = 30.0
 
+# Opt-in early failure of a cold-start motor move (Scanner.
+# cold_move_early_fail, CLI --cold-move-early-fail): once the motor-enable
+# bit has been seen set after the move's execute pulse, this long a run of
+# well-formed replies with the motor-enable and home-sensor bits both
+# clear ends the wait as a failure (ColdMoveEndedOffSensorError) instead
+# of waiting out COLD_MOVE_TIMEOUT. A stopped motor is how moves end in
+# vendor-app traffic; stopped off the sensor, the exact f855 this wait
+# requires does not come. Nothing new is accepted.
+COLD_MOVE_IDLE_WINDOW_S = 1.0
+
+
+class _ColdMoveWatch:
+    """Read history of one cold-start motor completion wait (on_read hook
+    of UsbIo.poll_status_word). Classifies a timeout; with ``early_fail``
+    raises ColdMoveEndedOffSensorError (see COLD_MOVE_IDLE_WINDOW_S).
+    Uses only the clock value the poll loop already took."""
+
+    def __init__(self, early_fail: bool):
+        self.early_fail = early_fail
+        self.busy_seen = False
+        self.last = b""
+        self._idle_since = None
+
+    @staticmethod
+    def _well_formed(raw: bytes) -> bool:
+        return len(raw) == 2 and raw[1] == 0x55
+
+    def __call__(self, raw: bytes, t: float) -> None:
+        self.last = raw
+        ok = self._well_formed(raw)
+        if ok and raw[0] & 0x01:
+            self.busy_seen = True
+        if not (self.busy_seen and ok and not raw[0] & 0x09):
+            self._idle_since = None
+            return
+        if self._idle_since is None:
+            self._idle_since = t
+        if self.early_fail and t - self._idle_since >= COLD_MOVE_IDLE_WINDOW_S:
+            raise safety.ColdMoveEndedOffSensorError(
+                "motor stopped off the home sensor", last=raw,
+                want=bytes.fromhex("f855"), outcome="ended-off-sensor")
+
+    def outcome(self) -> str:
+        raw = self.last
+        if not self._well_formed(raw):
+            return "malformed"
+        if raw[0] & 0x01:
+            return "still-busy"
+        if not self.busy_seen:
+            return "no-busy-observed"
+        if not raw[0] & 0x08:
+            return "ended-off-sensor"
+        return "other"
+
 
 # Masked completion test for the LOAD flow (docs/test-log.md Test 14,
 # docs/load-analysis.md). The status word (reg 0x101 high byte, ack
@@ -580,6 +634,20 @@ class Scanner:
 
     _cal_readback_guard = CAL_READBACK_GUARD_DEFAULT
     _position_require_motor_idle = False
+    _cold_move_early_fail = False
+
+    @property
+    def cold_move_early_fail(self) -> bool:
+        """Opt-in: end a cold-start motor wait early, as a failure, when the
+        motor has stopped off the home sensor (see COLD_MOVE_IDLE_WINDOW_S).
+        Default False: the full COLD_MOVE_TIMEOUT wait."""
+        return self._cold_move_early_fail
+
+    @cold_move_early_fail.setter
+    def cold_move_early_fail(self, on: bool) -> None:
+        if not isinstance(on, bool):
+            raise ValueError(f"cold_move_early_fail must be a bool, got {on!r}")
+        self._cold_move_early_fail = on
 
     @property
     def position_require_motor_idle(self) -> bool:
@@ -1596,19 +1664,28 @@ class Scanner:
         for addr in (0x1000C000, 0x10010000):
             self.io.buf_write(addr, tables_base.SLOPE_TABLE_LOADER)
         self.io.write_regs([(0x0F, 0x01)])
+        watch = _ColdMoveWatch(self._cold_move_early_fail)
         try:
             self.io.poll_status_word(mask=0xFFFF, value=0xF855,
-                                     timeout=COLD_MOVE_TIMEOUT, strict=True)
+                                     timeout=COLD_MOVE_TIMEOUT, strict=True,
+                                     on_read=watch)
         except safety.StrictPollTimeoutError as e:
-            raise safety.StrictPollTimeoutError(
-                f"cold_init: {label} (feed 0x{feedl:04x}) did not complete within "
-                f"{COLD_MOVE_TIMEOUT:.0f}s: status word {e.last.hex()} "
-                f"({format_status_bits(decode_status_word(e.last))}), want f855. "
+            early = isinstance(e, safety.ColdMoveEndedOffSensorError)
+            outcome = e.outcome if early else watch.outcome()
+            how = (f"stopped off the home sensor (motor-enable and home-sensor bits "
+                   f"clear for {COLD_MOVE_IDLE_WINDOW_S:.1f}s after it ran; "
+                   f"--cold-move-early-fail)" if early else
+                   f"did not complete within {COLD_MOVE_TIMEOUT:.0f}s")
+            raise type(e)(
+                f"cold_init: {label} (feed 0x{feedl:04x}) {how}: status word {e.last.hex()} "
+                f"({format_status_bits(decode_status_word(e.last))}), want f855, "
+                f"outcome={outcome}. "
                 f"The transport state is unknown and the cold start stops here -- no "
                 f"further motor move is started. This is a new observation (every "
                 f"logged cold start completed each move in 1-2 s) -- please record it. "
                 f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
-                last=e.last, want=e.want, observed=self.session.start_reg01,
+                last=e.last, want=e.want, outcome=outcome,
+                observed=self.session.start_reg01,
                 session=self.session.snapshot()) from None
 
     def _cold_homing_round(self) -> None:

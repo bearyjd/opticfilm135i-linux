@@ -277,13 +277,20 @@ class UsbIo:
         (01-init.pcap, Scanner.cold_init()) polls on the full word
         (e.g. 0xf855) rather than the high byte alone.
         """
-        resp = bytes(self.dev.ctrl_transfer(0xC0, 0x04, 0x018E, 0x0122, 2))
+        return self._status_word(self._read_status_raw())
+
+    def _read_status_raw(self) -> bytes:
+        return bytes(self.dev.ctrl_transfer(0xC0, 0x04, 0x018E, 0x0122, 2))
+
+    @staticmethod
+    def _status_word(resp: bytes) -> int:
         if len(resp) < 2:
             return (resp[0] << 8) if resp else 0
         return (resp[0] << 8) | resp[1]
 
     def poll_status_word(self, mask: int, value: int, timeout: float = 30.0,
-                          interval: float = 0.02, *, strict: bool = False) -> int:
+                          interval: float = 0.02, *, strict: bool = False,
+                          on_read=None) -> int:
         """Poll read_status_word() until (word & mask) == value.
 
         By default non-raising, like read_status()/eject()'s own
@@ -296,13 +303,22 @@ class UsbIo:
         completions use, where continuing would start the next motor
         move on an engine not known to be done. Returns the last word
         read otherwise.
+
+        ``on_read(raw, t)``, if given, sees every raw reply together with
+        the clock value the loop last took before that read (no extra
+        clock call, no extra transfer). It may raise to end the poll.
         """
         import time
 
-        deadline = time.monotonic() + timeout
-        last = self.read_status_word()
+        t = time.monotonic()
+        deadline = t + timeout
+        raw = self._read_status_raw()
+        last = self._status_word(raw)
+        if on_read is not None:
+            on_read(raw, t)
         while (last & mask) != value:
-            if time.monotonic() > deadline:
+            t = time.monotonic()
+            if t > deadline:
                 if strict:
                     log.error(
                         "poll_status_word timed out after %.1fs: last %#06x, "
@@ -321,7 +337,10 @@ class UsbIo:
                 )
                 return last
             time.sleep(interval)
-            last = self.read_status_word()
+            raw = self._read_status_raw()
+            last = self._status_word(raw)
+            if on_read is not None:
+                on_read(raw, t)
         return last
 
     def read_ext_reg(self, reg: int) -> int:

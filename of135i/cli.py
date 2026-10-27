@@ -450,6 +450,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
         scanner.position_require_motor_idle = bool(
             getattr(args, "position_require_motor_idle", False))
+        scanner.cold_move_early_fail = bool(getattr(args, "cold_move_early_fail", False))
         if getattr(args, 'warmup_budget', None) is not None:
             scanner.warmup_budget_s = float(args.warmup_budget)
         # Read-only start-state check up front, so an unsafe scanner
@@ -3001,6 +3002,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
         scanner.position_require_motor_idle = bool(
             getattr(args, "position_require_motor_idle", False))
+        scanner.cold_move_early_fail = bool(getattr(args, "cold_move_early_fail", False))
         if getattr(args, "warmup_budget", None) is not None:
             scanner.warmup_budget_s = float(args.warmup_budget)
         scanner.check_start_state()
@@ -3280,6 +3282,7 @@ def _cmd_vendor_startup(args: argparse.Namespace) -> int:
 
 def _cmd_eject(args: argparse.Namespace) -> int:
     def body(scanner: Scanner) -> int:
+        scanner.cold_move_early_fail = bool(getattr(args, "cold_move_early_fail", False))
         _report_eject(scanner.eject(), nothing_to_do_ok=True)
         return 0
 
@@ -3424,6 +3427,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--warmup-budget", type=float, default=None, metavar="SECONDS",
                         help="total time to wait for the lamp after a cold start before "
                              "failing the scan (default: the driver's bounded default, 60 s)")
+    p_scan.add_argument("--cold-move-early-fail", action="store_true",
+        help="opt-in: on a cold scanner, stop a cold-start motor move as a failure "
+             "once the motor has run and then stayed stopped off the home sensor "
+             "for 1 s, instead of waiting out the full 30 s (the move still fails "
+             "either way; power cycle). Default: off")
     p_scan.add_argument("--position-require-motor-idle", action="store_true",
         help="opt-in: the per-frame positioning wait also requires the "
              "motor-enable bit clear (stricter than the default class check); "
@@ -3501,6 +3509,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_eject = sub.add_parser("eject", help="eject the film magazine")
     p_eject.set_defaults(func=_cmd_eject)
+    p_eject.add_argument("--cold-move-early-fail", action="store_true",
+        help="opt-in: on a cold scanner, stop a cold-start motor move as a failure "
+             "once the motor has run and then stayed stopped off the home sensor "
+             "for 1 s, instead of waiting out the full 30 s (the move still fails "
+             "either way; power cycle). Default: off")
 
     p_status = sub.add_parser("status", help="read and print status registers")
     p_status.set_defaults(func=_cmd_status)
@@ -3594,6 +3607,11 @@ def build_parser() -> argparse.ArgumentParser:
              "(white line, dark/shading measurements, uploaded tables; about 13 "
              "MB per frame; written only for frames that measured a fresh "
              "calibration, and only with the .diag.json sidecars)")
+    p_dig.add_argument("--cold-move-early-fail", action="store_true",
+        help="opt-in: on a cold scanner, stop a cold-start motor move as a failure "
+             "once the motor has run and then stayed stopped off the home sensor "
+             "for 1 s, instead of waiting out the full 30 s (the move still fails "
+             "either way; power cycle). Default: off")
     p_dig.add_argument("--position-require-motor-idle", action="store_true",
         help="opt-in: the per-frame positioning wait also requires the "
              "motor-enable bit clear (stricter than the default class check); "

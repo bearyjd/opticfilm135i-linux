@@ -146,6 +146,19 @@ in both modes:
 python -m pytest -q tests/test_position_motor_idle.py
 ```
 
+The cold-start move outcome suite checks that a timed-out cold-start motor
+move names its outcome (`ended-off-sensor`, `still-busy`,
+`no-busy-observed`, `malformed`, `other`) in the error and the session
+failure record with the timing and wire sequence unchanged, that f855
+stays the only success value, and that the opt-in
+`--cold-move-early-fail` stops a move that ran and then stayed stopped off
+the home sensor for 1 s (`ColdMoveEndedOffSensorError`, session FAILED,
+no further move):
+
+```
+python -m pytest -q tests/test_cold_move_outcome.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```
