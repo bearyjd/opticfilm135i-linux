@@ -135,6 +135,17 @@ phase's next transfer with the session FAILED, and the CLI flag:
 python -m pytest -q tests/test_cal_readback_guard.py
 ```
 
+The opt-in POSITION motor-idle suite checks that the default positioning
+wait is today's class check (wire sequence unchanged), that
+`--position-require-motor-idle` additionally requires the motor-enable
+bit clear on every profile (a class-F word with that bit set fails the
+scan before SCAN starts, session FAILED), and that the budget is the same
+in both modes:
+
+```
+python -m pytest -q tests/test_position_motor_idle.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```
