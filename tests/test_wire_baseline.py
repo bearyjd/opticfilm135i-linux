@@ -84,17 +84,22 @@ def _cold_move_times_out(fake):
 
 @contextmanager
 def tick_time(step: float = 0.01):
-    """time.monotonic() advancing ``step`` per call, sleep a no-op: every
+    """time.monotonic() advancing ``step`` per call, and time.sleep(s)
+    advancing the same simulated clock by ``s`` without waiting: every
     poll loop reads many times before a match or its deadline, and the
-    number of reads depends on how many clock calls the loop makes -- so
-    an added clock call or sleep inside a loop changes the digest."""
+    number of reads depends on how many clock calls the loop makes and
+    how long it sleeps -- so an added clock call, an added sleep or a
+    changed poll interval inside a loop changes the digest."""
     state = {"t": 0.0}
 
     def mono():
         state["t"] += step
         return state["t"]
+
+    def sleep(seconds):
+        state["t"] += max(0.0, float(seconds))
     real_sleep, real_mono = time.sleep, time.monotonic
-    time.sleep, time.monotonic = (lambda s: None), mono
+    time.sleep, time.monotonic = sleep, mono
     try:
         yield
     finally:
@@ -175,10 +180,10 @@ BASELINE = {
     'plain_3600_frame1': ('bdb210aa37a02eed88fcd9fdc5db34ffef504e2c84e0135fefc3837331659e06', 9789),
     'slide4_1200': ('4b8c1dc6b3accc93590c7036c1c0b0af81ac2cdcc290809e773cb5a9e260a0cb', 4737),
     'multi_cold_init_busy_then_done': ('b4cd53d161b3b91276f10d698b3b1e98482ad32c33ecdfe4d8c8c186a5e99521', 289),
-    'multi_cold_move_times_out': ('3ceb72235f16c610b528a82e8076956c61ec3582812d50f1445a04431218b226', 648),
+    'multi_cold_move_times_out': ('4c56b4d3e26114f724aa3c18edb3b4512b1174d7fffcc89eed9890b0d1591009', 477),
     'multi_eject_busy_then_idle': ('59f1e392fbffb45f660d8c5dfe8efe4cb2e779d297838dd0b4f55b0211f2a654', 21),
-    'multi_eject_times_out': ('17177cdffe85589a53702bc54d35e2cec403eb585c46adbbebe757ce87c1cea8', 515),
-    'multi_plain_3600_frame1': ('bade2e018362ceeb7b30c63a24abd5c9339c6e777dbf58123089e843a1dae689', 10204),
+    'multi_eject_times_out': ('242542c90cd77d7ca7d6069eb7a3e90fe028bb1d48d782b904f119d60f93eb98', 265),
+    'multi_plain_3600_frame1': ('35c2d719b5567955463a5b32ce49b49300277e7fa2ac0c854fe220fbef85f729', 10083),
 }
 
 
