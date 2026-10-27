@@ -448,6 +448,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scanner.recalibrate = bool(getattr(args, 'recalibrate', False))
         scanner.dark_fallback = getattr(args, "dark_fallback", "strict")
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
+        scanner.position_require_motor_idle = bool(
+            getattr(args, "position_require_motor_idle", False))
         if getattr(args, 'warmup_budget', None) is not None:
             scanner.warmup_budget_s = float(args.warmup_budget)
         # Read-only start-state check up front, so an unsafe scanner
@@ -2997,6 +2999,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         scanner.park_mode = args.park
         scanner.recalibrate = bool(getattr(args, "recalibrate", False))
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
+        scanner.position_require_motor_idle = bool(
+            getattr(args, "position_require_motor_idle", False))
         if getattr(args, "warmup_budget", None) is not None:
             scanner.warmup_budget_s = float(args.warmup_budget)
         scanner.check_start_state()
@@ -3420,6 +3424,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--warmup-budget", type=float, default=None, metavar="SECONDS",
                         help="total time to wait for the lamp after a cold start before "
                              "failing the scan (default: the driver's bounded default, 60 s)")
+    p_scan.add_argument("--position-require-motor-idle", action="store_true",
+        help="opt-in: the per-frame positioning wait also requires the "
+             "motor-enable bit clear (stricter than the default class check); "
+             "if the motor does not report idle within the unchanged budget the "
+             "scan stops (StrictPollTimeoutError, power cycle). Default: off")
     p_scan.add_argument("--cal-readback-guard", choices=("off", "log", "fail"),
         default="log", help="calibration read-back check: when the engine has stopped with an "
              "empty buffer where the capture had data, 'log' (default) records "
@@ -3585,6 +3594,11 @@ def build_parser() -> argparse.ArgumentParser:
              "(white line, dark/shading measurements, uploaded tables; about 13 "
              "MB per frame; written only for frames that measured a fresh "
              "calibration, and only with the .diag.json sidecars)")
+    p_dig.add_argument("--position-require-motor-idle", action="store_true",
+        help="opt-in: the per-frame positioning wait also requires the "
+             "motor-enable bit clear (stricter than the default class check); "
+             "if the motor does not report idle within the unchanged budget the "
+             "scan stops (StrictPollTimeoutError, power cycle). Default: off")
     p_dig.add_argument("--cal-readback-guard", choices=("off", "log", "fail"),
         default="log", help="calibration read-back check: when the engine has stopped with an "
              "empty buffer where the capture had data, 'log' (default) records "

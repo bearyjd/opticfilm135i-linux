@@ -331,6 +331,16 @@ LOAD_STATUS_MASK = 0xFB
 # it set).
 POSITION_STATUS_MASK = 0xF0
 
+# Opt-in (Scanner.position_require_motor_idle, CLI
+# --position-require-motor-idle): the POSITION wait additionally requires
+# the motor-enable bit (0x01) clear. In vendor-app traffic a class-F word
+# with that bit set (f9) is a busy step of a move, and the vendor app
+# waits for the bit to clear after every positioning move. Strictly
+# tighter than POSITION_STATUS_MASK against the captured f455; budget,
+# floor and FEEDL scale are unchanged. Off by default because it can turn
+# a run that passes today into a FAILED session (hardware A/B pending).
+POSITION_STATUS_MASK_IDLE = 0xF1
+
 
 def status_matches(got: bytes, want: bytes, mask: int) -> bool:
     """True when status-word reply ``got`` completes like captured
@@ -569,6 +579,23 @@ class Scanner:
     """Drives the of135i scan sequence over a UsbIo transport."""
 
     _cal_readback_guard = CAL_READBACK_GUARD_DEFAULT
+    _position_require_motor_idle = False
+
+    @property
+    def position_require_motor_idle(self) -> bool:
+        """Opt-in: POSITION completion also requires the motor-enable bit
+        clear (POSITION_STATUS_MASK_IDLE). Default False: today's rule."""
+        return self._position_require_motor_idle
+
+    @position_require_motor_idle.setter
+    def position_require_motor_idle(self, on: bool) -> None:
+        if not isinstance(on, bool):
+            raise ValueError(f"position_require_motor_idle must be a bool, got {on!r}")
+        self._position_require_motor_idle = on
+
+    def _position_status_mask(self) -> int:
+        return (POSITION_STATUS_MASK_IDLE if self._position_require_motor_idle
+                else POSITION_STATUS_MASK)
 
     @property
     def cal_readback_guard(self) -> str:
@@ -2734,7 +2761,7 @@ class Scanner:
             self._run_phase(
                 tables.POSITION,
                 strict_polls=self._strict_status_polls(tables.POSITION),
-                strict_mask=POSITION_STATUS_MASK,
+                strict_mask=self._position_status_mask(),
                 poll_timeout_scale=position_timeout_scale(tables, feedl),
                 feedl_hi=bytes([(feedl >> 16) & 0xFF]),
                 feedl_mid=bytes([(feedl >> 8) & 0xFF]),
@@ -3036,7 +3063,7 @@ class Scanner:
         self._run_phase(
             t.POSITION,
             strict_polls=self._strict_status_polls(t.POSITION),
-            strict_mask=POSITION_STATUS_MASK,
+            strict_mask=self._position_status_mask(),
             poll_timeout_scale=position_timeout_scale(t, feedl),
             feedl_hi=bytes([(feedl >> 16) & 0xFF]),
             feedl_mid=bytes([(feedl >> 8) & 0xFF]),
