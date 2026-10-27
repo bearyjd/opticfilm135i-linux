@@ -58,6 +58,9 @@ jobs:
       - name: Status-word diagnostics and wire-baseline regressions
         run: python -m pytest -q tests/test_poll.py tests/test_status_decode.py tests/test_wire_baseline.py
 
+      - name: Calibration read-back guard regressions
+        run: python -m pytest -q tests/test_cal_readback_guard.py
+
       - name: Compiler-based suites (mark, ops, geometry, install)
         run: |
           set -e

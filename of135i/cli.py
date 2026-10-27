@@ -447,6 +447,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scanner.park_mode = args.park
         scanner.recalibrate = bool(getattr(args, 'recalibrate', False))
         scanner.dark_fallback = getattr(args, "dark_fallback", "strict")
+        scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
         if getattr(args, 'warmup_budget', None) is not None:
             scanner.warmup_budget_s = float(args.warmup_budget)
         # Read-only start-state check up front, so an unsafe scanner
@@ -2995,6 +2996,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     def body(scanner: Scanner) -> int:
         scanner.park_mode = args.park
         scanner.recalibrate = bool(getattr(args, "recalibrate", False))
+        scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
         if getattr(args, "warmup_budget", None) is not None:
             scanner.warmup_budget_s = float(args.warmup_budget)
         scanner.check_start_state()
@@ -3418,6 +3420,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--warmup-budget", type=float, default=None, metavar="SECONDS",
                         help="total time to wait for the lamp after a cold start before "
                              "failing the scan (default: the driver's bounded default, 60 s)")
+    p_scan.add_argument("--cal-readback-guard", choices=("off", "log", "fail"),
+        default="log", help="calibration read-back check: when the engine has stopped with an "
+             "empty buffer where the capture had data, 'log' (default) records "
+             "acq_not_observed in the .diag.json and continues as before; 'fail' "
+             "(opt-in) stops the scan before reading the measurement "
+             "(CalibrationError, power cycle); 'off' records nothing")
     p_scan.add_argument("--park", choices=("verbatim", "semantic"), default="semantic",
         help="PARK phase implementation: semantic issues the same motor "
              "sequence as verbatim but replaces the captured trace's fixed "
@@ -3577,6 +3585,12 @@ def build_parser() -> argparse.ArgumentParser:
              "(white line, dark/shading measurements, uploaded tables; about 13 "
              "MB per frame; written only for frames that measured a fresh "
              "calibration, and only with the .diag.json sidecars)")
+    p_dig.add_argument("--cal-readback-guard", choices=("off", "log", "fail"),
+        default="log", help="calibration read-back check: when the engine has stopped with an "
+             "empty buffer where the capture had data, 'log' (default) records "
+             "acq_not_observed in the .diag.json and continues as before; 'fail' "
+             "(opt-in) stops the scan before reading the measurement "
+             "(CalibrationError, power cycle); 'off' records nothing")
     p_dig.add_argument("--park", choices=("verbatim", "semantic"), default="semantic",
         help="PARK implementation: semantic (default since 2026-09-17, "
              "3.7-3.8 s, hardware-confirmed via the SANE backend) or "

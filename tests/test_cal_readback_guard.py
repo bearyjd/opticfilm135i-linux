@@ -132,6 +132,16 @@ def test_each_bit_of_the_signature_is_required(reply):
         assert _flags(s) == [None]
 
 
+@pytest.mark.parametrize("got,expected", [("ec55", True), ("ed55", False),
+                                          ("ac55", False), ("ec54", False)])
+def test_signature_predicate_directly(got, expected):
+    # ed55 never reaches the predicate through _poll_one (the data-ready
+    # rule accepts it first); the predicate refuses it on its own as well.
+    s = _cal_scanner(["ec55"], "cal_dark_b", "log")
+    op = _status_poll("ad55")
+    assert s._cal_acquisition_not_observed(op, bytes.fromhex(got), op.resp) is expected
+
+
 @pytest.mark.parametrize("phase", sorted(device.CAL_ACQUISITION_PHASES))
 def test_every_acquisition_phase_is_covered(phase):
     s = _cal_scanner(["ec55"], phase, "fail")
@@ -159,12 +169,12 @@ def test_budget_is_unchanged_by_the_guard():
 
 
 def test_default_mode_is_log():
-    assert Scanner.cal_readback_guard == "log"
+    assert device.CAL_READBACK_GUARD_DEFAULT == "log"
     s = Scanner.__new__(Scanner)
     assert s.cal_readback_guard == "log"
 
 
-@pytest.mark.parametrize("bad", ["", "FAIL", "on", None, True])
+@pytest.mark.parametrize("bad", ["", "FAIL", "on", None, True, ["log"]])
 def test_invalid_mode_is_refused(bad):
     s = Scanner.__new__(Scanner)
     with pytest.raises(ValueError):

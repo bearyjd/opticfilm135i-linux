@@ -187,6 +187,22 @@ CAL_ACQUISITION_PHASES = frozenset({
     "cal_shading_measure", "cal_shading_verify",
 })
 
+# Calibration read-back "acquisition not observed" guard (Scanner.
+# cal_readback_guard). At the read-back sites the capture settled the
+# extended status word with the motor-enabled bit (0x01) set and the
+# buffer-empty bit (0x40) clear. A poll there that has already timed out
+# under its unchanged budget, whose last well-formed reply shows the
+# motor-enabled bit clear and the buffer-empty bit set, means the engine
+# stopped with nothing buffered: the measurement the next bulk read
+# collects was most likely never acquired. That reading is an inference
+# from hardware logs and vendor-app traffic, so the default only records
+# it ("log": acq_not_observed on the poll_settle entry, wire unchanged);
+# "fail" (opt-in) raises CalibrationError before the phase's next
+# transfer; "off" is the previous behaviour exactly. The guard never
+# accepts anything and never changes a poll budget.
+CAL_READBACK_GUARD_MODES = ("off", "log", "fail")
+CAL_READBACK_GUARD_DEFAULT = "log"
+
 # Semantic PARK (see park_semantic() and docs/replay-analysis.md's
 # "Conversion order" step 1): timeout and poll interval for the two
 # condition waits that replace the captured trace's pacing.
@@ -551,6 +567,21 @@ class _CalCapture:
 
 class Scanner:
     """Drives the of135i scan sequence over a UsbIo transport."""
+
+    _cal_readback_guard = CAL_READBACK_GUARD_DEFAULT
+
+    @property
+    def cal_readback_guard(self) -> str:
+        """"off", "log" (default) or "fail": see CAL_READBACK_GUARD_MODES."""
+        return self._cal_readback_guard
+
+    @cal_readback_guard.setter
+    def cal_readback_guard(self, mode: str) -> None:
+        if mode not in CAL_READBACK_GUARD_MODES:
+            raise ValueError(
+                f"cal_readback_guard must be one of {CAL_READBACK_GUARD_MODES}, "
+                f"got {mode!r}")
+        self._cal_readback_guard = mode
 
     def __init__(self, io: UsbIo):
         self.io = io
@@ -1006,24 +1037,27 @@ class Scanner:
                         "wv": f"0x{op.wv:04x}", "wi": f"0x{op.wi:04x}",
                         "last": got.hex(), "want": want.hex(),
                     })
-                self._note_poll_settle(op, got, want, t_start, "timeout")
+                entry = self._note_poll_settle(op, got, want, t_start, "timeout")
                 log.warning(
                     "poll wv=%#06x wi=%#06x timed out after %.1fs "
                     "(last %s, want %s) -- continuing",
                     op.wv, op.wi, timeout, got.hex(), want.hex(),
                 )
+                if self._cal_acquisition_not_observed(op, got, want):
+                    self._on_cal_acquisition_not_observed(got, want, entry)
                 return
             time.sleep(0.004)
 
     def _note_poll_settle(self, op: Op, got: bytes, want: bytes, t_start: float,
-                          how: str) -> None:
+                          how: str) -> dict | None:
         """Record how a NON-strict poll ended (diag sidecar ``poll_settle``):
         ``how`` is "exact", "dataenb", "class", "reg32" or "timeout", ``s``
         the seconds from the first read. Capped per scan so the sidecar
         stays small; ``poll_settle_max_s`` is kept over all of them. An
         extended status-word poll (wValue 0x018e, wIndex 0x0122) also
         records ``bits``: decode_status_word() of the last reply (None if
-        malformed). Pure bookkeeping, no USB traffic."""
+        malformed). Returns the entry, or None once the cap is reached.
+        Pure bookkeeping, no USB traffic."""
         s = time.monotonic() - t_start
         if s > self._diag_poll_settle_max_s:
             self._diag_poll_settle_max_s = s
@@ -1035,6 +1069,44 @@ class Scanner:
             if op.wv == 0x018E and op.wi == 0x0122:
                 entry["bits"] = decode_status_word(got)
             self._diag_poll_settle.append(entry)
+            return entry
+        return None
+
+    def _cal_acquisition_not_observed(self, op: Op, got: bytes, want: bytes) -> bool:
+        """True when a timed-out non-strict poll matches the read-back
+        signature (CAL_READBACK_GUARD_MODES comment): guard not "off",
+        an extended status-word poll (wValue 0x018e, wIndex 0x0122), a
+        captured 2-byte word with ack 0x55, bit 0x01 set and bit 0x40
+        clear, a last reply with ack 0x55, bit 0x01 clear and bit 0x40
+        set, inside a calibration acquisition phase. A malformed reply
+        never matches. Pure check, no USB traffic."""
+        if self._cal_readback_guard == "off":
+            return False
+        if op.wv != 0x018E or op.wi != 0x0122:
+            return False
+        if len(want) != 2 or want[1] != 0x55 or not want[0] & 0x01 or want[0] & 0x40:
+            return False
+        if len(got) != 2 or got[1] != 0x55 or got[0] & 0x01 or not got[0] & 0x40:
+            return False
+        return getattr(self.session, "phase", None) in CAL_ACQUISITION_PHASES
+
+    def _on_cal_acquisition_not_observed(self, got: bytes, want: bytes,
+                                         entry: dict | None) -> None:
+        """Record the read-back signature; in "fail" mode refuse here,
+        before the phase's next transfer (no bulk read, no write)."""
+        if entry is not None:
+            entry["acq_not_observed"] = True
+        phase = getattr(self.session, "phase", None)
+        log.warning("calibration read-back in phase %s: acquisition not observed "
+                    "(last %s, captured %s)", phase, got.hex(), want.hex())
+        if self._cal_readback_guard == "fail":
+            raise safety.CalibrationError(
+                f"calibration acquisition not observed in phase {phase}: engine "
+                f"stopped, buffer empty (status word {got.hex()}, captured "
+                f"{want.hex()}). The measurement was not read and the scan stops "
+                f"here, before the phase's next transfer (--cal-readback-guard "
+                f"fail). {safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
+                session=self.session.snapshot())
 
     def _run_phase(self, phase: Phase, strict_polls: frozenset[int] = frozenset(),
                    strict_mask: int = LOAD_STATUS_MASK, poll_timeout_scale: float = 1.0,
