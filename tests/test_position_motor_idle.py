@@ -192,19 +192,35 @@ def test_row3_idle_off_sensor_accepted_either_way(opt_in):
     assert st["reads"] == 2
 
 
-@pytest.mark.parametrize("reply", ["f45a", "e455"])
-def test_rows_4_5_time_out_identically_in_both_modes(reply):
-    # Same budget: the same number of reads and the same stated seconds.
+def _timeout_in_both_modes(reply, ir=False, dpi=3600, frame=1):
+    """Same budget: the same number of reads, the same stated seconds and
+    the same wire sequence with and without the opt-in."""
     results = {}
     for opt_in in (None, True):
-        fake, scanner, exc, st = _run([reply], opt_in, clock=tick_time)
+        fake, scanner, exc, st = _run([reply], opt_in, ir=ir, dpi=dpi, frame=frame,
+                                      clock=tick_time)
         assert isinstance(exc, safety.StrictPollTimeoutError), exc
         assert exc.last.hex() == reply
-        secs = re.search(r"after ([0-9.]+)s", str(exc)).group(1)
+        secs = float(re.search(r"after ([0-9.]+)s", str(exc)).group(1))
         results[opt_in] = (st["reads"], secs, fake.wire_log)
         _assert_failed_and_frozen(fake, scanner, exc, operation="scan", phase_prefix="position")
     assert results[None] == results[True]
     assert results[None][0] > 10
+    return results[True][1]
+
+
+@pytest.mark.parametrize("reply", ["f45a", "e455"])
+def test_rows_4_5_time_out_identically_in_both_modes(reply):
+    _timeout_in_both_modes(reply)
+
+
+@pytest.mark.parametrize("ir,dpi", PROFILES, ids=PROFILE_IDS)
+def test_opt_in_keeps_the_feedl_scaled_budget_on_every_profile(ir, dpi):
+    # Frame 4 is a move more than five times frame 1's: the stated budget
+    # must scale the same way in opt-in mode as in default mode.
+    s1 = _timeout_in_both_modes("e455", ir=ir, dpi=dpi, frame=1)
+    s4 = _timeout_in_both_modes("e455", ir=ir, dpi=dpi, frame=4)
+    assert s4 > 4.5 * s1, (s1, s4)
 
 # ------------------------------------------------------------ row 6: wire sequence
 
