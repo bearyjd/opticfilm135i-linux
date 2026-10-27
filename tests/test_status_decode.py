@@ -144,10 +144,10 @@ def test_cold_move_timeout_message_names_the_bits():
     assert ei.value.last == bytes.fromhex("d955")
 
 
-def test_poll_comment_no_longer_calls_bit0_data_ready():
+def test_poll_comment_names_bit0_as_motor_enabled():
     import inspect
     src = inspect.getsource(device.Scanner._poll_one)
-    assert "bit 0x01 is DATAENB" not in src
+    assert "motor-enabled bit" in src
 
 # ------------------------------------------------------------ F5 eject text
 
@@ -245,7 +245,7 @@ def test_ceiling_docstring_states_provenance():
     import inspect
     src = inspect.getsource(holder)
     i = src.index("FEEDL_CEILING = 71490")
-    doc = src[max(0, i - 1500):i]
+    doc = " ".join(src[max(0, i - 1500):i].replace("#:", " ").split())
     assert "reverse" in doc and "not proof of forward travel" in doc
 
 
@@ -270,8 +270,22 @@ def _scan_diag(**kw):
     return s.last_diag
 
 
+def _dual_geom(frame, dpi, slide):
+    from of135i import image as image_mod
+    from of135i.device import dual_tables
+    t = dual_tables(dpi)
+    fn = holder.slide_dual_geometry if slide else holder.dual_overscan_geometry
+    return fn(frame, dpi=dpi, lines_per_chunk=t.LINES_PER_CHUNK,
+              colour_crop_lines=image_mod.align_shift(dpi),
+              default_wire_lines=t.DEFAULT_LINES)
+
+
 def test_slide_scan_diag_carries_travel_margin():
     d = _scan_diag(frame=4, dpi=1200, slide=True)
+    geom, wire = _dual_geom(4, 1200, slide=True)
+    assert d["feedl"] == geom.feedl
+    assert d["travel_margin_steps"] == holder.FEEDL_CEILING - holder.slide_travel_end(
+        geom.feedl, wire, 1200)
     assert d["travel_margin_steps"] >= 175
     assert isinstance(d["travel_margin_steps"], int)
 
@@ -287,9 +301,20 @@ def test_plain_scan_diag_carries_travel_margin():
 
 def test_strip_dual_scan_diag_carries_travel_margin():
     d = _scan_diag(frame=1, ir=True)
-    assert isinstance(d["travel_margin_steps"], int) and d["travel_margin_steps"] > 0
+    geom, _wire = _dual_geom(1, 3600, slide=False)
+    assert d["travel_margin_steps"] == holder.FEEDL_CEILING - round(geom.end_hwdpi)
+    assert d["travel_margin_steps"] > 0
 
 
 def test_explicit_lines_path_has_no_modelled_margin():
     d = _scan_diag(frame=1, ir=True, lines=200)
     assert d["travel_margin_steps"] is None
+
+
+@pytest.mark.parametrize("feedl,wire,dpi,end", [
+    (100, 3, 2400, 105),     # 104.5 rounds UP: the guard never under-reports
+    (100, 1, 2400, 102),
+    (100, 7, 1200, 121),
+])
+def test_slide_travel_end_rounds_up(feedl, wire, dpi, end):
+    assert holder.slide_travel_end(feedl, wire, dpi) == end

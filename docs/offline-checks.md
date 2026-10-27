@@ -115,6 +115,16 @@ with synthetic USB devices and clocks:
 python -m pytest -q tests/test_eject_outcome.py tests/test_eject_deadline.py
 ```
 
+The status-word diagnostics suite checks the named-bit decoder, the
+eject sensor-clear interpretation and the travel-margin diagnostic; the
+wire-baseline suite pins, by digest, the exact transfer sequence of the
+default plain, dual, slide, eject and cold-start flows, so a diagnostic
+change that alters traffic fails:
+
+```
+python -m pytest -q tests/test_poll.py tests/test_status_decode.py tests/test_wire_baseline.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```

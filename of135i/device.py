@@ -389,6 +389,12 @@ def park_complete_status_matches(reply) -> bool:
 # outcome: it raises safety.EjectIncompleteError (session FAILED).
 EJECT_COMPLETED = "completed"
 EJECT_SKIPPED_NO_MAGAZINE = "skipped-no-magazine"
+# What a clear loader-sensor reading can mean (last_eject["interpretation"]
+# and the CLI text for EJECT_SKIPPED_NO_MAGAZINE, whose value is kept for
+# API compatibility). A clear bit 0x08 is ambiguous: no holder in the slot,
+# or a holder that has been fed past the sensor. The driver cannot tell
+# the two apart without moving the transport, and it does not move.
+EJECT_SENSOR_CLEAR_INTERPRETATION = "sensor-clear: no holder, or holder fed past the sensor"
 # Completion budget after the eject's GO. Unchanged value: the vendor's
 # own poll reads d9 -> f9 -> f8 over ~0.9 s (protocol-notes.md pass 14).
 EJECT_WAIT_TIMEOUT = 10.0
@@ -399,6 +405,45 @@ EJECT_POLL_INTERVAL = 0.02
 # read_status() took byte 0 of anything, and 0 of an empty reply).
 EJECT_DONE_MASK = 0x21
 EJECT_DONE_VALUE = 0x20
+
+
+#: Named bits of register 0x101 (high byte of the extended status word,
+#: wValue 0x018e / wIndex 0x0122), in our own words, as observed in
+#: hardware logs and vendor-app traffic. Bits without an established
+#: meaning are recorded raw under their mask.
+STATUS_WORD_BITS = (
+    ("motor_enabled", 0x01),   # the engine is driving the motor
+    ("bit_0x02", 0x02),
+    ("lamp_on", 0x04),
+    ("loader_sensor", 0x08),   # loader/home sensor
+    ("bit_0x10", 0x10),
+    ("bit_0x20", 0x20),
+    ("buffer_empty", 0x40),    # read buffer holds no data
+    ("power_bit", 0x80),
+)
+
+
+def decode_status_word(reply) -> dict | None:
+    """Name the bits of a raw extended status-word reply (2 bytes: the
+    register 0x101 value, then the 0x55 ack). Returns {name: 0 or 1} for
+    every entry of STATUS_WORD_BITS, or None for anything else (short,
+    empty, long, bad ack). Pure host-side decoding for diagnostics: no
+    driver decision reads it and it never raises on a malformed reply."""
+    try:
+        b = bytes(reply)
+    except Exception:
+        return None
+    if len(b) != 2 or b[1] != 0x55:
+        return None
+    return {name: int(bool(b[0] & mask)) for name, mask in STATUS_WORD_BITS}
+
+
+def format_status_bits(bits: dict | None) -> str:
+    """One-line ``name=v`` rendering of decode_status_word() output for
+    log and error messages ("undecodable" for None)."""
+    if bits is None:
+        return "undecodable"
+    return " ".join(f"{k}={v}" for k, v in bits.items())
 
 
 def eject_complete_status_matches(reply) -> bool:
@@ -914,10 +959,14 @@ class Scanner:
                 time.sleep(0.004)
                 continue
             # Extended status word at wIndex 0x0122 (reg 0x101 in the high
-            # byte): bit 0x01 is DATAENB, data ready. Where the capture
-            # settled with that bit set (ad55, bd55, a955: the calibration
-            # read-back sites), the live word's data-ready bit is what the
-            # following bulk read depends on, not the state class. The SANE
+            # byte). Bit 0x01 of reg 0x101 is the motor-enabled bit (the
+            # engine is driving the motor; see STATUS_WORD_BITS); the
+            # separate data-enable flag lives in bit 0 of reg 0x100, not
+            # here. The settle label stays "dataenb" for sidecar
+            # compatibility. Where the capture settled with this bit set
+            # (ad55, bd55, a955: the calibration read-back sites), a live
+            # word with that bit set is accepted whatever its state class
+            # (the acceptance rule itself is unchanged). The SANE
             # backend polls exactly this bit at these sites (PollDataReady,
             # hardware-verified since Test 48); production telemetry
             # (docs/production-telemetry-2026-10.md section 2.3) showed the
@@ -971,16 +1020,21 @@ class Scanner:
         """Record how a NON-strict poll ended (diag sidecar ``poll_settle``):
         ``how`` is "exact", "dataenb", "class", "reg32" or "timeout", ``s``
         the seconds from the first read. Capped per scan so the sidecar
-        stays small; ``poll_settle_max_s`` is kept over all of them. Pure
-        bookkeeping, no USB traffic."""
+        stays small; ``poll_settle_max_s`` is kept over all of them. An
+        extended status-word poll (wValue 0x018e, wIndex 0x0122) also
+        records ``bits``: decode_status_word() of the last reply (None if
+        malformed). Pure bookkeeping, no USB traffic."""
         s = time.monotonic() - t_start
         if s > self._diag_poll_settle_max_s:
             self._diag_poll_settle_max_s = s
         if len(self._diag_poll_settle) < _POLL_SETTLE_CAP:
-            self._diag_poll_settle.append({
+            entry = {
                 "wv": f"0x{op.wv:04x}", "wi": f"0x{op.wi:04x}",
                 "want": want.hex(), "got": got.hex(), "how": how, "s": round(s, 4),
-            })
+            }
+            if op.wv == 0x018E and op.wi == 0x0122:
+                entry["bits"] = decode_status_word(got)
+            self._diag_poll_settle.append(entry)
 
     def _run_phase(self, phase: Phase, strict_polls: frozenset[int] = frozenset(),
                    strict_mask: int = LOAD_STATUS_MASK, poll_timeout_scale: float = 1.0,
@@ -1449,7 +1503,8 @@ class Scanner:
         except safety.StrictPollTimeoutError as e:
             raise safety.StrictPollTimeoutError(
                 f"cold_init: {label} (feed 0x{feedl:04x}) did not complete within "
-                f"{COLD_MOVE_TIMEOUT:.0f}s: status word {e.last.hex()}, want f855. "
+                f"{COLD_MOVE_TIMEOUT:.0f}s: status word {e.last.hex()} "
+                f"({format_status_bits(decode_status_word(e.last))}), want f855. "
                 f"The transport state is unknown and the cold start stops here -- no "
                 f"further motor move is started. This is a new observation (every "
                 f"logged cold start completed each move in 1-2 s) -- please record it. "
@@ -1996,6 +2051,7 @@ class Scanner:
                          " (sensor read after initialize(): unreliable)"
                          if sensor_after_init else "")
                 self.last_eject["outcome"] = EJECT_SKIPPED_NO_MAGAZINE
+                self.last_eject["interpretation"] = EJECT_SENSOR_CLEAR_INTERPRETATION
                 return EJECT_SKIPPED_NO_MAGAZINE
             if self.session.state is SessionState.COLD:
                 log.info("eject: reg 0x01=0x00 (cold state) — running cold_init() first")
@@ -2051,7 +2107,7 @@ class Scanner:
         # Keep the existing closing 0x09=0x00 write after an unconfirmed
         # wait; transfer exceptions still propagate without further writes.
         wait = {"reads": 0, "seconds": None, "first": None, "last": None,
-                "busy_seen": False, "timed_out": False}
+                "last_bits": None, "busy_seen": False, "timed_out": False}
         if self.last_eject is not None:
             self.last_eject["completion"] = wait
         t0 = time.monotonic()
@@ -2078,6 +2134,8 @@ class Scanner:
                 time.sleep(EJECT_POLL_INTERVAL)
         finally:
             wait["seconds"] = round(time.monotonic() - t0, 3)
+            if wait["last"] is not None:
+                wait["last_bits"] = decode_status_word(bytes.fromhex(wait["last"]))
         self.io.write_regs([(0x09, 0x00)])
         if wait["timed_out"]:
             last = bytes.fromhex(wait["last"]) if wait["last"] else b""
@@ -2587,6 +2645,8 @@ class Scanner:
                 overscan_mm=overscan_mm,
             )
             feedl = holder.check_feedl(geom.feedl)
+            travel_margin_steps = holder.travel_margin(
+                max(feedl, round(geom.end_hwdpi)))
             scan_phase = tables.scan_phase(geom.chunks)
             n_chunks = geom.chunks
             n_lines = tables.scan_lines_for_chunks(geom.chunks)
@@ -2665,6 +2725,7 @@ class Scanner:
             "shading2": shading2_stats,
             "white_dips": white_dips_diag,
             "feedl": feedl,
+            "travel_margin_steps": travel_margin_steps,
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
@@ -2870,6 +2931,8 @@ class Scanner:
                              else holder.SLIDE_OVERSCAN_MM),
             )
             feedl = holder.check_feedl(geom.feedl, holder.SLIDE)
+            travel_margin_steps = holder.travel_margin(
+                holder.slide_travel_end(feedl, wire_lines, dpi))
             log.info("dual slide %d (%d dpi): FEEDL=%d chunks=%d "
                      "wire_lines=%d margins lead=%.3f trail=%.3f mm",
                      frame, dpi, feedl, geom.chunks, wire_lines,
@@ -2884,12 +2947,16 @@ class Scanner:
                 overscan_mm=overscan_mm if overscan_mm is not None else holder.OVERSCAN_MM,
             )
             feedl = holder.check_feedl(geom.feedl)
+            travel_margin_steps = holder.travel_margin(
+                max(feedl, round(geom.end_hwdpi)))
             log.info("dual overscan frame %d (%d dpi): FEEDL=%d chunks=%d "
                      "wire_lines=%d margins lead=%.3f trail=%.3f mm",
                      frame, dpi, feedl, geom.chunks, wire_lines,
                      geom.leading_margin_mm, geom.trailing_margin_mm)
         else:
             feedl = holder.check_feedl(t.feedl_for_frame(frame))
+            # Explicit lines= (diagnostic grid): no modelled pass end.
+            travel_margin_steps = None
         self._park_scale = position_timeout_scale(t, feedl)
         log.info("positioning to frame %d (FEEDL=%d, %d dpi dual)", frame, feedl, dpi)
         # Strict completion (class F, budget scaled with FEEDL): never
@@ -2975,6 +3042,7 @@ class Scanner:
             "shading2": {"a": _shading_stats(shading2_a), "b": _shading_stats(shading2_b)},
             "white_dips": {"a": [d.as_dict() for d in dips_a], "b": [d.as_dict() for d in dips_b]},
             "feedl": feedl,
+            "travel_margin_steps": travel_margin_steps,
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
