@@ -147,13 +147,36 @@ SLIDE = Holder(
 DEFAULT = STRIP
 
 #: The largest absolute positioning target the driver will issue, in
-#: 1/7200 inch from home. This is the load flow's traverse -- the
-#: longest move the vendor has ever commanded on this unit, run on
-#: every load -- so a target at or below it is inside travel that is
-#: demonstrated, not assumed. It is an independent second guard: it
-#: catches a bad FEEDL however it was computed, including one that came
-#: from a valid frame number and a wrong table.
+#: 1/7200 inch from home. It is an independent second guard: it catches
+#: a bad FEEDL however it was computed, including one that came from a
+#: valid frame number and a wrong table.
+#:
+#: Provenance, stated precisely: 71490 is the feed length of the load
+#: flow's traverse, the longest move the vendor software commands on
+#: this unit (every load). Hardware logs and vendor-app traffic show it
+#: is a reverse move toward home, armed to stop on the loader sensor,
+#: with the length padded to cover the acceleration ramp. Such a move
+#: most likely stops early when the sensor trips, so the number is a
+#: requested length, not a measured distance, and it is not proof of
+#: forward travel to 71490. The guard keeps the value unchanged: raising
+#: it is not supported by any evidence, and lowering it would be a
+#: separate, evidence-backed decision. travel_margin() reports how far
+#: inside it each scan stays (scan diagnostics, ``travel_margin_steps``).
 FEEDL_CEILING = 71490
+
+
+def travel_margin(end_hwdpi: int) -> int:
+    """Steps between a pass's furthest checked position and
+    FEEDL_CEILING (negative exactly when check_feedl() refuses it).
+    Diagnostics only: no guard reads it."""
+    return FEEDL_CEILING - int(end_hwdpi)
+
+
+def slide_travel_end(feedl: int, wire_lines: int, dpi: int) -> int:
+    """The slide path's stricter travel end, ``feedl + wire_lines x
+    (7200/dpi)/2`` rounded up: the position slide_dual_geometry() checks
+    against FEEDL_CEILING."""
+    return math.ceil(feedl + wire_lines * (7200 // dpi) / 2)
 
 
 def check_frame(frame: int, holder: Holder = DEFAULT) -> int:
@@ -626,6 +649,5 @@ def slide_dual_geometry(
         raise ValueError(
             f"slide {slide} window is empty ({geom.chunks} chunks, {wire} wire "
             f"lines). Nothing was sent to the scanner.")
-    travel_end = geom.feedl + wire * (7200 // dpi) / 2
-    check_feedl(math.ceil(travel_end), SLIDE)
+    check_feedl(slide_travel_end(geom.feedl, wire, dpi), SLIDE)
     return geom, wire

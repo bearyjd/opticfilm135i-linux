@@ -212,9 +212,10 @@ def _report_eject(outcome, *, nothing_to_do_ok: bool = False) -> None:
     expected the strip to come out (scan --eject, digitize). An
     unconfirmed completion never gets here: eject() raises
     EjectIncompleteError and the session is failed."""
-    from .device import EJECT_COMPLETED, EJECT_SKIPPED_NO_MAGAZINE
+    from .device import (EJECT_COMPLETED, EJECT_SENSOR_CLEAR_INTERPRETATION,
+                         EJECT_SKIPPED_NO_MAGAZINE)
     if outcome == EJECT_SKIPPED_NO_MAGAZINE:
-        msg = ("eject NOT run: the loader sensor reads no magazine, so no motor command "
+        msg = (f"eject NOT run ({EJECT_SENSOR_CLEAR_INTERPRETATION}), so no motor command "
                "was sent. The sensor is only trustworthy before the first initialize() "
                "of a power cycle -- check the slot by hand.")
         print(msg if nothing_to_do_ok else f"warning: {msg}",
