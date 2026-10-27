@@ -265,10 +265,24 @@ class StrictPollTimeoutError(SafetyError):
     there, the session is FAILED, a power cycle is required. ``last`` is
     the final value read, ``want`` the captured one (both raw bytes)."""
 
-    def __init__(self, message: str, *, last: bytes, want: bytes, **kw):
+    def __init__(self, message: str, *, last: bytes, want: bytes,
+                 outcome: str | None = None, **kw):
         super().__init__(message, **kw)
         self.last = last
         self.want = want
+        # Classified read history (cold-start motor moves only; see
+        # Scanner._cold_motor_move), copied into the failure record.
+        self.outcome = outcome
+
+
+class ColdMoveEndedOffSensorError(StrictPollTimeoutError):
+    """Opt-in early failure of a cold-start motor move (Scanner.
+    cold_move_early_fail): after the motor-enable bit had been seen set
+    for this move, every read for at least COLD_MOVE_IDLE_WINDOW_S showed
+    the motor stopped with the home-sensor bit clear, so the exact idle
+    word the wait requires cannot arrive. Raised instead of waiting out
+    the rest of the budget; never a success. Session FAILED as for any
+    strict poll timeout."""
 
 
 class ShortTransferError(SafetyError):
@@ -390,6 +404,9 @@ class HardwareSession:
                 "execute_pulses_attempted": self.execute_pulses_attempted,
                 "utc": _now(),
             }
+            outcome = getattr(exc, "outcome", None)
+            if isinstance(exc, StrictPollTimeoutError) and outcome:
+                self.failure["outcome"] = outcome
             if extra:
                 self.failure.update(extra)
             if self.state is not SessionState.REFUSED:

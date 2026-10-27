@@ -64,6 +64,9 @@ jobs:
       - name: Opt-in POSITION motor-idle regressions
         run: python -m pytest -q tests/test_position_motor_idle.py
 
+      - name: Cold-start move outcome regressions
+        run: python -m pytest -q tests/test_cold_move_outcome.py
+
       - name: Compiler-based suites (mark, ops, geometry, install)
         run: |
           set -e
