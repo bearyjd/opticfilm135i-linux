@@ -125,6 +125,16 @@ change that alters traffic fails:
 python -m pytest -q tests/test_poll.py tests/test_status_decode.py tests/test_wire_baseline.py
 ```
 
+The calibration read-back guard suite checks the "acquisition not
+observed" signature (engine stopped, buffer empty after a timed-out
+read-back poll), that the default `log` mode only records it and leaves
+the wire sequence identical, that the opt-in `fail` mode stops before the
+phase's next transfer with the session FAILED, and the CLI flag:
+
+```
+python -m pytest -q tests/test_cal_readback_guard.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```
