@@ -6,6 +6,19 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- **Opt-in `--cal-wait-scanstop {off,enforce}`** (`scan`, `digitize`;
+  `Scanner.cal_wait_scanstop`, default `off`). EXPERIMENTAL, motor-adjacent
+  and unverified on hardware. In hardware logs the stale calibration reads
+  were re-armed a few milliseconds after the previous acquisition's
+  SCAN-clear while its data-enable (register 0x100 bit 0) and motor-enable
+  (register 0x101 bit 0) bits still read set. `enforce` waits, after each
+  such SCAN-clear in a calibration acquisition phase and before the next
+  OUT transfer (including the shading upload), until both read clear in
+  well-formed (2-byte, 0x55-acknowledged) replies. Both waits share one
+  deadline, the existing 0.3 s non-strict poll floor; at the deadline the
+  scan stops with `CalibrationError` before anything further is sent. Each
+  wait is recorded in the diag (`cal_scanstop_waits`). `off` traffic is
+  byte-identical to before (wire fingerprints unchanged).
 - **Calibration integrity telemetry** (offline, default on, diagnostics
   only): each calibration acquisition records its re-arm gap after the
   previous SCAN-clear, the previous acquisition's post-clear status reads

@@ -220,6 +220,22 @@ CAL_READBACK_GUARD_DEFAULT = "log"
 # not a measured device limit. Nothing here sends, delays or decides.
 CAL_SERVED_FAST_S = 0.010
 
+# Calibration stop gate (Scanner.cal_wait_scanstop). EXPERIMENTAL,
+# unverified on hardware, opt-in; it delays the next calibration execute
+# pulse, so it is motor-adjacent. In hardware logs the stale calibration
+# reads (see CAL_SERVED_FAST_S) were re-armed while the previous
+# acquisition still showed data-enable (register 0x100 bit 0) and
+# motor-enable (register 0x101 bit 0) set; vendor-app traffic waits for
+# both to clear first. "enforce": after the SCAN-clear (register 0x01
+# written with bit 0 clear) that closes an execute pulse in a
+# CAL_ACQUISITION_PHASES phase, and before the next OUT transfer of any
+# kind, poll register 0x100 until bit 0 is clear, then register 0x101
+# until bit 0 is clear. Only a 2-byte reply with the 0x55 acknowledge
+# counts. Both waits share ONE deadline, NONSTRICT_POLL_FLOOR_S (no new or
+# longer budget); at that deadline CalibrationError is raised before any
+# further write. "off" (default): no read, sleep or clock call is added.
+CAL_WAIT_SCANSTOP_MODES = ("off", "enforce")
+
 
 # Semantic PARK (see park_semantic() and docs/replay-analysis.md's
 # "Conversion order" step 1): timeout and poll interval for the two
@@ -711,6 +727,25 @@ class Scanner:
     _position_require_motor_idle = False
     _cold_move_early_fail = False
     _cal_integrity_telemetry = True
+    _cal_wait_scanstop = "off"
+    # Stop-gate state (CAL_WAIT_SCANSTOP_MODES): an execute pulse seen in
+    # the current calibration phase, and the phase whose SCAN-clear armed
+    # the gate (None = not armed). Only ever set in "enforce" mode.
+    _scanstop_go_phase: str | None = None
+    _scanstop_armed: str | None = None
+
+    @property
+    def cal_wait_scanstop(self) -> str:
+        """"off" (default) or "enforce": see CAL_WAIT_SCANSTOP_MODES.
+        EXPERIMENTAL, unverified on hardware."""
+        return self._cal_wait_scanstop
+
+    @cal_wait_scanstop.setter
+    def cal_wait_scanstop(self, mode: str) -> None:
+        if not isinstance(mode, str) or mode not in CAL_WAIT_SCANSTOP_MODES:
+            raise ValueError(
+                f"cal_wait_scanstop must be one of {CAL_WAIT_SCANSTOP_MODES}, got {mode!r}")
+        self._cal_wait_scanstop = mode
 
     @property
     def cal_integrity_telemetry(self) -> bool:
@@ -857,6 +892,8 @@ class Scanner:
         # CAL_SERVED_FAST_S); keys starting with "_" are host timestamps
         # and recording state, stripped from the diag.
         self._cal_acquisitions: list[dict] = []
+        # Stop-gate waits of the current scan (cal_wait_scanstop).
+        self._cal_scanstop_waits: list[dict] = []
         self._diag_warmup: dict | None = None
         # Set by a completed load_magazine(): the transport is at the
         # vendor's scan reference position (the load's traverse). A
@@ -1093,7 +1130,11 @@ class Scanner:
                     flush()
                     if op.wi != 1:
                         cur = bytearray()
+                if self._scanstop_armed is not None:
+                    self._cal_wait_scan_stop()
                 dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.data)
+                if self._cal_wait_scanstop != "off" and op.wv == 0x0083:
+                    self._scanstop_note_write(op.data)
                 if self._cal_integrity_telemetry and op.wv == 0x0083:
                     self._cal_note_write(op.data)
                 # NOTE: no engine-idle wait here. The verbatim replayer
@@ -1119,6 +1160,8 @@ class Scanner:
                 self._poll_one(op, strict=idx in strict_polls, mask=strict_mask,
                                timeout_scale=poll_timeout_scale)
             elif op.kind == "bo":
+                if self._scanstop_armed is not None:
+                    self._cal_wait_scan_stop()
                 dev.write(EP_BULK_OUT, op.data, timeout=5000)
             elif op.kind == "bi":
                 cap = self._cal_capture
@@ -1398,6 +1441,67 @@ class Scanner:
                 f"here, before the phase's next transfer (--cal-readback-guard "
                 f"fail). {safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
                 session=self.session.snapshot())
+
+    # ------------------------------------------- calibration stop gate
+
+    def _scanstop_note_write(self, data: bytes) -> None:
+        """A register write that reached the device ("enforce" only): an
+        execute pulse in a calibration acquisition phase opens an
+        acquisition; a later write of register 0x01 with bit 0 clear in
+        the same phase arms the gate. Pairs are taken in wire order."""
+        phase = getattr(self.session, "phase", None)
+        if phase not in CAL_ACQUISITION_PHASES:
+            self._scanstop_go_phase = None
+            return
+        for i in range(0, len(data) - 1, 2):
+            reg, val = data[i], data[i + 1]
+            if reg == 0x0F and val == 0x01:
+                self._scanstop_go_phase = phase
+            elif reg == 0x01 and not val & 0x01 and self._scanstop_go_phase == phase:
+                self._scanstop_go_phase = None
+                self._scanstop_armed = phase
+
+    @staticmethod
+    def _bit0_clear(raw: bytes) -> bool:
+        """A 2-byte reply with the 0x55 acknowledge and bit 0 clear."""
+        return len(raw) == 2 and raw[1] == 0x55 and not raw[0] & 0x01
+
+    def _cal_wait_scan_stop(self) -> None:
+        """The armed stop gate (CAL_WAIT_SCANSTOP_MODES), run before the
+        next OUT transfer: register 0x100 bit 0 clear, then register 0x101
+        bit 0 clear, under one NONSTRICT_POLL_FLOOR_S deadline. Reads only;
+        raises CalibrationError at the deadline, before any write."""
+        phase = self._scanstop_armed
+        self._scanstop_armed = None
+        dev = self.io.dev
+        t_start = time.monotonic()
+        deadline = t_start + NONSTRICT_POLL_FLOOR_S
+        rec = {"phase": phase, "reads_100": 0, "reads_101": 0,
+               "last_100": None, "last_101": None, "outcome": None, "wait_s": None}
+        self._cal_scanstop_waits.append(rec)
+        for wi, key in ((0x0022, "100"), (0x0122, "101")):
+            while True:
+                got = bytes(dev.ctrl_transfer(0xC0, 0x04, 0x018E, wi, 2))
+                rec[f"reads_{key}"] += 1
+                rec[f"last_{key}"] = got.hex()
+                if self._bit0_clear(got):
+                    break
+                if time.monotonic() > deadline:
+                    rec["outcome"] = "timeout"
+                    rec["wait_s"] = round(time.monotonic() - t_start, 4)
+                    log.warning("calibration stop gate after phase %s: register 0x%s "
+                                "bit 0 still set (last %s) at the deadline", phase,
+                                key, got.hex())
+                    raise safety.CalibrationError(
+                        f"calibration scan-stop gate after phase {phase}: the previous "
+                        f"acquisition is still running (register 0x{key} reply "
+                        f"{got.hex()}, bit 0 not clear within {NONSTRICT_POLL_FLOOR_S}s). "
+                        f"Nothing further was sent (--cal-wait-scanstop enforce). "
+                        f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
+                        session=self.session.snapshot())
+                time.sleep(0.004)
+        rec["outcome"] = "clear"
+        rec["wait_s"] = round(time.monotonic() - t_start, 4)
 
     # ------------------------------------- calibration stale-read telemetry
     # Observers called from _exec_ops/_note_poll_settle AFTER a transfer
@@ -3009,6 +3113,9 @@ class Scanner:
         self._diag_poll_settle = []
         self._diag_poll_settle_max_s = 0.0
         self._cal_acquisitions = []
+        self._cal_scanstop_waits = []
+        self._scanstop_go_phase = None
+        self._scanstop_armed = None
         self._diag_warmup = None
         self._diag_park_waits = None
         started_utc = datetime.now(timezone.utc).isoformat()
@@ -3249,6 +3356,7 @@ class Scanner:
             "dark_b_substituted": dark_b_substituted,
             "dark_b_fallback": dark_b_fallback,
             **integ,
+            "cal_scanstop_waits": list(self._cal_scanstop_waits),
             "white_mean": warmup.get("white_mean"),
             "white_max": warmup.get("white_max"),
             "gain_codes": [gain_r, gain_g, gain_b],
@@ -3340,6 +3448,9 @@ class Scanner:
         self._diag_poll_settle = []
         self._diag_poll_settle_max_s = 0.0
         self._cal_acquisitions = []
+        self._cal_scanstop_waits = []
+        self._scanstop_go_phase = None
+        self._scanstop_armed = None
         self._diag_warmup = None
         self._diag_park_waits = None
         started_utc = datetime.now(timezone.utc).isoformat()
@@ -3576,6 +3687,7 @@ class Scanner:
             "dark_b_substituted": dark_b_substituted,
             "dark_b_fallback": dark_b_fallback,
             **integ,
+            "cal_scanstop_waits": list(self._cal_scanstop_waits),
             "white_mean": warmup.get("white_mean"),
             "white_max": warmup.get("white_max"),
             "gain_codes": [gain_r, gain_g, gain_b],
