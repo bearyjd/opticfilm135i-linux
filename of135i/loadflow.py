@@ -68,7 +68,7 @@ from __future__ import annotations
 
 import sys
 
-from .device import Scanner
+from .device import Scanner, check_cold_homing_rounds
 from .safety import POWER_CYCLE_INSTRUCTION, SafetyError, SessionState
 from .usbio import Of135iError
 
@@ -156,9 +156,10 @@ def run(ask=input, release_only: bool = False, double_jog: bool = False,
     ``cold_homing_rounds`` (1..3, default 3 = unchanged) is the opt-in
     EXPERIMENTAL Scanner.cold_homing_rounds setting for the cold start
     inside ``initialize()``; unverified on hardware. An invalid value
-    raises ValueError before any transfer."""
+    raises ValueError before the device is opened."""
     if next_strip and (release_only or double_jog):
         raise ValueError("next_strip is not combined with release_only or double_jog")
+    check_cold_homing_rounds(cold_homing_rounds)
     scanner = None
     try:
         with Scanner.open() as scanner:

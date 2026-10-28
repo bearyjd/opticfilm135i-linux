@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager
 
 import pytest
 
@@ -25,6 +26,21 @@ from test_safety import (FakeUsbDevice, _cal_buffers, _cli, cli_over,  # noqa: E
 
 from of135i import cli, loadflow  # noqa: E402
 from of135i.device import Scanner  # noqa: E402
+
+
+@contextmanager
+def patched_start_state():
+    """Make watch's body stop right after the start-state check."""
+    real = Scanner.check_start_state
+
+    def stop(self):
+        real(self)
+        raise KeyboardInterrupt
+    Scanner.check_start_state = stop
+    try:
+        yield
+    finally:
+        Scanner.check_start_state = real
 
 
 def _record(fake):
@@ -122,7 +138,7 @@ def test_invalid_value_is_rejected_before_any_transfer(bad):
 # ------------------------------------------------------------ CLI
 
 @pytest.mark.parametrize("cmd", [["digitize", "-o", "x"], ["scan", "--frame", "1", "-o", "f.tiff"],
-                                 ["eject"], ["load"]])
+                                 ["eject"], ["load"], ["watch"]])
 def test_parsers_default_three_and_accept_the_flag(cmd):
     parser = cli.build_parser()
     assert parser.parse_args(cmd).cold_homing_rounds == 3
@@ -131,7 +147,7 @@ def test_parsers_default_three_and_accept_the_flag(cmd):
 
 
 @pytest.mark.parametrize("cmd", [["digitize", "-o", "x"], ["scan", "-o", "f.tiff"],
-                                 ["eject"], ["load"]])
+                                 ["eject"], ["load"], ["watch"]])
 @pytest.mark.parametrize("bad", ["0", "4", "-1", "x", "1.5"])
 def test_parser_rejects_invalid_values(cmd, bad, capsys):
     with pytest.raises(SystemExit) as e:
@@ -140,7 +156,7 @@ def test_parser_rejects_invalid_values(cmd, bad, capsys):
 
 
 def test_help_says_experimental_and_unverified():
-    for cmd in ("scan", "digitize", "eject", "load"):
+    for cmd in ("scan", "digitize", "eject", "load", "watch"):
         sub = cli.build_parser()._subparsers._group_actions[0].choices[cmd]
         text = " ".join(sub.format_help().split())
         assert "--cold-homing-rounds" in text
@@ -204,21 +220,33 @@ def test_load_cli_passes_it_to_the_load_flow(monkeypatch, args, expect):
 
 
 @pytest.mark.parametrize("n", [1, 2, 3])
-def test_load_flow_sets_it_on_its_scanner(monkeypatch, n):
-    fake = FakeUsbDevice(reg01=0x22)
-    holder = []
-
-    def opener():
-        s = make_scanner(fake)
-        holder.append(s)
-        return s
-    monkeypatch.setattr(Scanner, "open", staticmethod(opener))
+def test_load_flow_runs_the_requested_cold_rounds(monkeypatch, n):
+    """Cold scanner, release-only load: n rounds (3 moves each) in the
+    cold start, then the 3-move app-start jog."""
+    fake = FakeUsbDevice(reg01=0x00)
+    monkeypatch.setattr(Scanner, "open", staticmethod(lambda: make_scanner(fake)))
     with fast_time():
-        try:
-            loadflow.run(ask=lambda p: "", release_only=True, cold_homing_rounds=n)
-        except Exception:
-            pass
-    assert holder and holder[0].cold_homing_rounds == n
+        rc = loadflow.run(ask=lambda p: "", release_only=True, cold_homing_rounds=n)
+    assert rc == 0
+    assert fake.pulses == 3 * n + 3
+
+
+@pytest.mark.parametrize("bad", [0, 4, True, None, "2"])
+def test_load_flow_rejects_invalid_before_opening_the_device(monkeypatch, bad):
+    opened = []
+    monkeypatch.setattr(Scanner, "open", staticmethod(lambda: opened.append(1)))
+    with pytest.raises(ValueError, match="cold_homing_rounds"):
+        loadflow.run(ask=lambda p: "", release_only=True, cold_homing_rounds=bad)
+    assert opened == []
+
+
+@pytest.mark.parametrize("n", [1, 2, 3])
+def test_watch_cli_flag_reaches_the_scanner(n):
+    fake = FakeUsbDevice(reg01=0x22)
+    with cli_over(fake) as opened, patched_start_state():
+        _cli(["watch", "--cold-homing-rounds", str(n)])
+    scanners = [o for o in opened if isinstance(o, Scanner)]
+    assert scanners and scanners[0].cold_homing_rounds == n
 
 
 def test_digitize_load_step_passes_it_to_the_load_flow(monkeypatch, tmp_path):

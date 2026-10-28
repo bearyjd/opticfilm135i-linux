@@ -3302,6 +3302,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     press must not send anything). Only "eject" ever acts, and only
     with a magazine present; other buttons are printed."""
     def body(scanner: Scanner) -> int:
+        scanner.cold_homing_rounds = getattr(args, "cold_homing_rounds", 3)
         scanner.check_start_state()
         print("watching for button events (Ctrl+C to stop)", flush=True)
         previous: set[str] = set()
@@ -3539,6 +3540,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_watch = sub.add_parser("watch", help="poll buttons; eject on the eject button")
     p_watch.set_defaults(func=_cmd_watch)
+    p_watch.add_argument("--cold-homing-rounds", type=int, choices=(1, 2, 3), default=3,
+        metavar="N",
+        help="EXPERIMENTAL, unverified on hardware, motor-affecting: run N (1-3) "
+             "loader-homing rounds in the cold start instead of 3. Fewer rounds "
+             "skip only the extra rounds. Default: 3 (unchanged behaviour)")
 
     p_buttons = sub.add_parser(
         "buttons", help="read-only: print front-panel button presses")

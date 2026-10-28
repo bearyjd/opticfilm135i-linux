@@ -6,7 +6,7 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
-- **Opt-in `--cold-homing-rounds N`** (`scan`, `digitize`, `eject`, `load`;
+- **Opt-in `--cold-homing-rounds N`** (`scan`, `digitize`, `eject`, `load`, `watch`;
   `Scanner.cold_homing_rounds`, 1..3, default 3): run fewer loader-homing
   rounds in the cold start. In vendor-app traffic with the holder at the
   sensor, one set of three jogs was observed, where the native cold start

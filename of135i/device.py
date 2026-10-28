@@ -643,6 +643,16 @@ class _CalCapture:
                              "phase": phase, "raw": raw})
 
 
+def check_cold_homing_rounds(n):
+    """Return ``n`` if it is a valid cold-homing round count (an int,
+    1..COLD_HOMING_ROUNDS_DEFAULT), else raise ValueError. Pure: no I/O."""
+    if type(n) is not int or not 1 <= n <= COLD_HOMING_ROUNDS_DEFAULT:
+        raise ValueError(
+            f"cold_homing_rounds must be an int from 1 to "
+            f"{COLD_HOMING_ROUNDS_DEFAULT}, got {n!r}")
+    return n
+
+
 class Scanner:
     """Drives the of135i scan sequence over a UsbIo transport."""
 
@@ -663,11 +673,7 @@ class Scanner:
 
     @cold_homing_rounds.setter
     def cold_homing_rounds(self, n: int) -> None:
-        if type(n) is not int or not 1 <= n <= COLD_HOMING_ROUNDS_DEFAULT:
-            raise ValueError(
-                f"cold_homing_rounds must be an int from 1 to "
-                f"{COLD_HOMING_ROUNDS_DEFAULT}, got {n!r}")
-        self._cold_homing_rounds = n
+        self._cold_homing_rounds = check_cold_homing_rounds(n)
 
     @property
     def cold_move_early_fail(self) -> bool:
