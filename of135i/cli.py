@@ -3482,7 +3482,12 @@ def build_parser() -> argparse.ArgumentParser:
              "empty buffer where the capture had data, 'log' (default) records "
              "acq_not_observed in the .diag.json and continues as before; 'fail' "
              "(opt-in) stops the scan before reading the measurement "
-             "(CalibrationError, power cycle); 'off' records nothing")
+             "(CalibrationError, power cycle) and, EXPERIMENTAL and unverified "
+             "on hardware, also stops it when a calibration acquisition is "
+             "stale (re-armed while the previous one still ran, data served "
+             "fast or not observed) or its per-channel means are identical, "
+             "before any dark_b substitution or default-offset fallback; "
+             "'off' records nothing")
     p_scan.add_argument("--park", choices=("verbatim", "semantic"), default="semantic",
         help="PARK phase implementation: semantic issues the same motor "
              "sequence as verbatim but replaces the captured trace's fixed "
@@ -3706,7 +3711,12 @@ def build_parser() -> argparse.ArgumentParser:
              "empty buffer where the capture had data, 'log' (default) records "
              "acq_not_observed in the .diag.json and continues as before; 'fail' "
              "(opt-in) stops the scan before reading the measurement "
-             "(CalibrationError, power cycle); 'off' records nothing")
+             "(CalibrationError, power cycle) and, EXPERIMENTAL and unverified "
+             "on hardware, also stops it when a calibration acquisition is "
+             "stale (re-armed while the previous one still ran, data served "
+             "fast or not observed) or its per-channel means are identical, "
+             "before any dark_b substitution or default-offset fallback; "
+             "'off' records nothing")
     p_dig.add_argument("--park", choices=("verbatim", "semantic"), default="semantic",
         help="PARK implementation: semantic (default since 2026-09-17, "
              "3.7-3.8 s, hardware-confirmed via the SANE backend) or "

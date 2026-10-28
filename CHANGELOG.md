@@ -6,6 +6,15 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- **`--cal-readback-guard fail` now also refuses on calibration integrity**
+  (opt-in; EXPERIMENTAL, unverified on hardware). Besides the existing
+  refusal when a read-back shows no acquisition (before the bulk read),
+  `fail` stops the scan with `CalibrationError` when the integrity telemetry
+  marks any calibration acquisition `stale_suspect` or with identical
+  per-channel means. Checked after the dark pair (before any dark_b
+  substitution or default-offset fallback), after the gain checks and after
+  the shading verify (before POSITION). No motor command is added; the
+  default `log` and `off` are unchanged.
 - **Opt-in `--cal-wait-bufempty {off,enforce}`** (`scan`, `digitize`;
   `Scanner.cal_wait_bufempty`, default `off`). EXPERIMENTAL and unverified
   on hardware. The calibration read-back poll today also ends on the
