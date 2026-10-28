@@ -14,6 +14,17 @@ one exists; "offline" means implemented and tested without the scanner.
   moves, the pre-move prep and the resync are unchanged. EXPERIMENTAL,
   motor-affecting and unverified on hardware; the default (3) wire traffic
   is identical to before. Invalid values are rejected before any transfer.
+
+- **Opt-in read-back register diagnostic** (offline): `--diag-readback-regs`
+  on `scan` and `digitize` (`Scanner.diag_readback_regs`, default off). When
+  a calibration read-back poll times out, the driver reads register 0x100
+  and register 0x101 once each (two extra IN transfers, never a write) and
+  records the raw bytes, the data-enable bit of 0x100 and the decoded bits of
+  0x101 as `regs` on the `poll_settle` and `poll_timeout_details` records and
+  in a log line. It settles whether the engine had stopped and the buffer was
+  empty when the read-back was abandoned. A failing extra read is logged and
+  ignored; clean polls and every other timeout are untouched. Off, the
+  transfer sequence is unchanged (wire fingerprints identical).
 - **Opt-in transfer recorder** (offline): `OF135I_TRACE=<path>` appends one
   JSON line per control/bulk transfer (monotonic timestamp, direction, setup
   fields, status, first 64 data bytes; bulk-IN image data only as a length) to
