@@ -195,6 +195,19 @@ the transfer sequence nor any poll-loop clock or sleep call:
 python -m pytest -q tests/test_cal_integrity.py
 ```
 
+The calibration stop-gate suite checks the EXPERIMENTAL opt-in
+`--cal-wait-scanstop enforce` (unverified on hardware): after the SCAN-clear
+that closes a calibration execute pulse, and before the next OUT transfer,
+register 0x100 bit 0 and then register 0x101 bit 0 must read clear in
+2-byte replies with the 0x55 acknowledge, under one shared deadline of the
+existing non-strict poll floor; at the deadline `CalibrationError` is raised
+before any further write. It also checks that the default `off` leaves the
+transfer sequence identical to the stored baseline:
+
+```
+python -m pytest -q tests/test_cal_wait_scanstop.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```

@@ -76,6 +76,9 @@ jobs:
       - name: Calibration integrity telemetry regressions
         run: python -m pytest -q tests/test_cal_integrity.py
 
+      - name: Opt-in calibration stop-gate regressions
+        run: python -m pytest -q tests/test_cal_wait_scanstop.py
+
       - name: Compiler-based suites (mark, ops, geometry, install)
         run: |
           set -e
