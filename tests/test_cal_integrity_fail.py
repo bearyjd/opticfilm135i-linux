@@ -266,3 +266,27 @@ def test_a_clean_cached_calibration_is_reused_in_fail_mode():
         s.scan(frame=2)
     assert s.last_diag["calibration"] == "cached"
     assert s.last_diag["cal_integrity"] == "clean"
+
+
+def test_a_cached_calibration_with_identical_means_is_not_reused_in_fail_mode():
+    # Identical gain-check means alone leave the log-mode verdict "clean",
+    # but fail mode would have refused that calibration: not reused.
+    dark = [_varied(2000), _varied(4500), _pixels(9000, 9000, 9000), _varied(9100)]
+    fake = ScriptedFake(_buffered(FRESH_DARK_B), dark=dark)
+    s = make_scanner(fake)
+    fake.scanner = s
+    s.cal_readback_guard = "log"
+    exc = None
+    with fast_time(), scripted_clock(fake):
+        s.initialize()
+        s.scan(frame=1)
+        assert s.last_diag["cal_integrity"] == "clean"
+        s.cal_readback_guard = "fail"
+        s.initialize()
+        try:
+            s.scan(frame=2)
+        except safety.SafetyError as e:
+            exc = e
+    assert isinstance(exc, safety.CalibrationError), exc
+    assert "cal_gain_check_a: identical per-channel means" in str(exc)
+    _assert_failed_and_frozen(fake, s, exc, operation="scan")

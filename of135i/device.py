@@ -1775,15 +1775,7 @@ class Scanner:
         telemetry off there is nothing to judge. Host-side only."""
         if self._cal_readback_guard != "fail" or not self._cal_integrity_telemetry:
             return
-        reasons = []
-        for a in self._cal_acquisitions:
-            if cal_stale_suspect(a):
-                reasons.append(
-                    f"{a['phase']}: stale (re-armed while the previous acquisition was "
-                    f"still running; "
-                    f"{'acquisition not observed' if a.get('acq_not_observed') else 'data served fast'})")
-            if a.get("identical_channel_means") is True:
-                reasons.append(f"{a['phase']}: identical per-channel means")
+        reasons = self._cal_integrity_fail_reasons()
         if not reasons:
             return
         log.warning("calibration integrity check failed %s: %s", checkpoint,
@@ -1794,6 +1786,22 @@ class Scanner:
             f"offsets are used, and the scan stops here (--cal-readback-guard fail). "
             f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
             session=self.session.snapshot())
+
+    def _cal_integrity_fail_reasons(self) -> list[str]:
+        """The reasons --cal-readback-guard fail refuses on, from this
+        scan's acquisition records (empty with the telemetry off)."""
+        if not self._cal_integrity_telemetry:
+            return []
+        reasons = []
+        for a in self._cal_acquisitions:
+            if cal_stale_suspect(a):
+                reasons.append(
+                    f"{a['phase']}: stale (re-armed while the previous acquisition was "
+                    f"still running; "
+                    f"{'acquisition not observed' if a.get('acq_not_observed') else 'data served fast'})")
+            if a.get("identical_channel_means") is True:
+                reasons.append(f"{a['phase']}: identical per-channel means")
+        return reasons
 
     @staticmethod
     def _warn_cal_integrity(frame, integ: dict) -> None:
@@ -3317,14 +3325,17 @@ class Scanner:
                                           cached_integ.get("cal_integrity_reasons", [])],
                 "cal_acquisitions": [],
             }
+            cached_fail = ((cache.get("cal_fail_reasons") or [])
+                           if self._cal_integrity_telemetry else [])
             if (self._cal_readback_guard == "fail"
-                    and integ["cal_integrity"] == "degraded"):
-                # A calibration judged degraded (e.g. measured while the
-                # guard was "log") is not reused in fail mode: refuse
-                # before the cached rewrite, nothing further is sent.
+                    and (integ["cal_integrity"] == "degraded" or cached_fail)):
+                # A calibration that fail mode would have refused (e.g.
+                # measured while the guard was "log") is not reused in fail
+                # mode: refuse before the cached rewrite, nothing further
+                # is sent.
+                why = "; ".join(list(integ["cal_integrity_reasons"]) + cached_fail)
                 raise safety.CalibrationError(
-                    f"cached calibration is degraded "
-                    f"({'; '.join(integ['cal_integrity_reasons'])}) and is not reused "
+                    f"cached calibration is degraded ({why}) and is not reused "
                     f"(--cal-readback-guard fail). {safety.NO_RECOVERY_ATTEMPTED} "
                     f"{safety.POWER_CYCLE_INSTRUCTION}",
                     session=self.session.snapshot())
@@ -3448,6 +3459,9 @@ class Scanner:
                 "shading2_stats": shading2_stats,
                 "cal_integrity": {k: integ[k] for k in
                                   ("cal_integrity", "cal_integrity_reasons")},
+                # What --cal-readback-guard fail would refuse this
+                # calibration for (it can be cached in log mode).
+                "cal_fail_reasons": self._cal_integrity_fail_reasons(),
             }
 
         try:
