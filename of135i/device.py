@@ -1145,6 +1145,10 @@ class Scanner:
         dev = self.io.dev
         while True:
             got = bytes(dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.length))
+            if (self._cal_integrity_telemetry and op.wv == 0x018E
+                    and op.wi in (0x0022, 0x0122)):
+                # Some tables read a post-clear register through a poll.
+                self._cal_note_status_read(op.wi, got)
             if got == want:
                 if strict:
                     log.info("completion poll settled %s (exact) after %.2fs",
@@ -1429,7 +1433,9 @@ class Scanner:
 
     @staticmethod
     def _warn_cal_integrity(frame, integ: dict) -> None:
-        """ONE warning per frame when its calibration is degraded."""
+        """ONE integrity summary warning per frame when its calibration is
+        degraded (the existing per-event warnings, e.g. the dark_b residual
+        one, are unchanged and may precede it)."""
         if integ.get("cal_integrity") == "degraded":
             log.warning("calibration integrity DEGRADED for frame %s: %s "
                         "(diagnostic only; the scan continued unchanged)",
@@ -2930,7 +2936,8 @@ class Scanner:
             white_dips_diag = None       # tables reused, no white measured
             # The codes in use came from the cached calibration: carry its
             # verdict (no acquisition was made this frame).
-            cached_integ = cache.get("cal_integrity") or {}
+            cached_integ = ((cache.get("cal_integrity") or {})
+                            if self._cal_integrity_telemetry else {})
             integ = {
                 "cal_integrity": cached_integ.get("cal_integrity"),
                 "cal_integrity_reasons": [f"cached calibration: {r}" for r in

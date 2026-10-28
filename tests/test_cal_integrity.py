@@ -560,3 +560,74 @@ def test_malformed_post_reads_give_unknown_not_running():
     b = s._cal_acquisitions[-1]
     assert b["prev_post"] is None and b["prev_running"] is None
     assert device.cal_stale_suspect({**b, "served_fast": True}) is False
+
+
+def test_post_clear_read_done_as_a_poll_is_recorded():
+    # The plain table's shading measurement reads register 0x100 after its
+    # clear through a poll op, not a single read: it must count too.
+    sc = {k: dict(v) for k, v in FRESH_DARK_B.items()}
+    sc["cal_shading_measure"] = {"r100": 0xF1, "r101": 0xD8, "go_delay": 0.05,
+                                 "bulk_delay": 0.05, "poll101": 0xAD}
+    sc["cal_shading_verify"] = {"go_delay": 0.006, "bulk_delay": 0.0, "poll101": 0xAD}
+    _, _, (d,) = _run(sc, dark=DARK_DISTINCT)
+    v = _acq(d, "cal_shading_verify")
+    assert v["prev_phase"] == "cal_shading_measure"
+    assert v["prev_post"]["reg_0x100"] == "f1"
+    assert v["prev_post"]["reg_0x101"] == "d8"
+    assert v["prev_running"] is True
+    assert v["served_fast"] is True
+    assert v["stale_suspect"] is True
+    assert d["cal_integrity"] == "degraded"
+
+
+def test_cached_frame_with_telemetry_off_records_nothing(caplog):
+    caplog.set_level(logging.WARNING, logger="of135i")
+    fake = ScriptedFake(STALE_DARK_B, dark=DARK_STALE)
+    s = make_scanner(fake)
+    fake.scanner = s
+    with fast_time(), scripted_clock(fake):
+        s.initialize()
+        s.scan(frame=1)
+        assert s.last_diag["cal_integrity"] == "degraded"
+        s.cal_integrity_telemetry = False
+        s.initialize()
+        s.scan(frame=2)
+    d2 = s.last_diag
+    assert d2["calibration"] == "cached"
+    assert d2["cal_integrity"] is None
+    assert d2["cal_integrity_reasons"] == [] and d2["cal_acquisitions"] == []
+    assert len(_warnings(caplog)) == 1          # frame 1 only
+
+
+def test_every_calibration_acquisition_is_attributed_in_order():
+    for ir in (False, True):
+        fake = ScriptedFake({})
+        s = make_scanner(fake)
+        fake.scanner = s
+        with fast_time(), scripted_clock(fake):
+            s.initialize(ir=ir)
+            s.scan(frame=1, ir=ir)
+        accs = s.last_diag["cal_acquisitions"]
+        assert [a["phase"] for a in accs] == [
+            "cal_dark_a", "cal_dark_b", "cal_white", "cal_gain_check_a",
+            "cal_gain_check_b", "cal_shading_measure", "cal_shading_verify"], ir
+        for prev, a in zip(accs, accs[1:]):
+            if prev["phase"] != "cal_shading_verify":
+                assert a["prev_phase"] == prev["phase"], (ir, a)
+        assert all(a["go_to_data_s"] is not None for a in accs), ir
+
+
+@pytest.mark.parametrize("dark,fallback", [
+    (DARK_STALE, "strict"),
+    ([_varied(2000), _residual(), _varied(9000), _varied(9100)], "default"),
+])
+def test_telemetry_adds_exactly_one_warning_and_nothing_else(caplog, dark, fallback):
+    msgs = {}
+    for on in (True, False):
+        caplog.clear()
+        caplog.set_level(logging.DEBUG, logger="of135i")
+        _run(STALE_DARK_B, dark=list(dark), dark_fallback=fallback, telemetry=on)
+        msgs[on] = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    extra = [m for m in msgs[True] if "calibration integrity" in m]
+    assert len(extra) == 1
+    assert [m for m in msgs[True] if m not in extra] == msgs[False]
