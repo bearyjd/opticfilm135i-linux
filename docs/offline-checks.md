@@ -159,6 +159,20 @@ no further move):
 python -m pytest -q tests/test_cold_move_outcome.py
 ```
 
+The transfer recorder suite checks the opt-in `OF135I_TRACE=<path>`
+recorder: one record per control/bulk transfer (timestamp, direction,
+setup fields, status, first 64 data bytes of control and bulk-OUT
+transfers, only the length of bulk-IN data), complete lines flushed per
+record, file mode 0600, an existing file or symlink refused, any
+recording failure logs one warning and never touches scanner I/O, and
+with the variable set or unset the wire fingerprints equal the stored
+baseline. `tools/trace_to_compiled.py TRACE.jsonl` converts a recording
+to the compiled `*.trace.json[.gz]` op format:
+
+```
+python -m pytest -q tests/test_trace_recorder.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```
