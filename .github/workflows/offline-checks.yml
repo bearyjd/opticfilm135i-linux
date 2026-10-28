@@ -67,6 +67,9 @@ jobs:
       - name: Cold-start move outcome regressions
         run: python -m pytest -q tests/test_cold_move_outcome.py
 
+      - name: Opt-in transfer recorder regressions
+        run: python -m pytest -q tests/test_trace_recorder.py
+
       - name: Compiler-based suites (mark, ops, geometry, install)
         run: |
           set -e

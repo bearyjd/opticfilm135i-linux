@@ -6,6 +6,14 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- **Opt-in transfer recorder** (offline): `OF135I_TRACE=<path>` appends one
+  JSON line per control/bulk transfer (monotonic timestamp, direction, setup
+  fields, status, first 64 data bytes; bulk-IN image data only as a length) to
+  a new 0600 file, flushed per record; an existing file is refused. A
+  recording failure logs one warning and scanning continues. Unset, the
+  transfer path is unchanged (wire fingerprints identical).
+  `tools/trace_to_compiled.py` converts a recording to the compiled trace
+  format for offline comparison.
 - **Scanned and complete images are never discarded** (owner's founding
   requirement, docs/film-110.md §15.9): when numbering cannot be established
   for a pass, its whole and near-whole images are written unnumbered
