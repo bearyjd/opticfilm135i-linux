@@ -236,6 +236,10 @@ _PARK_WAIT_B_TIMEOUT = 100.0
 # the patience is.
 _PARK_POLL_INTERVAL = 0.02
 
+# Loader-homing rounds cold_init() runs by default; also the maximum of the
+# opt-in Scanner.cold_homing_rounds setting.
+COLD_HOMING_ROUNDS_DEFAULT = 3
+
 # cold_init()'s "engine reached the done class" wait, at both of its sites
 # (the opening one in _cold_init_body and the per-round one in
 # _cold_homing_round). Non-raising: poll_status_word logs and continues.
@@ -645,6 +649,25 @@ class Scanner:
     _cal_readback_guard = CAL_READBACK_GUARD_DEFAULT
     _position_require_motor_idle = False
     _cold_move_early_fail = False
+    _cold_homing_rounds = COLD_HOMING_ROUNDS_DEFAULT
+
+    @property
+    def cold_homing_rounds(self) -> int:
+        """EXPERIMENTAL, unverified on hardware, motor-affecting, opt-in:
+        how many loader-homing rounds cold_init() runs (1..3). Default 3
+        keeps the wire traffic exactly as before. Fewer rounds skip only
+        the extra rounds; the pre-move prep, resync and each round's own
+        moves are unchanged. In vendor-app traffic with the holder at the
+        sensor, one set of three jogs was observed."""
+        return self._cold_homing_rounds
+
+    @cold_homing_rounds.setter
+    def cold_homing_rounds(self, n: int) -> None:
+        if type(n) is not int or not 1 <= n <= COLD_HOMING_ROUNDS_DEFAULT:
+            raise ValueError(
+                f"cold_homing_rounds must be an int from 1 to "
+                f"{COLD_HOMING_ROUNDS_DEFAULT}, got {n!r}")
+        self._cold_homing_rounds = n
 
     @property
     def cold_move_early_fail(self) -> bool:
@@ -1607,12 +1630,13 @@ class Scanner:
         val31 = self.io.read_reg(0x31)
         self.io.write_regs([(0x31, (val31 | 0x80) & 0xFF)])
 
-        # ---- 9: three rounds of loader homing (3 moves each) -------------
-        for round_n in range(1, 4):
-            log.info("cold_init: homing round %d/3", round_n)
+        # ---- 9: up to three rounds of loader homing (3 moves each) --------
+        rounds = self._cold_homing_rounds
+        for round_n in range(1, rounds + 1):
+            log.info("cold_init: homing round %d/%d", round_n, rounds)
             self.session.phase = f"cold_init:homing-{round_n}"
             self._cold_homing_round()
-            if round_n < 3:
+            if round_n < rounds:
                 self._cold_write_table_and_afe()
 
         log.info("cold_init: homing done")
