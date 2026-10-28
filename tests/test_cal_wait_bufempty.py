@@ -118,9 +118,57 @@ def test_budget_is_the_poll_existing_budget():
     s_off, _, t_off = _poll(["cc55"], "bd55", "cal_gain_check_a", mode="off", dur=0.2)
     s_on, exc, t_on = _poll(["cc55"], "bd55", "cal_gain_check_a", dur=0.2)
     assert isinstance(exc, safety.CalibrationError)
-    assert s_on.io.dev.calls == s_off.io.dev.calls
-    assert t_on == pytest.approx(t_off, abs=0.02)
+    # Same deadline (the simulated clock ticks per clock call, so the read
+    # counts differ; the time at which each gives up does not).
+    assert t_on == pytest.approx(t_off, abs=0.03)
     assert t_on >= 0.6 - 0.03
+
+
+class _SlowDev:
+    """Replies from a list; each read takes ``delay`` simulated seconds and
+    records the transfer timeout it was given."""
+
+    def __init__(self, replies, clock, delay):
+        self.replies, self.clock, self.delay = list(replies), clock, delay
+        self.calls, self.timeouts = 0, []
+
+    def ctrl_transfer(self, bm, br, wv, wi, length, timeout=None):
+        self.calls += 1
+        self.timeouts.append(timeout)
+        self.clock["t"] += self.delay
+        r = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        return bytes.fromhex(r)
+
+
+def _slow_poll(replies, delay, mode="enforce"):
+    s = _scanner(["00"])
+    s.session.phase = "cal_dark_b"
+    s.cal_wait_bufempty = mode
+    exc = None
+    with sim_time(0.01) as clock:
+        s.io.dev = _SlowDev(replies, clock, delay)
+        try:
+            s._poll_one(_status_poll("bd55"))
+        except safety.SafetyError as e:
+            exc = e
+    return s, exc
+
+
+def test_a_buffered_reply_arriving_after_the_deadline_does_not_count():
+    s, exc = _slow_poll(["ad55"], delay=5.0)
+    assert isinstance(exc, safety.CalibrationError), exc
+    assert _how(s) == ["timeout"]
+    # off mode: today's rules accept it (no change there)
+    s_off, exc_off = _slow_poll(["ad55"], delay=5.0, mode="off")
+    assert exc_off is None
+
+
+def test_every_enforced_read_is_bounded_by_the_time_left():
+    s, exc = _slow_poll(["cd55"], delay=0.05)
+    assert isinstance(exc, safety.CalibrationError)
+    t = s.io.dev.timeouts
+    assert t and all(isinstance(x, int) and 1 <= x <= FLOOR * 1000 for x in t)
+    assert t == sorted(t, reverse=True) and t[-1] < t[0]
 
 
 def test_row5_buffer_ready_on_the_first_read():

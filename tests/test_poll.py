@@ -33,7 +33,7 @@ class _Dev:
         self.replies = list(replies)
         self.calls = 0
 
-    def ctrl_transfer(self, bm, br, wv, wi, length):
+    def ctrl_transfer(self, bm, br, wv, wi, length, timeout=None):
         self.calls += 1
         r = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         return bytes.fromhex(r)
