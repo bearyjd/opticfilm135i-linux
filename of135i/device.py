@@ -1389,16 +1389,20 @@ class Scanner:
         Every read is bounded by the time left. At the deadline raise
         CalibrationError, before the phase's bulk read."""
         dev = self.io.dev
+        got = None
         while True:
-            remaining = max(0.0, deadline - time.monotonic())
-            got = bytes(dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.length,
-                                          max(1, math.ceil(remaining * 1000))))
-            if self._cal_integrity_telemetry:
-                self._cal_note_status_read(op.wi, got)
-            late = time.monotonic() > deadline
-            if not late and len(got) == 2 and got[1] == 0x55 and not got[0] & 0x40:
-                self._note_poll_settle(op, got, want, t_start, "bufempty_clear")
-                return
+            remaining = deadline - time.monotonic()
+            if got is not None and remaining <= 0:
+                late = True          # no transfer is started once the budget is spent
+            else:
+                got = bytes(dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.length,
+                                              max(1, math.ceil(max(0.0, remaining) * 1000))))
+                if self._cal_integrity_telemetry:
+                    self._cal_note_status_read(op.wi, got)
+                late = time.monotonic() > deadline
+                if not late and len(got) == 2 and got[1] == 0x55 and not got[0] & 0x40:
+                    self._note_poll_settle(op, got, want, t_start, "bufempty_clear")
+                    return
             if late:
                 self._diag_poll_timeouts += 1
                 detail = None
