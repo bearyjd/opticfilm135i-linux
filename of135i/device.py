@@ -643,6 +643,7 @@ class Scanner:
     """Drives the of135i scan sequence over a UsbIo transport."""
 
     _cal_readback_guard = CAL_READBACK_GUARD_DEFAULT
+    _diag_readback_regs = False
     _position_require_motor_idle = False
     _cold_move_early_fail = False
 
@@ -674,6 +675,20 @@ class Scanner:
     def _position_status_mask(self) -> int:
         return (POSITION_STATUS_MASK_IDLE if self._position_require_motor_idle
                 else POSITION_STATUS_MASK)
+
+    @property
+    def diag_readback_regs(self) -> bool:
+        """Opt-in, read-only: after a calibration read-back poll times out,
+        read register 0x100 and register 0x101 once each and record the
+        decoded values on the poll records and in the log. Default False:
+        the transfer sequence is unchanged."""
+        return self._diag_readback_regs
+
+    @diag_readback_regs.setter
+    def diag_readback_regs(self, on: bool) -> None:
+        if not isinstance(on, bool):
+            raise ValueError(f"diag_readback_regs must be a bool, got {on!r}")
+        self._diag_readback_regs = on
 
     @property
     def cal_readback_guard(self) -> str:
@@ -1137,17 +1152,21 @@ class Scanner:
                 return
             if time.monotonic() > deadline:
                 self._diag_poll_timeouts += 1
+                detail = None
                 if len(self._diag_poll_timeout_details) < 20:
-                    self._diag_poll_timeout_details.append({
+                    detail = {
                         "wv": f"0x{op.wv:04x}", "wi": f"0x{op.wi:04x}",
                         "last": got.hex(), "want": want.hex(),
-                    })
+                    }
+                    self._diag_poll_timeout_details.append(detail)
                 entry = self._note_poll_settle(op, got, want, t_start, "timeout")
                 log.warning(
                     "poll wv=%#06x wi=%#06x timed out after %.1fs "
                     "(last %s, want %s) -- continuing",
                     op.wv, op.wi, timeout, got.hex(), want.hex(),
                 )
+                if self._diag_readback_regs and self._is_cal_readback_site(op, want):
+                    self._diag_read_regs(entry, detail)
                 if self._cal_acquisition_not_observed(op, got, want):
                     self._on_cal_acquisition_not_observed(got, want, entry)
                 return
@@ -1176,6 +1195,53 @@ class Scanner:
             self._diag_poll_settle.append(entry)
             return entry
         return None
+
+    def _is_cal_readback_site(self, op: Op, want: bytes) -> bool:
+        """True for a calibration read-back poll: extended status word
+        (wValue 0x018e, wIndex 0x0122) captured with the motor-enabled bit
+        set, inside a calibration acquisition phase. Pure check."""
+        return (op.wv == 0x018E and op.wi == 0x0122 and len(want) >= 1
+                and bool(want[0] & 0x01)
+                and getattr(self.session, "phase", None) in CAL_ACQUISITION_PHASES)
+
+    def _diag_read_regs(self, entry: dict | None, detail: dict | None) -> None:
+        """Opt-in diagnostic (diag_readback_regs): one IN read of register
+        0x100 and one of register 0x101 after a read-back poll timed out,
+        recorded as ``regs`` on the poll_settle entry and on the matching
+        poll_timeout_details record, and logged. Reads only, through the
+        same device path as every other read; no sleep or clock call.
+        A failing read is logged once and ignored: it never changes
+        control flow."""
+        regs: dict = {}
+        failures: list[str] = []
+        for name, wi in (("reg100", 0x0022), ("reg101", 0x0122)):
+            try:
+                raw = bytes(self.io.dev.ctrl_transfer(0xC0, 0x04, 0x018E, wi, 2))
+            except Exception as e:
+                failures.append(f"{name}: {type(e).__name__}: {e}")
+                regs[name] = {"error": type(e).__name__}
+                continue
+            if len(raw) != 2 or raw[1] != 0x55:
+                regs[name] = None
+            elif name == "reg100":
+                regs[name] = {"raw": f"{raw[0]:02x}", "data_enable": raw[0] & 0x01}
+            else:
+                regs[name] = {"raw": f"{raw[0]:02x}", "bits": decode_status_word(raw)}
+        if failures:
+            log.warning("diagnostic register read failed (ignored): %s",
+                        "; ".join(failures))
+        if entry is not None:
+            entry["regs"] = regs
+        if detail is not None:
+            detail["regs"] = regs
+        r100, r101 = regs.get("reg100"), regs.get("reg101")
+        log.warning(
+            "read-back timeout registers: reg100=%s data_enable=%s reg101=%s (%s)",
+            r100.get("raw") if r100 else None,
+            r100.get("data_enable") if r100 else None,
+            r101.get("raw") if r101 else None,
+            format_status_bits(r101.get("bits")) if r101 else "unavailable",
+        )
 
     def _cal_acquisition_not_observed(self, op: Op, got: bytes, want: bytes) -> bool:
         """True when a timed-out non-strict poll matches the read-back
