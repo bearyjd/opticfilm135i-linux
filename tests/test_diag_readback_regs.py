@@ -251,6 +251,22 @@ def test_read_failure_is_logged_and_ignored(fail, caplog):
     assert s._diag_poll_timeouts == 1
 
 
+def test_guard_decision_comes_from_the_poll_not_the_extra_reads():
+    # The poll's last reply has the acq signature; the extra reads say
+    # "running, buffer not empty": the guard must still fire.
+    dev = _RegDev(poll_reply="ec55", reg101="ad55")
+    s = _scanner(dev, guard="fail")
+    with pytest.raises(safety.CalibrationError):
+        s._poll_one(_status_poll("ad55"))
+    # And the reverse: no signature in the poll, signature in the extra
+    # reads: the guard must stay quiet.
+    dev = _RegDev(poll_reply="9c55", reg101="ec55")
+    s = _scanner(dev, guard="fail")
+    s._poll_one(_status_poll("ad55"))
+    assert "acq_not_observed" not in s._diag_poll_settle[-1]
+    assert s._diag_poll_settle[-1]["got"] == "9c55"
+
+
 def test_read_failure_in_log_mode_continues():
     dev = _RegDev(fail={0x100, 0x101})
     s = _scanner(dev)
@@ -306,11 +322,21 @@ def test_full_scan_on_adds_only_reads_and_only_at_timeouts():
                    if w["t"] == "cr" and w["wv"] == 0x018E and w["wi"] == REG100_WI)
     assert reg100_reads(f_on.wire_log) - reg100_reads(f_off.wire_log) == len(timeouts)
     assert len(f_on.wire_log) == len(f_off.wire_log) + 2 * len(timeouts)
-    # The "off" log is a subsequence of the "on" log: only reads were added.
-    it = iter(f_on.wire_log)
-    assert all(any(w == x for x in it) for w in f_off.wire_log)
-    added = [w for w in f_on.wire_log if w not in f_off.wire_log]
-    assert all(w["t"] == "cr" for w in added)
+    # Walking both logs in order, every difference is exactly one inserted
+    # (reg 0x100 read, reg 0x101 read) pair; nothing else was added.
+    off, on = f_off.wire_log, f_on.wire_log
+    i = inserted = 0
+    k = 0
+    while k < len(on):
+        if i < len(off) and on[k] == off[i]:
+            i += 1
+            k += 1
+            continue
+        assert on[k]["t"] == "cr" and on[k]["wi"] == REG100_WI, (k, on[k])
+        assert on[k + 1]["t"] == "cr" and on[k + 1]["wi"] == REG101_WI, (k, on[k + 1])
+        inserted += 1
+        k += 2
+    assert i == len(off) and inserted == len(timeouts)
 
 
 # ------------------------------------------------------------ CLI
