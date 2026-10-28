@@ -182,6 +182,19 @@ to the compiled `*.trace.json[.gz]` op format:
 python -m pytest -q tests/test_trace_recorder.py
 ```
 
+The calibration integrity suite checks the default-on stale-read
+telemetry: per calibration acquisition the re-arm gap, the previous
+acquisition's post-clear status reads (decoded), the execute-pulse-to-data
+time, `served_fast` (below `CAL_SERVED_FAST_S`, an inferred 10 ms),
+`acq_not_observed`, identical per-channel means and `stale_suspect`; the
+per-frame `cal_integrity` verdict (`clean` / `degraded`) with one warning
+when degraded; and that switching the telemetry off or on changes neither
+the transfer sequence nor any poll-loop clock or sleep call:
+
+```
+python -m pytest -q tests/test_cal_integrity.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```
