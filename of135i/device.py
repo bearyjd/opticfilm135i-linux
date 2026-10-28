@@ -3313,6 +3313,17 @@ class Scanner:
                                           cached_integ.get("cal_integrity_reasons", [])],
                 "cal_acquisitions": [],
             }
+            if (self._cal_readback_guard == "fail"
+                    and integ["cal_integrity"] == "degraded"):
+                # A calibration judged degraded (e.g. measured while the
+                # guard was "log") is not reused in fail mode: refuse
+                # before the cached rewrite, nothing further is sent.
+                raise safety.CalibrationError(
+                    f"cached calibration is degraded "
+                    f"({'; '.join(integ['cal_integrity_reasons'])}) and is not reused "
+                    f"(--cal-readback-guard fail). {safety.NO_RECOVERY_ATTEMPTED} "
+                    f"{safety.POWER_CYCLE_INSTRUCTION}",
+                    session=self.session.snapshot())
             log.info("calibration: reusing cached codes (gain R=%#04x G=%#04x B=%#04x, "
                      "offset R=%#06x G=%#06x B=%#06x)", gain_r, gain_g, gain_b,
                      off_r, off_g, off_b)

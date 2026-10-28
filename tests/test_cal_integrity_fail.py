@@ -231,3 +231,38 @@ def test_dual_path_shading_verify_checkpoint():
     sc = _sc(FRESH_DARK_B, cal_shading_measure={"r100": 0xF1})
     s, fake, exc, _ = _go(sc, dark=DARK_DISTINCT, ir=True)
     _refused(s, fake, exc, "cal_shading_verify", "after the shading verify")
+
+
+def test_a_degraded_cached_calibration_is_not_reused_in_fail_mode():
+    # Frame 1 calibrates stale in log mode (degraded, cached); the guard is
+    # then switched to fail: frame 2 must not reuse that calibration.
+    fake = ScriptedFake(_buffered(STALE_DARK_B), dark=DARK_STALE)
+    s = make_scanner(fake)
+    fake.scanner = s
+    s.cal_readback_guard = "log"
+    s.dark_fallback = "default"
+    exc = None
+    with fast_time(), scripted_clock(fake):
+        s.initialize()
+        s.scan(frame=1)
+        assert s.last_diag["cal_integrity"] == "degraded"
+        s.cal_readback_guard = "fail"
+        s.initialize()
+        try:
+            s.scan(frame=2)
+        except safety.SafetyError as e:
+            exc = e
+    assert isinstance(exc, safety.CalibrationError), exc
+    assert "cached calibration is degraded" in str(exc)
+    _assert_failed_and_frozen(fake, s, exc, operation="scan")
+
+
+def test_a_clean_cached_calibration_is_reused_in_fail_mode():
+    s, fake, exc, _ = _go(FRESH_DARK_B, dark=DARK_DISTINCT)
+    assert exc is None
+    with fast_time(), scripted_clock(fake):
+        s.recalibrate = False
+        s.initialize()
+        s.scan(frame=2)
+    assert s.last_diag["calibration"] == "cached"
+    assert s.last_diag["cal_integrity"] == "clean"
