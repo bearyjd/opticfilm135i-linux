@@ -159,6 +159,15 @@ no further move):
 python -m pytest -q tests/test_cold_move_outcome.py
 ```
 
+The opt-in `--cold-homing-rounds N` (experimental, unverified on hardware)
+is checked to leave the default traffic byte-identical, to skip only the
+extra rounds for N = 1 or 2, to reject invalid values before any transfer
+and to reach every command that can run the cold start:
+
+```
+python -m pytest -q tests/test_cold_homing_rounds.py
+```
+
 The transfer recorder suite checks the opt-in `OF135I_TRACE=<path>`
 recorder: one record per control/bulk transfer (timestamp, direction,
 setup fields, status, first 64 data bytes of control and bulk-OUT

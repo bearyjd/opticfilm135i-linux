@@ -17,6 +17,15 @@ one exists; "offline" means implemented and tested without the scanner.
   transfer, sleep, poll-loop clock read, exit code or decision changes
   (wire fingerprints identical; `Scanner.cal_integrity_telemetry = False`
   records nothing). Not hardware-validated.
+- **Opt-in `--cold-homing-rounds N`** (`scan`, `digitize`, `eject`, `load`, `watch`;
+  `Scanner.cold_homing_rounds`, 1..3, default 3): run fewer loader-homing
+  rounds in the cold start. In vendor-app traffic with the holder at the
+  sensor, one set of three jogs was observed, where the native cold start
+  runs three rounds. Only the extra rounds are skipped; each round's own
+  moves, the pre-move prep and the resync are unchanged. EXPERIMENTAL,
+  motor-affecting and unverified on hardware; the default (3) wire traffic
+  is identical to before. Invalid values are rejected before any transfer.
+
 - **Opt-in read-back register diagnostic** (offline): `--diag-readback-regs`
   on `scan` and `digitize` (`Scanner.diag_readback_regs`, default off). When
   a calibration read-back poll times out, the driver reads register 0x100

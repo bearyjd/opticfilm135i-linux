@@ -665,7 +665,7 @@ def test_digitize_records_failed_load():
             dpi=3600, positive=False, rotate=0, ir=True, no_clean=False,
             no_diag=False, park="verbatim", warmup_budget=None)
         orig = loadflow.run
-        loadflow.run = lambda ask=None: 130          # simulate a load abort
+        loadflow.run = lambda ask=None, **kw: 130          # simulate a load abort
         try:
             rc = cli._cmd_digitize(args)
         finally:

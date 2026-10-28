@@ -68,7 +68,7 @@ from __future__ import annotations
 
 import sys
 
-from .device import Scanner
+from .device import Scanner, check_cold_homing_rounds
 from .safety import POWER_CYCLE_INSTRUCTION, SafetyError, SessionState
 from .usbio import Of135iError
 
@@ -128,7 +128,7 @@ it and use the full load."""
 
 
 def run(ask=input, release_only: bool = False, double_jog: bool = False,
-        next_strip: bool = False) -> int:
+        next_strip: bool = False, cold_homing_rounds: int = 3) -> int:
     """Run the vendor's magazine insert flow end to end; returns the
     process exit code (0 loaded, 1 failed/refused, 2 bad combination of
     modes, 130 interrupted). ``ask`` is called with the reinsert prompt
@@ -151,12 +151,19 @@ def run(ask=input, release_only: bool = False, double_jog: bool = False,
     power-on -- no jog, no ``ask`` -- see the module docstring. Refused
     (exit 1) if the scanner reads COLD before any write. Not combined
     with ``release_only`` or ``double_jog`` (raises ValueError -- the
-    CLI turns that into exit 2 before calling in)."""
+    CLI turns that into exit 2 before calling in).
+
+    ``cold_homing_rounds`` (1..3, default 3 = unchanged) is the opt-in
+    EXPERIMENTAL Scanner.cold_homing_rounds setting for the cold start
+    inside ``initialize()``; unverified on hardware. An invalid value
+    raises ValueError before the device is opened."""
     if next_strip and (release_only or double_jog):
         raise ValueError("next_strip is not combined with release_only or double_jog")
+    check_cold_homing_rounds(cold_homing_rounds)
     scanner = None
     try:
         with Scanner.open() as scanner:
+            scanner.cold_homing_rounds = cold_homing_rounds
             # Loader sensor BEFORE initialize() -- the register table
             # written by initialize() changes reg 0x101 so the sensor
             # bit is unreliable after it. Reads only.
