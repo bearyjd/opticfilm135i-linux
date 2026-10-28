@@ -68,7 +68,14 @@ class TraceRecorder:
             self._record(kind, direction, ep, setup, out_data, None, t0,
                          f"error:{type(e).__name__}")
             raise
-        self._record(kind, direction, ep, setup, out_data, result, t0, "ok")
+        status = "ok"
+        if direction == "out" and out_data is not None:
+            try:
+                if int(result) != len(out_data):
+                    status = f"short:{int(result)}"
+            except (TypeError, ValueError):
+                status = "short:?"
+        self._record(kind, direction, ep, setup, out_data, result, t0, status)
         return result
 
     def _record(self, kind, direction, ep, setup, out_data, result, t0, status):

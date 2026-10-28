@@ -17,7 +17,8 @@ Notes:
   correct. Bytes beyond the first 64 are therefore NOT real data, and
   bulk-OUT content hashes are not comparable for payloads over 64 bytes.
 - Control replies longer than 64 bytes are likewise truncated.
-- The output file is created exclusively; an existing file is refused.
+- The output file is created exclusively with mode 0600; an existing file
+  is refused. Failed or short transfers are skipped.
 
 Usage: trace_to_compiled.py TRACE.jsonl [-o OUT.trace.json[.gz]]
 """
@@ -27,6 +28,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -48,14 +50,17 @@ def convert(records: list[dict]) -> tuple[list[dict], int]:
     """(compiled ops, number of skipped records)."""
     ops: list[dict] = []
     skipped = 0
-    prev_end = None
+    prev = 0.0
     for r in records:
         if r.get("status") != "ok" or r["kind"] not in ("ctrl", "bulk"):
             skipped += 1
             continue
         start, dur = float(r["t"]), float(r.get("dur", 0.0))
-        dt = 0.0 if prev_end is None else max(0.0, start + dur - prev_end)
-        prev_end = start + dur
+        # The loader places a control read at (running sum - dur) and every
+        # other op at the running sum: keep submission-time spacing.
+        at = start + dur if r["kind"] == "ctrl" and r["dir"] == "in" else start
+        dt = max(0.0, at - prev) if ops else at
+        prev = max(prev, at)
         data = bytes.fromhex(r.get("data", ""))
         if r["kind"] == "ctrl":
             op = {"bm": r["bm"], "br": r["br"], "wv": r["wv"], "wi": r["wi"]}
@@ -81,13 +86,17 @@ def main(argv: list[str]) -> int:
     src = Path(args.trace)
     out = Path(args.out) if args.out else src.with_suffix(".trace.json")
     ops, skipped = convert(read_records(src.read_text()))
-    opener = gzip.open if out.suffix == ".gz" else open
     try:
-        with opener(out, "xt") as fh:
-            json.dump(ops, fh)
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         print(f"refusing to overwrite {out}", file=sys.stderr)
         return 1
+    with os.fdopen(fd, "wb") as raw:
+        if out.suffix == ".gz":
+            with gzip.GzipFile(fileobj=raw, mode="wb") as gz:
+                gz.write(json.dumps(ops).encode())
+        else:
+            raw.write(json.dumps(ops).encode())
     print(f"{out}: {len(ops)} ops ({skipped} records skipped)")
     return 0
 

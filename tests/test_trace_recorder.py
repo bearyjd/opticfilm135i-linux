@@ -327,3 +327,43 @@ def test_converter_cli_gz_and_refuses_overwrite(tpath, tmp_path):
     before = out.read_bytes()
     assert tc.main([str(tpath), "-o", str(out)]) == 1
     assert out.read_bytes() == before
+
+
+def test_short_out_transfer_recorded_as_short_and_skipped_by_converter(tpath):
+    fake = FakeUsbDevice(fault=lambda ev: 2 if ev["kind"] == "bulk_out" else None)
+    dev = _io(fake).dev
+    from of135i import safety
+    with pytest.raises(safety.ShortTransferError):
+        dev.write(0x02, b"abcdef")
+    r = _xfers(tpath)[0]
+    assert r["status"] == "short:2" and r["len"] == 6
+    tc = _converter()
+    assert tc.convert(tc.read_records(open(tpath).read())) == ([], 1)
+
+
+def test_converter_keeps_submission_spacing_and_0600(tmp_path):
+    tc = _converter()
+    recs = [
+        {"seq": 1, "t": 0.0, "dur": 0.1, "kind": "ctrl", "dir": "out", "status": "ok",
+         "bm": 0x40, "br": 4, "wv": 0x83, "wi": 0, "wlen": 2, "len": 2, "data": "0330"},
+        {"seq": 2, "t": 1.0, "dur": 0.2, "kind": "ctrl", "dir": "out", "status": "ok",
+         "bm": 0x40, "br": 4, "wv": 0x83, "wi": 0, "wlen": 2, "len": 2, "data": "0330"},
+        {"seq": 3, "t": 2.0, "dur": 0.5, "kind": "ctrl", "dir": "in", "status": "ok",
+         "bm": 0xC0, "br": 4, "wv": 0x8E, "wi": 0x122, "wlen": 2, "len": 2, "data": "2255"},
+    ]
+    ops, _ = tc.convert(recs)
+    # loader: cw at running sum, cr at running sum - dur
+    cum, times = 0.0, []
+    for o in ops:
+        cum += o["dt"]
+        times.append(cum - o.get("dur", 0.0) if o["t"] == "cr" else cum)
+    assert times == pytest.approx([0.0, 1.0, 2.0])
+    src = tmp_path / "t.jsonl"
+    src.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    old = os.umask(0)
+    try:
+        for name in ("o.trace.json", "o.trace.json.gz"):
+            assert tc.main([str(src), "-o", str(tmp_path / name)]) == 0
+            assert stat.S_IMODE(os.stat(tmp_path / name).st_mode) == 0o600
+    finally:
+        os.umask(old)
