@@ -423,6 +423,14 @@ class HardwareSession:
                 self.failure.update(extra)
             if self.state is not SessionState.REFUSED:
                 self.state = SessionState.FAILED
+            if self.failure.get("released_likely"):
+                log.error(
+                    "hardware session FAILED in operation %s, phase %s, after %d writes "
+                    "(%d execute pulses): %s",
+                    self.failure["operation"], self.phase, self.writes, self.execute_pulses,
+                    self.failure["exception"],
+                )
+                return
             log.error(
                 "hardware session FAILED in operation %s, phase %s, after %d writes "
                 "(%d execute pulses): %s. Hardware state is now UNKNOWN. %s %s",

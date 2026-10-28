@@ -11,6 +11,8 @@ generic wording. Pure offline logic against fake devices.
 """
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import sys
 
@@ -140,12 +142,48 @@ def test_final_jog_malformed_keeps_generic_wording():
     assert "probably been released" not in str(ei.value)
 
 
-def test_wire_traffic_is_independent_of_the_wording():
-    """The reporting change must not alter what is sent: the failing final
-    jog sends the same bytes whatever the outcome classification."""
-    a = _cold(3, OFF)[0].out_log
-    b = _cold(3, [BUSY])[0].out_log
-    assert a == b
+# Fingerprints (count, sha256 prefix of repr(out_log)) of the wire traffic of
+# these failures, recorded from the unmodified driver (fork/master before this
+# change): the wording change must leave them byte-identical.
+BASELINE_WIRE = {
+    3: (55, "3624009a34919cf9"),
+    6: (108, "668daad64b99fa78"),
+}
+
+
+@pytest.mark.parametrize("pulse", [3, 6])
+@pytest.mark.parametrize("history", [OFF, [BUSY]])
+def test_wire_traffic_matches_the_unmodified_driver(pulse, history):
+    fake = _cold(pulse, history)[0]
+    got = (len(fake.out_log), hashlib.sha256(repr(fake.out_log).encode()).hexdigest()[:16])
+    assert got == BASELINE_WIRE[pulse]
+    # and nothing at all is written after the failing move's execute pulse
+    assert fake.out_log[-1]["data"] == bytes([0x0F, 0x01])
+
+
+def _error_log(pulse, history):
+    records = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Grab(level=logging.ERROR)
+    prev_level = safety.log.level
+    safety.log.setLevel(logging.ERROR)
+    safety.log.addHandler(handler)
+    try:
+        _cold(pulse, history)
+    finally:
+        safety.log.removeHandler(handler)
+        safety.log.setLevel(prev_level)
+    return " ".join(records)
+
+
+def test_failure_log_does_not_claim_unknown_state():
+    text = _error_log(3, OFF)
+    assert "probably been released" in text and "UNKNOWN" not in text
+    assert "UNKNOWN" in _error_log(3, [BUSY])
 
 
 def test_load_release_cli_reports_released_and_exits_1(capsys):
