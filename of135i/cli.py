@@ -452,6 +452,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scanner.position_require_motor_idle = bool(
             getattr(args, "position_require_motor_idle", False))
         scanner.cold_move_early_fail = bool(getattr(args, "cold_move_early_fail", False))
+        scanner.cold_homing_rounds = getattr(args, "cold_homing_rounds", 3)
         if getattr(args, 'warmup_budget', None) is not None:
             scanner.warmup_budget_s = float(args.warmup_budget)
         # Read-only start-state check up front, so an unsafe scanner
@@ -1648,7 +1649,8 @@ def _cmd_load(args: argparse.Namespace) -> int:
         print("error: --next-strip excludes --release and --double-jog", file=sys.stderr)
         return 2
     return loadflow.run(ask=input, release_only=args.release, double_jog=args.double_jog,
-                        next_strip=args.next_strip)
+                        next_strip=args.next_strip,
+                        cold_homing_rounds=args.cold_homing_rounds)
 
 
 def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
@@ -2954,7 +2956,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     # 1) Load (its own session; interactive). A failure here leaves the
     #    scanner in an unknown state -- power cycle -- so we record and stop.
     if not args.assume_loaded:
-        rc = loadflow.run(ask=input)
+        rc = loadflow.run(ask=input, cold_homing_rounds=getattr(args, "cold_homing_rounds", 3))
         if rc != 0:
             record_failed("load", load_rc=rc)
             print(f"load failed (rc {rc}); roll {roll} recorded as failed. "
@@ -3005,6 +3007,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         scanner.position_require_motor_idle = bool(
             getattr(args, "position_require_motor_idle", False))
         scanner.cold_move_early_fail = bool(getattr(args, "cold_move_early_fail", False))
+        scanner.cold_homing_rounds = getattr(args, "cold_homing_rounds", 3)
         if getattr(args, "warmup_budget", None) is not None:
             scanner.warmup_budget_s = float(args.warmup_budget)
         scanner.check_start_state()
@@ -3285,6 +3288,7 @@ def _cmd_vendor_startup(args: argparse.Namespace) -> int:
 def _cmd_eject(args: argparse.Namespace) -> int:
     def body(scanner: Scanner) -> int:
         scanner.cold_move_early_fail = bool(getattr(args, "cold_move_early_fail", False))
+        scanner.cold_homing_rounds = getattr(args, "cold_homing_rounds", 3)
         _report_eject(scanner.eject(), nothing_to_do_ok=True)
         return 0
 
@@ -3300,6 +3304,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     press must not send anything). Only "eject" ever acts, and only
     with a magazine present; other buttons are printed."""
     def body(scanner: Scanner) -> int:
+        scanner.cold_homing_rounds = getattr(args, "cold_homing_rounds", 3)
         scanner.check_start_state()
         print("watching for button events (Ctrl+C to stop)", flush=True)
         previous: set[str] = set()
@@ -3429,6 +3434,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--warmup-budget", type=float, default=None, metavar="SECONDS",
                         help="total time to wait for the lamp after a cold start before "
                              "failing the scan (default: the driver's bounded default, 60 s)")
+    p_scan.add_argument("--cold-homing-rounds", type=int, choices=(1, 2, 3), default=3,
+        metavar="N",
+        help="EXPERIMENTAL, unverified on hardware, motor-affecting: run N (1-3) "
+             "loader-homing rounds in the cold start instead of 3. Fewer rounds "
+             "skip only the extra rounds. Default: 3 (unchanged behaviour)")
     p_scan.add_argument("--cold-move-early-fail", action="store_true",
         help="opt-in: on a cold scanner, stop a cold-start motor move as a failure "
              "once the motor has run and then stayed stopped off the home sensor "
@@ -3491,6 +3501,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_preview.set_defaults(func=_not_wired_yet)
 
     p_load = sub.add_parser("load", help="load the film magazine (the vendor's insert flow; interactive)")
+    p_load.add_argument("--cold-homing-rounds", type=int, choices=(1, 2, 3), default=3,
+        metavar="N",
+        help="EXPERIMENTAL, unverified on hardware, motor-affecting: run N (1-3) "
+             "loader-homing rounds in the cold start instead of 3. Fewer rounds "
+             "skip only the extra rounds. Default: 3 (unchanged behaviour)")
     p_load.add_argument("--release", action="store_true",
         help="only release a latched magazine (cold init + the app-start jog), then "
              "stop: the first cycle of the two-cycle exit after a power cycle with "
@@ -3517,6 +3532,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_eject = sub.add_parser("eject", help="eject the film magazine")
     p_eject.set_defaults(func=_cmd_eject)
+    p_eject.add_argument("--cold-homing-rounds", type=int, choices=(1, 2, 3), default=3,
+        metavar="N",
+        help="EXPERIMENTAL, unverified on hardware, motor-affecting: run N (1-3) "
+             "loader-homing rounds in the cold start instead of 3. Fewer rounds "
+             "skip only the extra rounds. Default: 3 (unchanged behaviour)")
     p_eject.add_argument("--cold-move-early-fail", action="store_true",
         help="opt-in: on a cold scanner, stop a cold-start motor move as a failure "
              "once the motor has run and then stayed stopped off the home sensor "
@@ -3528,6 +3548,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_watch = sub.add_parser("watch", help="poll buttons; eject on the eject button")
     p_watch.set_defaults(func=_cmd_watch)
+    p_watch.add_argument("--cold-homing-rounds", type=int, choices=(1, 2, 3), default=3,
+        metavar="N",
+        help="EXPERIMENTAL, unverified on hardware, motor-affecting: run N (1-3) "
+             "loader-homing rounds in the cold start instead of 3. Fewer rounds "
+             "skip only the extra rounds. Default: 3 (unchanged behaviour)")
 
     p_buttons = sub.add_parser(
         "buttons", help="read-only: print front-panel button presses")
@@ -3615,6 +3640,11 @@ def build_parser() -> argparse.ArgumentParser:
              "(white line, dark/shading measurements, uploaded tables; about 13 "
              "MB per frame; written only for frames that measured a fresh "
              "calibration, and only with the .diag.json sidecars)")
+    p_dig.add_argument("--cold-homing-rounds", type=int, choices=(1, 2, 3), default=3,
+        metavar="N",
+        help="EXPERIMENTAL, unverified on hardware, motor-affecting: run N (1-3) "
+             "loader-homing rounds in the cold start instead of 3. Fewer rounds "
+             "skip only the extra rounds. Default: 3 (unchanged behaviour)")
     p_dig.add_argument("--cold-move-early-fail", action="store_true",
         help="opt-in: on a cold scanner, stop a cold-start motor move as a failure "
              "once the motor has run and then stayed stopped off the home sensor "
