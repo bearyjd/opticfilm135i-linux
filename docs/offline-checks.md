@@ -208,6 +208,18 @@ transfer sequence identical to the stored baseline:
 python -m pytest -q tests/test_cal_wait_scanstop.py
 ```
 
+The calibration buffer-empty gate suite checks the EXPERIMENTAL opt-in
+`--cal-wait-bufempty enforce` (unverified on hardware): at a calibration
+read-back poll whose captured word has the buffer-empty bit (0x40) clear,
+only a 2-byte reply with the 0x55 acknowledge and that bit clear ends the
+poll; the budget is the poll's own; at its deadline `CalibrationError` is
+raised before the bulk read; image scan, strict and other status polls are
+untouched; and `off` keeps the transfer sequence identical:
+
+```
+python -m pytest -q tests/test_cal_wait_bufempty.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```

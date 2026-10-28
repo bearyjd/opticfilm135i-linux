@@ -237,6 +237,20 @@ CAL_SERVED_FAST_S = 0.010
 # further write. "off" (default): no read, sleep or clock call is added.
 CAL_WAIT_SCANSTOP_MODES = ("off", "enforce")
 
+# Calibration buffer-empty gate (Scanner.cal_wait_bufempty). EXPERIMENTAL,
+# unverified on hardware, opt-in. At the calibration read-back polls
+# (extended status word, wIndex 0x0122) the capture settled with the
+# buffer-empty bit (0x40) clear; the non-strict poll also ends on the
+# motor-enable bit alone or on a state-class match, so the bulk read can
+# start before anything was buffered. Vendor-app traffic waits for the
+# buffer-empty bit to clear first. "enforce": at such a site whose captured
+# word is a well-formed 2-byte word with bit 0x40 clear, inside a
+# CAL_ACQUISITION_PHASES phase, only a 2-byte reply with the 0x55
+# acknowledge and bit 0x40 clear ends the poll. The budget is the poll's
+# existing one; at its deadline CalibrationError is raised before the bulk
+# read. "off" (default): today's rules exactly.
+CAL_WAIT_BUFEMPTY_MODES = ("off", "enforce")
+
 
 # Semantic PARK (see park_semantic() and docs/replay-analysis.md's
 # "Conversion order" step 1): timeout and poll interval for the two
@@ -729,6 +743,20 @@ class Scanner:
     _cold_move_early_fail = False
     _cal_integrity_telemetry = True
     _cal_wait_scanstop = "off"
+    _cal_wait_bufempty = "off"
+
+    @property
+    def cal_wait_bufempty(self) -> str:
+        """"off" (default) or "enforce": see CAL_WAIT_BUFEMPTY_MODES.
+        EXPERIMENTAL, unverified on hardware."""
+        return self._cal_wait_bufempty
+
+    @cal_wait_bufempty.setter
+    def cal_wait_bufempty(self, mode: str) -> None:
+        if not isinstance(mode, str) or mode not in CAL_WAIT_BUFEMPTY_MODES:
+            raise ValueError(
+                f"cal_wait_bufempty must be one of {CAL_WAIT_BUFEMPTY_MODES}, got {mode!r}")
+        self._cal_wait_bufempty = mode
     # Stop-gate state (CAL_WAIT_SCANSTOP_MODES): an execute pulse seen in
     # the current calibration phase, and the phase whose SCAN-clear armed
     # the gate (None = not armed). Only ever set in "enforce" mode.
@@ -1245,6 +1273,10 @@ class Scanner:
         t_start = time.monotonic()
         deadline = t_start + timeout
         dev = self.io.dev
+        if (not strict and self._cal_wait_bufempty == "enforce"
+                and self._bufempty_site(op, want)):
+            self._poll_bufempty(op, want, t_start, deadline, timeout)
+            return
         while True:
             got = bytes(dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.length))
             if (self._cal_integrity_telemetry and op.wv == 0x018E
@@ -1339,10 +1371,59 @@ class Scanner:
                 return
             time.sleep(0.004)
 
+    def _bufempty_site(self, op: Op, want: bytes) -> bool:
+        """A buffer-empty gate site (CAL_WAIT_BUFEMPTY_MODES): extended
+        status word (wValue 0x018e, wIndex 0x0122), captured as a 2-byte
+        word with ack 0x55 and bit 0x40 clear, in a calibration acquisition
+        phase. Pure check."""
+        return (op.wv == 0x018E and op.wi == 0x0122 and len(want) == 2
+                and want[1] == 0x55 and not want[0] & 0x40
+                and getattr(self.session, "phase", None) in CAL_ACQUISITION_PHASES)
+
+    def _poll_bufempty(self, op: Op, want: bytes, t_start: float, deadline: float,
+                       timeout: float) -> None:
+        """The enforced buffer-empty poll: only a 2-byte reply with ack 0x55
+        and bit 0x40 clear ends it; at the poll's own deadline raise
+        CalibrationError, before the phase's bulk read."""
+        dev = self.io.dev
+        while True:
+            got = bytes(dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.length))
+            if self._cal_integrity_telemetry:
+                self._cal_note_status_read(op.wi, got)
+            if len(got) == 2 and got[1] == 0x55 and not got[0] & 0x40:
+                self._note_poll_settle(op, got, want, t_start, "bufempty_clear")
+                return
+            if time.monotonic() > deadline:
+                self._diag_poll_timeouts += 1
+                detail = None
+                if len(self._diag_poll_timeout_details) < 20:
+                    detail = {"wv": f"0x{op.wv:04x}", "wi": f"0x{op.wi:04x}",
+                              "last": got.hex(), "want": want.hex()}
+                    self._diag_poll_timeout_details.append(detail)
+                entry = self._note_poll_settle(op, got, want, t_start, "timeout")
+                if entry is not None and self._cal_acquisition_not_observed(op, got, want):
+                    entry["acq_not_observed"] = True
+                if self._diag_readback_regs:
+                    self._diag_read_regs(entry, detail)
+                phase = getattr(self.session, "phase", None)
+                log.warning("calibration buffer-empty gate in phase %s: no buffered "
+                            "data within %.1fs (last %s, captured %s)", phase, timeout,
+                            got.hex(), want.hex())
+                raise safety.CalibrationError(
+                    f"calibration buffer-empty gate in phase {phase}: the buffer-empty "
+                    f"bit did not clear within the poll's budget of {timeout:.1f}s "
+                    f"(last status word {got.hex()}, captured {want.hex()}). The "
+                    f"measurement was not read and the scan stops here, before the "
+                    f"bulk read (--cal-wait-bufempty enforce). "
+                    f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
+                    session=self.session.snapshot())
+            time.sleep(0.004)
+
     def _note_poll_settle(self, op: Op, got: bytes, want: bytes, t_start: float,
                           how: str) -> dict | None:
         """Record how a NON-strict poll ended (diag sidecar ``poll_settle``):
-        ``how`` is "exact", "dataenb", "class", "reg32" or "timeout", ``s``
+        ``how`` is "exact", "dataenb", "class", "reg32", "bufempty_clear"
+        or "timeout", ``s``
         the seconds from the first read. Capped per scan so the sidecar
         stays small; ``poll_settle_max_s`` is kept over all of them. An
         extended status-word poll (wValue 0x018e, wIndex 0x0122) also

@@ -6,6 +6,16 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- **Opt-in `--cal-wait-bufempty {off,enforce}`** (`scan`, `digitize`;
+  `Scanner.cal_wait_bufempty`, default `off`). EXPERIMENTAL and unverified
+  on hardware. The calibration read-back poll today also ends on the
+  motor-enable bit alone or on a state-class match, so the bulk read can
+  start before anything was buffered. `enforce`: at a read-back site whose
+  captured word has the buffer-empty bit (0x40) clear, only a well-formed
+  (2-byte, 0x55-acknowledged) reply with that bit clear ends the poll. The
+  poll's budget is unchanged; at its deadline the scan stops with
+  `CalibrationError` before the bulk read. Image-scan, strict and other
+  status polls are not affected; `off` traffic is byte-identical.
 - **Opt-in `--cal-wait-scanstop {off,enforce}`** (`scan`, `digitize`;
   `Scanner.cal_wait_scanstop`, default `off`). EXPERIMENTAL, motor-adjacent
   and unverified on hardware. In hardware logs the stale calibration reads
