@@ -1650,7 +1650,7 @@ class Scanner:
             self.io.write_regs([(0x51, adr), (0x5D, 0x00), (0x5E, val)])
 
     def _cold_motor_move(self, feedl: int, full_speed_regs: bool,
-                         label: str = "loader move") -> None:
+                         label: str = "loader move", final_jog: bool = False) -> None:
         """One loader-profile motor move within a cold_init() homing
         round: enable, feed-length + motor params (the full 19-register
         loader speed profile when `full_speed_regs`, otherwise just the
@@ -1661,7 +1661,10 @@ class Scanner:
         0xf855, per the capture) -- STRICTLY: this wait is what stands
         between this motor start and the next one, so a timeout ends the
         cold start with nothing further written (see COLD_MOVE_TIMEOUT).
-        `label` names the move in the failure message."""
+        `label` names the move in the failure message; `final_jog` marks
+        move 3/3 of a round, whose ended-off-sensor failure is reported
+        as a possible release of a latched holder, cause not established (wording
+        only -- still a failure, nothing else changes)."""
         self.io.write_regs([(0x09, 0x08)])
         move_regs = [
             (0x02, 0x18), (0xAE, 0x00), (0xAF, 0xFF),
@@ -1686,15 +1689,16 @@ class Scanner:
                    f"clear for {COLD_MOVE_IDLE_WINDOW_S:.1f}s after it ran; "
                    f"--cold-move-early-fail)" if early else
                    f"did not complete within {COLD_MOVE_TIMEOUT:.0f}s")
+            released = outcome == "ended-off-sensor" and final_jog
+            tail = (safety.RELEASED_LIKELY_ADVICE if released else
+                    f"The transport state is unknown and the cold start stops here -- no "
+                    f"further motor move is started. This is a new observation -- please "
+                    f"record it. {safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}")
             raise type(e)(
                 f"cold_init: {label} (feed 0x{feedl:04x}) {how}: status word {e.last.hex()} "
                 f"({format_status_bits(decode_status_word(e.last))}), want f855, "
-                f"outcome={outcome}. "
-                f"The transport state is unknown and the cold start stops here -- no "
-                f"further motor move is started. This is a new observation (every "
-                f"logged cold start completed each move in 1-2 s) -- please record it. "
-                f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
-                last=e.last, want=e.want, outcome=outcome,
+                f"outcome={outcome}. {tail}",
+                last=e.last, want=e.want, outcome=outcome, released_likely=released,
                 observed=self.session.start_reg01,
                 session=self.session.snapshot()) from None
 
@@ -1760,7 +1764,8 @@ class Scanner:
 
         # ---- move 3 ------------------------------------------------------
         self._cold_motor_move(FEEDL_3, full_speed_regs=False,
-                              label=f"{self.session.phase} move 3/3 (eject)")
+                              label=f"{self.session.phase} move 3/3 (eject)",
+                              final_jog=True)
 
         # ---- settle: motor disable, poll 0x35/0x32 until stable ---------
         self.io.write_regs([(0x09, 0x00)])
