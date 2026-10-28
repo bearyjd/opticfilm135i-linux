@@ -78,8 +78,12 @@ class GateFake(FakeUsbDevice):
     callable ``f(dt) -> bytes`` of the simulated seconds since the clear.
     A list item is an int (status byte, ack 0x55) or raw bytes."""
 
-    def __init__(self, arm_phase, r100, r101, clock=None, **kw):
+    def __init__(self, arm_phase, r100, r101, clock=None, read_hook=None,
+                 clear_gap=0.0, **kw):
         super().__init__(reg01=0x22, cal_buffers=_cal_buffers(), **kw)
+        self.read_hook = read_hook        # f(fake, wi) before each scripted reply
+        self.clear_gap = clear_gap        # simulated host time right after the clear
+        self.timeouts: list = []
         self.arm_phase = arm_phase
         self.scripts = {R100: r100, R101: r101}
         self.clock = clock
@@ -131,6 +135,11 @@ class GateFake(FakeUsbDevice):
             return r
         if self.armed and br == 0x04 and wv == 0x018E and wi in (R100, R101):
             super().ctrl_transfer(bm, br, wv, wi, data_or_wLength, timeout)
+            self.timeouts.append(timeout)
+            if not self.window and self.clock is not None:
+                self.clock["t"] += self.clear_gap     # host gap before the first read
+            if self.read_hook is not None:
+                self.read_hook(self, wi)
             rep = self._reply(wi)
             self.window.append(("in", wi, rep, self._now()))
             return rep
@@ -141,10 +150,10 @@ class GateFake(FakeUsbDevice):
         return super().write(endpoint, data, timeout)
 
 
-def _run(arm_phase, r100, r101, mode="enforce", ir=False, step=0.01):
+def _run(arm_phase, r100, r101, mode="enforce", ir=False, step=0.01, **kw):
     exc = None
     with sim_time(step) as clock:
-        fake = GateFake(arm_phase, r100, r101, clock=clock)
+        fake = GateFake(arm_phase, r100, r101, clock=clock, **kw)
         s = make_scanner(fake)
         fake.scanner = s
         if mode is not None:
@@ -244,6 +253,66 @@ def test_both_waits_share_one_deadline():
     assert any(wi == R101 for _, wi, *_ in ins), "0x101 must be polled once 0x100 cleared"
 
 
+@pytest.mark.parametrize("slow", [R100, R101], ids=["reg100", "reg101"])
+def test_a_clear_reply_arriving_after_the_deadline_does_not_count(slow):
+    # One gate read (of ``slow``) takes 0.4 s and returns "clear" past the
+    # floor: that reply must not authorise the next write.
+    def hook(fake, wi):
+        if len([e for e in fake.window if e[0] == "in"]) >= 2 and wi == slow:
+            fake.clock["t"] += 0.4
+    fake, s, exc = _run("cal_dark_a", [0xF0], [0xDC], read_hook=hook)
+    _assert_gate_refused(fake, s, exc, "cal_dark_a")
+    w = s._cal_scanstop_waits[-1]
+    assert w["outcome"] == "timeout"
+    assert w["reads_101"] == (1 if slow == R101 else 0)
+
+
+def test_every_gate_read_is_bounded_by_the_time_left():
+    fake, s, exc = _run("cal_dark_a", [0xF1], [0xDC])
+    assert isinstance(exc, safety.CalibrationError)
+    gate = fake.timeouts[2:]          # after the two captured post-clear reads
+    assert gate and all(isinstance(t, int) and 1 <= t <= FLOOR * 1000 for t in gate)
+    assert gate == sorted(gate, reverse=True) and gate[-1] < gate[0]
+
+
+class _Stall(Exception):
+    pass
+
+
+@pytest.mark.parametrize("late", [True, False])
+def test_a_failed_gate_read_is_refused_or_propagated(late):
+    def hook(fake, wi):
+        if len([e for e in fake.window if e[0] == "in"]) >= 2:
+            if late:
+                fake.clock["t"] += 1.0          # the read timed out at the deadline
+            raise _Stall("read failed")
+    fake, s, exc = None, None, None
+    with pytest.raises((_Stall, safety.CalibrationError)) as ei:
+        with sim_time(0.01) as clock:
+            fake = GateFake("cal_dark_a", [0xF0], [0xDC], clock=clock, read_hook=hook)
+            s = make_scanner(fake)
+            fake.scanner = s
+            s.cal_wait_scanstop = "enforce"
+            s.initialize()
+            s.scan(frame=1)
+    if late:
+        assert isinstance(ei.value, safety.CalibrationError)
+        assert isinstance(ei.value.__cause__, _Stall)
+    else:
+        assert type(ei.value) is _Stall
+    assert fake.armed and all(k == "in" for k, *_ in fake.window)
+
+
+def test_a_host_gap_after_the_clear_is_not_a_refusal():
+    # Host-side time between the clear and the next write (e.g. the lamp
+    # warm-up's interval before it re-runs the white phase) is not part of
+    # the gate's budget.
+    fake, s, exc = _run("cal_white", [0xF0], [0xDC], clear_gap=5.0)
+    assert exc is None, exc
+    w = [x for x in s.last_diag["cal_scanstop_waits"] if x["phase"] == "cal_white"][0]
+    assert w["outcome"] == "clear" and w["since_clear_s"] >= 5.0
+
+
 def test_shading_verify_clear_with_other_bits_set_arms_the_gate():
     # Its SCAN-clear writes register 0x01 with bit 0 clear and another bit set.
     fake, s, exc = _run("cal_shading_verify", [0xF1, 0xF1, 0xF0], [0xDC])
@@ -281,7 +350,7 @@ def _ops_run(phase, mode, last=None):
            last or device.Op("cw", bm=0x40, br=0x04, wv=0x0083, wi=0,
                              data=bytes([0x10, 0x00]))]
     exc = None
-    with fast_time():
+    with sim_time(0.01):
         try:
             with s._operation("scan"):
                 s.session.phase = phase
@@ -320,7 +389,7 @@ def test_clear_without_a_preceding_execute_pulse_does_not_arm():
     s.cal_wait_scanstop = "enforce"
     ops = [device.Op("cw", bm=0x40, br=0x04, wv=0x0083, wi=0, data=bytes([0x01, 0x02])),
            device.Op("cw", bm=0x40, br=0x04, wv=0x0083, wi=0, data=bytes([0x10, 0x00]))]
-    with fast_time():
+    with sim_time(0.01):
         with s._operation("scan"):
             s.session.phase = "cal_white"
             s._exec_ops(ops)
@@ -388,6 +457,7 @@ def test_diag_records_the_wait():
     assert w["reads_100"] == 2 and w["reads_101"] == 1
     assert w["last_100"] == "f055" and w["last_101"] == "dc55"
     assert w["outcome"] == "clear" and 0 < w["wait_s"] <= FLOOR
+    assert w["since_clear_s"] >= w["wait_s"]
 
 
 # ------------------------------------------------------------ property and CLI
@@ -427,7 +497,9 @@ def test_scan_cli_flag_reaches_the_scanner(tmp_path, argv_mode, expected):
     argv = ["scan", "--frame", "1", "-o", str(tmp_path / "f.tiff"), "--no-diag"]
     if argv_mode is not None:
         argv += ["--cal-wait-scanstop", argv_mode]
-    with cli_over(fake) as opened:
+    # cli_over's fast clock jumps 1000 s per call: every gate read would be
+    # past its deadline. A small simulated tick inside it instead.
+    with cli_over(fake) as opened, sim_time(0.01):
         code, _out, err = _cli(argv)
     scanners = [o for o in opened if isinstance(o, Scanner)]
     assert scanners and scanners[0].cal_wait_scanstop == expected

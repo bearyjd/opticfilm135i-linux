@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import math
 import os
 import time
 from contextlib import contextmanager
@@ -733,6 +734,7 @@ class Scanner:
     # the gate (None = not armed). Only ever set in "enforce" mode.
     _scanstop_go_phase: str | None = None
     _scanstop_armed: str | None = None
+    _scanstop_t_clear = 0.0
 
     @property
     def cal_wait_scanstop(self) -> str:
@@ -1460,6 +1462,7 @@ class Scanner:
             elif reg == 0x01 and not val & 0x01 and self._scanstop_go_phase == phase:
                 self._scanstop_go_phase = None
                 self._scanstop_armed = phase
+                self._scanstop_t_clear = time.monotonic()
 
     @staticmethod
     def _bit0_clear(raw: bytes) -> bool:
@@ -1469,39 +1472,63 @@ class Scanner:
     def _cal_wait_scan_stop(self) -> None:
         """The armed stop gate (CAL_WAIT_SCANSTOP_MODES), run before the
         next OUT transfer: register 0x100 bit 0 clear, then register 0x101
-        bit 0 clear, under one NONSTRICT_POLL_FLOOR_S deadline. Reads only;
-        raises CalibrationError at the deadline, before any write."""
+        bit 0 clear. ONE deadline, NONSTRICT_POLL_FLOOR_S from the gate's
+        start, for both registers; every read is bounded by the time left
+        and a reply counts only if it arrived by the deadline. Reads only;
+        at the deadline CalibrationError is raised before any write. The
+        deadline is not taken from the SCAN-clear itself: legitimate host
+        gaps can follow a clear (the lamp warm-up re-runs the white phase
+        after an interval sleep), and they must not turn into refusals."""
         phase = self._scanstop_armed
         self._scanstop_armed = None
         dev = self.io.dev
         t_start = time.monotonic()
         deadline = t_start + NONSTRICT_POLL_FLOOR_S
         rec = {"phase": phase, "reads_100": 0, "reads_101": 0,
-               "last_100": None, "last_101": None, "outcome": None, "wait_s": None}
+               "last_100": None, "last_101": None, "outcome": None, "wait_s": None,
+               "since_clear_s": None}
         self._cal_scanstop_waits.append(rec)
         for wi, key in ((0x0022, "100"), (0x0122, "101")):
             while True:
-                got = bytes(dev.ctrl_transfer(0xC0, 0x04, 0x018E, wi, 2))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._scanstop_refuse(rec, phase, key, t_start)
+                try:
+                    got = bytes(dev.ctrl_transfer(0xC0, 0x04, 0x018E, wi, 2,
+                                                  max(1, math.ceil(remaining * 1000))))
+                except Exception as e:
+                    if time.monotonic() >= deadline:
+                        self._scanstop_refuse(rec, phase, key, t_start, cause=e)
+                    raise
                 rec[f"reads_{key}"] += 1
                 rec[f"last_{key}"] = got.hex()
+                if time.monotonic() > deadline:
+                    self._scanstop_refuse(rec, phase, key, t_start)
                 if self._bit0_clear(got):
                     break
-                if time.monotonic() > deadline:
-                    rec["outcome"] = "timeout"
-                    rec["wait_s"] = round(time.monotonic() - t_start, 4)
-                    log.warning("calibration stop gate after phase %s: register 0x%s "
-                                "bit 0 still set (last %s) at the deadline", phase,
-                                key, got.hex())
-                    raise safety.CalibrationError(
-                        f"calibration scan-stop gate after phase {phase}: the previous "
-                        f"acquisition is still running (register 0x{key} reply "
-                        f"{got.hex()}, bit 0 not clear within {NONSTRICT_POLL_FLOOR_S}s). "
-                        f"Nothing further was sent (--cal-wait-scanstop enforce). "
-                        f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
-                        session=self.session.snapshot())
                 time.sleep(0.004)
+        now = time.monotonic()
         rec["outcome"] = "clear"
-        rec["wait_s"] = round(time.monotonic() - t_start, 4)
+        rec["wait_s"] = round(now - t_start, 4)
+        rec["since_clear_s"] = round(now - self._scanstop_t_clear, 4)
+
+    def _scanstop_refuse(self, rec: dict, phase, key: str, t_start: float,
+                         cause: BaseException | None = None) -> None:
+        """Record the stop gate's timeout and raise CalibrationError."""
+        now = time.monotonic()
+        last = rec.get(f"last_{key}")
+        rec["outcome"] = "timeout"
+        rec["wait_s"] = round(now - t_start, 4)
+        rec["since_clear_s"] = round(now - self._scanstop_t_clear, 4)
+        log.warning("calibration stop gate after phase %s: register 0x%s bit 0 not "
+                    "seen clear (last %s) by the deadline", phase, key, last)
+        raise safety.CalibrationError(
+            f"calibration scan-stop gate after phase {phase}: the previous "
+            f"acquisition is still running (register 0x{key} last reply {last}, "
+            f"bit 0 not seen clear within {NONSTRICT_POLL_FLOOR_S}s of the "
+            f"scan-clear). Nothing further was sent (--cal-wait-scanstop enforce). "
+            f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
+            session=self.session.snapshot()) from cause
 
     # ------------------------------------- calibration stale-read telemetry
     # Observers called from _exec_ops/_note_poll_settle AFTER a transfer
