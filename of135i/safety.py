@@ -256,6 +256,13 @@ class UnejectableStateError(SafetyError):
     def __init__(self, message: str, *, regs: tuple[int, int], **kw):
         super().__init__(message, **kw)
         self.regs = regs
+RELEASED_LIKELY_ADVICE = (
+    "This is the EXPECTED end state if the holder was latched: this final jog "
+    "is the move that releases a latched holder, so the holder has probably been "
+    "released. Nothing further was sent. Check by hand whether the holder moves "
+    "freely (never force it), and power-cycle the scanner before the next "
+    "command. " + POWER_CYCLE_INSTRUCTION
+)
 
 
 class StrictPollTimeoutError(SafetyError):
@@ -266,10 +273,13 @@ class StrictPollTimeoutError(SafetyError):
     the final value read, ``want`` the captured one (both raw bytes)."""
 
     def __init__(self, message: str, *, last: bytes, want: bytes,
-                 outcome: str | None = None, **kw):
+                 outcome: str | None = None, released_likely: bool = False, **kw):
         super().__init__(message, **kw)
         self.last = last
         self.want = want
+        # Reporting only: a homing round's final jog ended off the sensor,
+        # the expected end state of releasing a latched holder.
+        self.released_likely = released_likely
         # Classified read history (cold-start motor moves only; see
         # Scanner._cold_motor_move), copied into the failure record.
         self.outcome = outcome
@@ -407,6 +417,8 @@ class HardwareSession:
             outcome = getattr(exc, "outcome", None)
             if isinstance(exc, StrictPollTimeoutError) and outcome:
                 self.failure["outcome"] = outcome
+                if exc.released_likely:
+                    self.failure["released_likely"] = True
             if extra:
                 self.failure.update(extra)
             if self.state is not SessionState.REFUSED:
@@ -558,6 +570,9 @@ class HardwareSession:
                     f"{short['expected']} bytes reported"
                     f"{', containing an execute pulse' if short['pulse'] else ''}): some or all "
                     f"of its bytes may have reached the scanner.")
+            if f.get("released_likely"):
+                return (f"Operation {f['operation']} failed in phase {f['phase']}: "
+                        f"{f['exception']} ({sent}.)")
             return (
                 f"Operation {f['operation']} failed in phase {f['phase']}: "
                 f"{f['exception']}. {sent}; the hardware state is now UNKNOWN.{ambiguity} "
