@@ -67,6 +67,9 @@ jobs:
       - name: Cold-start move outcome regressions
         run: python -m pytest -q tests/test_cold_move_outcome.py
 
+      - name: Final-jog released-holder wording regressions
+        run: python -m pytest -q tests/test_release_message.py
+
       - name: Opt-in transfer recorder regressions
         run: python -m pytest -q tests/test_trace_recorder.py
 

@@ -448,6 +448,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scanner.recalibrate = bool(getattr(args, 'recalibrate', False))
         scanner.dark_fallback = getattr(args, "dark_fallback", "strict")
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
+        scanner.diag_readback_regs = bool(getattr(args, "diag_readback_regs", False))
         scanner.position_require_motor_idle = bool(
             getattr(args, "position_require_motor_idle", False))
         scanner.cold_move_early_fail = bool(getattr(args, "cold_move_early_fail", False))
@@ -3000,6 +3001,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         scanner.park_mode = args.park
         scanner.recalibrate = bool(getattr(args, "recalibrate", False))
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
+        scanner.diag_readback_regs = bool(getattr(args, "diag_readback_regs", False))
         scanner.position_require_motor_idle = bool(
             getattr(args, "position_require_motor_idle", False))
         scanner.cold_move_early_fail = bool(getattr(args, "cold_move_early_fail", False))
@@ -3437,6 +3439,12 @@ def build_parser() -> argparse.ArgumentParser:
              "motor-enable bit clear (stricter than the default class check); "
              "if the motor does not report idle within the unchanged budget the "
              "scan stops (StrictPollTimeoutError, power cycle). Default: off")
+    p_scan.add_argument("--diag-readback-regs", action="store_true",
+        help="opt-in diagnostic, read only: when a calibration read-back poll "
+             "times out, read registers 0x100 and 0x101 once each (two extra "
+             "IN transfers, never a write) and record their decoded values in "
+             "the .diag.json poll records and the log. Default: off, the "
+             "transfer sequence is unchanged")
     p_scan.add_argument("--cal-readback-guard", choices=("off", "log", "fail"),
         default="log", help="calibration read-back check: when the engine has stopped with an "
              "empty buffer where the capture had data, 'log' (default) records "
@@ -3617,6 +3625,12 @@ def build_parser() -> argparse.ArgumentParser:
              "motor-enable bit clear (stricter than the default class check); "
              "if the motor does not report idle within the unchanged budget the "
              "scan stops (StrictPollTimeoutError, power cycle). Default: off")
+    p_dig.add_argument("--diag-readback-regs", action="store_true",
+        help="opt-in diagnostic, read only: when a calibration read-back poll "
+             "times out, read registers 0x100 and 0x101 once each (two extra "
+             "IN transfers, never a write) and record their decoded values in "
+             "the .diag.json poll records and the log. Default: off, the "
+             "transfer sequence is unchanged")
     p_dig.add_argument("--cal-readback-guard", choices=("off", "log", "fail"),
         default="log", help="calibration read-back check: when the engine has stopped with an "
              "empty buffer where the capture had data, 'log' (default) records "
