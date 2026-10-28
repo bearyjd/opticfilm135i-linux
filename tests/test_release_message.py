@@ -2,9 +2,9 @@
 ends with the motor stopped and the loader sensor clear (outcome
 ended-off-sensor).
 
-On a LATCHED holder that is the expected end state: the move releases the
-holder. The report must say so, ask for a hand check (never force) and a
-power cycle, and must not use the generic "new observation"/unknown-state
+On a LATCHED holder this end has been seen and the holder may have been
+released, but the cause is not established. The report must say so, ask for a
+hand check (never force) and a power cycle, and must not use the generic "new observation"/unknown-state
 wording. It is reporting only: the session still ends FAILED, the exit code
 stays 1, nothing more is sent, and every other outcome / move keeps the
 generic wording. Pure offline logic against fake devices.
@@ -66,9 +66,11 @@ GENERIC = "new observation"
 
 def _released_wording(text):
     low = text.lower()
-    assert "expected end state" in low, text
+    assert "loader sensor clear" in low, text
+    assert "cause is not established" in low, text
+    assert "expected" not in low and "probably" not in low, text
     assert "latched" in low, text
-    assert "probably been released" in low, text
+    assert "may have been released" in low, text
     assert "by hand" in low and "never force" in low, text
     assert "power" in low and safety.POWER_CYCLE_INSTRUCTION in text, text
     assert GENERIC not in low, text
@@ -100,9 +102,9 @@ def test_final_jog_ended_off_sensor_says_released(pulse, early):
 def test_earlier_moves_keep_generic_wording(pulse):
     _fake, scanner, e = _cold(pulse, OFF)
     low = str(e).lower()
-    assert GENERIC in low and "probably been released" not in low
+    assert GENERIC in low and "may have been released" not in low
     assert "1-2 s" not in str(e)
-    assert "probably been released" not in scanner.session.describe_failure()
+    assert "may have been released" not in scanner.session.describe_failure()
     assert "UNKNOWN" in scanner.session.describe_failure()
 
 
@@ -115,7 +117,7 @@ def test_final_jog_other_outcomes_keep_generic_wording(history, outcome):
     _fake, scanner, e = _cold(3, history)
     assert e.outcome == outcome
     low = str(e).lower()
-    assert GENERIC in low and "probably been released" not in low
+    assert GENERIC in low and "may have been released" not in low
     assert "1-2 s" not in str(e)
     assert "UNKNOWN" in scanner.session.describe_failure()
 
@@ -139,7 +141,7 @@ def test_final_jog_malformed_keeps_generic_wording():
             scanner.cold_init()
     assert ei.value.outcome == "malformed"
     assert GENERIC in str(ei.value).lower()
-    assert "probably been released" not in str(ei.value)
+    assert "may have been released" not in str(ei.value)
 
 
 # Fingerprints (count, sha256 prefix of repr(out_log)) of the wire traffic of
@@ -182,7 +184,7 @@ def _error_log(pulse, history):
 
 def test_failure_log_does_not_claim_unknown_state():
     text = _error_log(3, OFF)
-    assert "probably been released" in text and "UNKNOWN" not in text
+    assert "may have been released" in text and "UNKNOWN" not in text
     assert "UNKNOWN" in _error_log(3, [BUSY])
 
 

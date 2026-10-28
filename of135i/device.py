@@ -1663,7 +1663,7 @@ class Scanner:
         cold start with nothing further written (see COLD_MOVE_TIMEOUT).
         `label` names the move in the failure message; `final_jog` marks
         move 3/3 of a round, whose ended-off-sensor failure is reported
-        as the expected end state of releasing a latched holder (wording
+        as a possible release of a latched holder, cause not established (wording
         only -- still a failure, nothing else changes)."""
         self.io.write_regs([(0x09, 0x08)])
         move_regs = [

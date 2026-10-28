@@ -257,11 +257,11 @@ class UnejectableStateError(SafetyError):
         super().__init__(message, **kw)
         self.regs = regs
 RELEASED_LIKELY_ADVICE = (
-    "This is the EXPECTED end state if the holder was latched: this final jog "
-    "is the move that releases a latched holder, so the holder has probably been "
-    "released. Nothing further was sent. Check by hand whether the holder moves "
-    "freely (never force it), and power-cycle the scanner before the next "
-    "command. " + POWER_CYCLE_INSTRUCTION
+    "The move ended with the loader sensor clear. This has been seen when the "
+    "holder was latched and the holder may have been released, but the cause is "
+    "not established. Nothing further was sent. Check the holder by hand (never "
+    "force it) and power-cycle the scanner before the next command. "
+    + POWER_CYCLE_INSTRUCTION
 )
 
 
@@ -278,7 +278,7 @@ class StrictPollTimeoutError(SafetyError):
         self.last = last
         self.want = want
         # Reporting only: a homing round's final jog ended off the sensor,
-        # the expected end state of releasing a latched holder.
+        # a possible release of a latched holder (cause not established).
         self.released_likely = released_likely
         # Classified read history (cold-start motor moves only; see
         # Scanner._cold_motor_move), copied into the failure record.
