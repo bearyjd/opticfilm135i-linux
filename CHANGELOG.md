@@ -6,6 +6,17 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- **Calibration integrity telemetry** (offline, default on, diagnostics
+  only): each calibration acquisition records its re-arm gap after the
+  previous SCAN-clear, the previous acquisition's post-clear status reads
+  (decoded), execute-pulse-to-data time, `served_fast` (< 10 ms, inferred),
+  `acq_not_observed`, identical per-channel means and `stale_suspect`
+  (previous acquisition still running AND fast data or not observed). Each
+  frame's diag gets `cal_integrity` = `clean` | `degraded` (any stale suspect,
+  dark_b fallback or substitution) with one warning when degraded. No
+  transfer, sleep, poll-loop clock read, exit code or decision changes
+  (wire fingerprints identical; `Scanner.cal_integrity_telemetry = False`
+  records nothing). Not hardware-validated.
 - **Opt-in transfer recorder** (offline): `OF135I_TRACE=<path>` appends one
   JSON line per control/bulk transfer (monotonic timestamp, direction, setup
   fields, status, first 64 data bytes; bulk-IN image data only as a length) to

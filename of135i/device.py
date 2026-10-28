@@ -203,6 +203,24 @@ CAL_ACQUISITION_PHASES = frozenset({
 CAL_READBACK_GUARD_MODES = ("off", "log", "fail")
 CAL_READBACK_GUARD_DEFAULT = "log"
 
+# Calibration stale-read telemetry (Scanner.cal_integrity_telemetry,
+# default on; diagnostics only, see Scanner._cal_note_*). Per calibration
+# acquisition (one execute pulse in a CAL_ACQUISITION_PHASES phase) the
+# driver records, from transfers it already makes plus time.perf_counter
+# (no poll loop uses that clock): the gap from the previous acquisition's
+# SCAN-clear write to this execute pulse, the previous acquisition's
+# existing post-clear reads of register 0x100 (bit 0: data enable) and
+# register 0x101 (bit 0: motor enable), the time from the execute pulse
+# to the end of the last bulk read, and the read-back signature. In
+# hardware logs, calibration reads that returned stale data were re-armed
+# while the previous acquisition was still running and completed within
+# a few milliseconds of the execute pulse; fresh reads of the same size
+# took tens of milliseconds. CAL_SERVED_FAST_S separates the two; it is
+# INFERRED from those logs (stale at most ~3.5 ms, fresh at least ~24 ms),
+# not a measured device limit. Nothing here sends, delays or decides.
+CAL_SERVED_FAST_S = 0.010
+
+
 # Semantic PARK (see park_semantic() and docs/replay-analysis.md's
 # "Conversion order" step 1): timeout and poll interval for the two
 # condition waits that replace the captured trace's pacing.
@@ -536,6 +554,38 @@ def format_status_bits(bits: dict | None) -> str:
     return " ".join(f"{k}={v}" for k, v in bits.items())
 
 
+def cal_stale_suspect(rec: dict) -> bool:
+    """True when a calibration acquisition record (Scanner.
+    _cal_acquisitions entry) was re-armed while the previous acquisition
+    still read as running AND its data came back fast or its read-back
+    poll saw no acquisition. An unknown prev_running (None) is never
+    suspect. Pure function."""
+    return bool(rec.get("prev_running") is True
+                and (rec.get("served_fast") or rec.get("acq_not_observed")))
+
+
+def cal_integrity_verdict(acquisitions: list[dict], dark_b_substituted: bool,
+                          dark_b_fallback) -> tuple[str, list[str]]:
+    """("clean" | "degraded", reasons) for one frame's calibration:
+    degraded on any stale_suspect acquisition, the dark_b fallback or the
+    dark_b substitution. Pure function, diagnostics only."""
+    reasons = []
+    for a in acquisitions:
+        if a.get("stale_suspect"):
+            gap, data = a.get("rearm_gap_s"), a.get("go_to_data_s")
+            reasons.append(
+                f"{a.get('phase')}: stale read suspected (re-armed "
+                f"{'?' if gap is None else f'{gap * 1000:.1f}'} ms after the previous "
+                f"clear while the previous acquisition still read as running; data "
+                f"{'?' if data is None else f'{data * 1000:.1f}'} ms after the execute "
+                f"pulse{'; acquisition not observed' if a.get('acq_not_observed') else ''})")
+    if dark_b_fallback:
+        reasons.append(f"dark_b residual: fallback {dark_b_fallback}")
+    if dark_b_substituted:
+        reasons.append("dark_b residual: substituted with this session's healthy dark_b")
+    return ("degraded" if reasons else "clean"), reasons
+
+
 def eject_complete_status_matches(reply) -> bool:
     """True when a raw status-word reply (wValue 0x018e, wIndex 0x0122)
     confirms the eject move finished: 2 bytes, ack 0x55, (byte & 0x21)
@@ -645,6 +695,21 @@ class Scanner:
     _cal_readback_guard = CAL_READBACK_GUARD_DEFAULT
     _position_require_motor_idle = False
     _cold_move_early_fail = False
+    _cal_integrity_telemetry = True
+
+    @property
+    def cal_integrity_telemetry(self) -> bool:
+        """Default True: record per-acquisition calibration timing and the
+        per-frame cal_integrity verdict (see CAL_SERVED_FAST_S). Observer
+        only; False records nothing. Either way the transfers, sleeps and
+        poll-loop clock reads are identical."""
+        return self._cal_integrity_telemetry
+
+    @cal_integrity_telemetry.setter
+    def cal_integrity_telemetry(self, on: bool) -> None:
+        if not isinstance(on, bool):
+            raise ValueError(f"cal_integrity_telemetry must be a bool, got {on!r}")
+        self._cal_integrity_telemetry = on
 
     @property
     def cold_move_early_fail(self) -> bool:
@@ -743,6 +808,10 @@ class Scanner:
         self._diag_poll_timeout_details: list[dict] = []
         self._diag_poll_settle: list[dict] = []
         self._diag_poll_settle_max_s: float = 0.0
+        # Calibration acquisition records of the current scan (see
+        # CAL_SERVED_FAST_S); keys starting with "_" are host timestamps
+        # and recording state, stripped from the diag.
+        self._cal_acquisitions: list[dict] = []
         self._diag_warmup: dict | None = None
         # Set by a completed load_magazine(): the transport is at the
         # vendor's scan reference position (the load's traverse). A
@@ -980,6 +1049,8 @@ class Scanner:
                     if op.wi != 1:
                         cur = bytearray()
                 dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.data)
+                if self._cal_integrity_telemetry and op.wv == 0x0083:
+                    self._cal_note_write(op.data)
                 # NOTE: no engine-idle wait here. The verbatim replayer
                 # never waits and works (verified on hardware twice,
                 # 2026-08-30): the trace's own polls carry the timing,
@@ -990,6 +1061,9 @@ class Scanner:
                 # for our own out-of-trace moves (home/eject).
             elif op.kind == "cr":
                 got = bytes(dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.length))
+                if (self._cal_integrity_telemetry and op.wv == 0x018E
+                        and op.wi in (0x0022, 0x0122)):
+                    self._cal_note_status_read(op.wi, got)
                 if got != op.resp:
                     self._diag_cr_mismatches += 1
                     log.debug(
@@ -1022,6 +1096,8 @@ class Scanner:
                         raise
                     cap.note_read(self.session.phase, op.length, len(data),
                                   _t0, time.monotonic(), None)
+                if self._cal_integrity_telemetry:
+                    self._cal_note_bulk()
                 if (cur is not None and len(data) != op.length
                         and self.session.phase in CAL_ACQUISITION_PHASES):
                     if cap is not None:
@@ -1174,8 +1250,12 @@ class Scanner:
             if op.wv == 0x018E and op.wi == 0x0122:
                 entry["bits"] = decode_status_word(got)
             self._diag_poll_settle.append(entry)
-            return entry
-        return None
+        else:
+            entry = None
+        if (how == "timeout" and self._cal_integrity_telemetry
+                and self._readback_signature(op, got, want)):
+            self._cal_note_not_observed()
+        return entry
 
     def _cal_acquisition_not_observed(self, op: Op, got: bytes, want: bytes) -> bool:
         """True when a timed-out non-strict poll matches the read-back
@@ -1187,6 +1267,12 @@ class Scanner:
         never matches. Pure check, no USB traffic."""
         if self._cal_readback_guard == "off":
             return False
+        return self._readback_signature(op, got, want)
+
+    def _readback_signature(self, op: Op, got: bytes, want: bytes) -> bool:
+        """The read-back signature of _cal_acquisition_not_observed()
+        without the guard-mode check (the telemetry records it in every
+        mode). Pure check, no USB traffic."""
         if op.wv != 0x018E or op.wi != 0x0122:
             return False
         if len(want) != 2 or want[1] != 0x55 or not want[0] & 0x01 or want[0] & 0x40:
@@ -1212,6 +1298,142 @@ class Scanner:
                 f"here, before the phase's next transfer (--cal-readback-guard "
                 f"fail). {safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
                 session=self.session.snapshot())
+
+    # ------------------------------------- calibration stale-read telemetry
+    # Observers called from _exec_ops/_note_poll_settle AFTER a transfer
+    # the driver makes anyway (see CAL_SERVED_FAST_S). They read only
+    # time.perf_counter, never send, sleep or raise.
+
+    def _cal_open_acquisition(self) -> dict | None:
+        """The current phase's acquisition whose execute pulse was seen and
+        whose SCAN-clear was not, else None."""
+        accs = getattr(self, "_cal_acquisitions", None)
+        if not accs:
+            return None
+        a = accs[-1]
+        if a["phase"] != getattr(self.session, "phase", None) or "_t_clear" in a:
+            return None
+        return a
+
+    def _cal_note_write(self, data: bytes) -> None:
+        """Register write: an execute pulse in a calibration acquisition
+        phase opens a record; the first SCAN-clear (register 0x01 = 0x02)
+        after it is timed."""
+        try:
+            phase = getattr(self.session, "phase", None)
+            accs = getattr(self, "_cal_acquisitions", None)
+            if phase not in CAL_ACQUISITION_PHASES or accs is None:
+                return
+            pairs = [(data[i], data[i + 1]) for i in range(0, len(data) - 1, 2)]
+            if safety.has_execute_pulse(data):
+                t = time.perf_counter()
+                prev = accs[-1] if accs else None
+                rec = {"phase": phase, "_t_go": t, "rearm_gap_s": None,
+                       "prev_phase": None, "prev_post": None, "prev_running": None,
+                       "go_to_data_s": None, "served_fast": False,
+                       "acq_not_observed": False, "identical_channel_means": None}
+                if prev is not None and "_t_clear" in prev:
+                    post = self._cal_post_words(prev)
+                    rec["prev_phase"] = prev["phase"]
+                    rec["rearm_gap_s"] = round(t - prev["_t_clear"], 6)
+                    rec["prev_post"] = post
+                    if post is not None:
+                        rec["prev_running"] = bool(post.get("data_enabled")
+                                                   or post.get("motor_enabled"))
+                accs.append(rec)
+            elif (0x01, 0x02) in pairs:
+                a = self._cal_open_acquisition()
+                if a is not None:
+                    a["_t_clear"] = time.perf_counter()
+        except Exception as e:      # telemetry must never reach scanner I/O
+            log.debug("calibration telemetry: write not recorded (%s)", e)
+
+    def _cal_note_status_read(self, wi: int, got: bytes) -> None:
+        """The first read of register 0x100 (wIndex 0x0022) and of register
+        0x101 (wIndex 0x0122) after an acquisition's SCAN-clear."""
+        accs = getattr(self, "_cal_acquisitions", None)
+        if not accs:
+            return
+        a = accs[-1]
+        key = "_post_100" if wi == 0x0022 else "_post_101"
+        if ("_t_clear" in a and key not in a
+                and a["phase"] == getattr(self.session, "phase", None)):
+            a[key] = bytes(got)
+
+    @staticmethod
+    def _cal_post_words(rec: dict) -> dict | None:
+        """Decode a record's post-clear reads; None when neither is
+        well-formed (2 bytes, 0x55 ack). A missing or malformed register
+        is recorded as None and contributes nothing to prev_running."""
+        out: dict = {}
+        words = []
+        r100, r101 = rec.get("_post_100"), rec.get("_post_101")
+        if r100 is not None and len(r100) == 2 and r100[1] == 0x55:
+            out["reg_0x100"] = f"{r100[0]:02x}"
+            out["data_enabled"] = r100[0] & 0x01
+            words.append(f"data-enable {'on' if r100[0] & 0x01 else 'off'}")
+        bits = decode_status_word(r101) if r101 is not None else None
+        if bits is not None:
+            out["reg_0x101"] = f"{r101[0]:02x}"
+            out["motor_enabled"] = bits["motor_enabled"]
+            out["status_bits"] = bits
+            words.append(f"motor-enable {'on' if bits['motor_enabled'] else 'off'}")
+        if not out:
+            return None
+        out["words"] = ", ".join(words)
+        return out
+
+    def _cal_note_bulk(self) -> None:
+        """A bulk read completed: execute pulse to the end of the open
+        acquisition's latest bulk read."""
+        a = self._cal_open_acquisition()
+        if a is not None:
+            s = time.perf_counter() - a["_t_go"]
+            a["go_to_data_s"] = round(s, 6)
+            a["served_fast"] = s < CAL_SERVED_FAST_S
+
+    def _cal_note_not_observed(self) -> None:
+        a = self._cal_open_acquisition()
+        if a is not None:
+            a["acq_not_observed"] = True
+
+    def _cal_note_channel_means(self, phase_name: str, raw: bytes) -> None:
+        """identical_channel_means on the phase's last record: the three
+        per-channel sums of the (N, 3) little-endian 16-bit buffer are
+        exactly equal (integer arithmetic). Buffers already read; host-only."""
+        if not self._cal_integrity_telemetry:
+            return
+        for a in reversed(self._cal_acquisitions):
+            if a["phase"] == phase_name:
+                if raw and len(raw) % 6 == 0:
+                    sums = np.frombuffer(raw, dtype="<u2").reshape(-1, 3).sum(
+                        axis=0, dtype=np.int64)
+                    a["identical_channel_means"] = bool(sums[0] == sums[1] == sums[2])
+                return
+
+    def _cal_integrity_diag(self, dark_b_substituted: bool, dark_b_fallback) -> dict:
+        """cal_integrity / cal_integrity_reasons / cal_acquisitions for the
+        diag of a fresh calibration; cal_integrity None when the telemetry
+        is off."""
+        if not self._cal_integrity_telemetry:
+            return {"cal_integrity": None, "cal_integrity_reasons": [],
+                    "cal_acquisitions": []}
+        accs = []
+        for a in self._cal_acquisitions:
+            pub = {k: v for k, v in a.items() if not k.startswith("_")}
+            pub["stale_suspect"] = cal_stale_suspect(pub)
+            accs.append(pub)
+        verdict, reasons = cal_integrity_verdict(accs, dark_b_substituted, dark_b_fallback)
+        return {"cal_integrity": verdict, "cal_integrity_reasons": reasons,
+                "cal_acquisitions": accs}
+
+    @staticmethod
+    def _warn_cal_integrity(frame, integ: dict) -> None:
+        """ONE warning per frame when its calibration is degraded."""
+        if integ.get("cal_integrity") == "degraded":
+            log.warning("calibration integrity DEGRADED for frame %s: %s "
+                        "(diagnostic only; the scan continued unchanged)",
+                        frame, "; ".join(integ.get("cal_integrity_reasons") or []))
 
     def _run_phase(self, phase: Phase, strict_polls: frozenset[int] = frozenset(),
                    strict_mask: int = LOAD_STATUS_MASK, poll_timeout_scale: float = 1.0,
@@ -2678,6 +2900,7 @@ class Scanner:
         self._diag_poll_timeout_details = []
         self._diag_poll_settle = []
         self._diag_poll_settle_max_s = 0.0
+        self._cal_acquisitions = []
         self._diag_warmup = None
         self._diag_park_waits = None
         started_utc = datetime.now(timezone.utc).isoformat()
@@ -2705,6 +2928,15 @@ class Scanner:
             shading_stats = cache["shading_stats"]
             shading2_stats = cache["shading2_stats"]
             white_dips_diag = None       # tables reused, no white measured
+            # The codes in use came from the cached calibration: carry its
+            # verdict (no acquisition was made this frame).
+            cached_integ = cache.get("cal_integrity") or {}
+            integ = {
+                "cal_integrity": cached_integ.get("cal_integrity"),
+                "cal_integrity_reasons": [f"cached calibration: {r}" for r in
+                                          cached_integ.get("cal_integrity_reasons", [])],
+                "cal_acquisitions": [],
+            }
             log.info("calibration: reusing cached codes (gain R=%#04x G=%#04x B=%#04x, "
                      "offset R=%#06x G=%#06x B=%#06x)", gain_r, gain_g, gain_b,
                      off_r, off_g, off_b)
@@ -2719,6 +2951,8 @@ class Scanner:
             dark_b_raw = self._run_phase(tables.CAL_DARK_B)[0]
             if self._cal_capture is not None:
                 self._cal_capture.note_buffer("dark_b", tables.CAL_DARK_B.name, dark_b_raw)
+            self._cal_note_channel_means(tables.CAL_DARK_A.name, dark_a_raw)
+            self._cal_note_channel_means(tables.CAL_DARK_B.name, dark_b_raw)
             dark_a = np.frombuffer(dark_a_raw, dtype="<u2").reshape(-1, 3)
             dark_b = np.frombuffer(dark_b_raw, dtype="<u2").reshape(-1, 3)
             dark_b, dark_b_substituted, dark_b_fallback = self._dark_b_for_offsets(dark_b)
@@ -2731,11 +2965,15 @@ class Scanner:
             log.info("computed gain codes: R=%#04x G=%#04x B=%#04x", gain_r, gain_g, gain_b)
 
             # ---- gain-check pair (offset bracket, gain=computed) ---------
-            self._run_phase(
+            gain_a_bufs = self._run_phase(
                 tables.CAL_GAIN_CHECK_A,
                 gain_r=bytes([gain_r]), gain_g=bytes([gain_g]), gain_b=bytes([gain_b]),
             )
-            self._run_phase(tables.CAL_GAIN_CHECK_B)
+            gain_b_bufs = self._run_phase(tables.CAL_GAIN_CHECK_B)
+            for _ph, _bufs in ((tables.CAL_GAIN_CHECK_A, gain_a_bufs),
+                               (tables.CAL_GAIN_CHECK_B, gain_b_bufs)):
+                if _bufs:
+                    self._cal_note_channel_means(_ph.name, _bufs[0])
 
             # ---- shading measurement (offset=computed final) -------------
             if dark_b_fallback is None:
@@ -2796,6 +3034,7 @@ class Scanner:
             shading_stats = _shading_stats(shading)
             shading2_stats = _shading_stats(shading2)
             white_dips_diag = [d.as_dict() for d in white_dips]
+            integ = self._cal_integrity_diag(dark_b_substituted, dark_b_fallback)
 
             # Cache immediately on success -- see __init__'s _cal_cache
             # comment and (d) in the design: a LATER failure (position/
@@ -2813,6 +3052,8 @@ class Scanner:
                 "warmup": warmup,
                 "shading_stats": shading_stats,
                 "shading2_stats": shading2_stats,
+                "cal_integrity": {k: integ[k] for k in
+                                  ("cal_integrity", "cal_integrity_reasons")},
             }
 
         try:
@@ -2898,6 +3139,7 @@ class Scanner:
             "dark_b_mean": dark_b_mean,
             "dark_b_substituted": dark_b_substituted,
             "dark_b_fallback": dark_b_fallback,
+            **integ,
             "white_mean": warmup.get("white_mean"),
             "white_max": warmup.get("white_max"),
             "gain_codes": [gain_r, gain_g, gain_b],
@@ -2925,6 +3167,7 @@ class Scanner:
             "finished_utc": datetime.now(timezone.utc).isoformat(),
             "session": self.session.snapshot(),
         }
+        self._warn_cal_integrity(frame, integ)
 
         return image, tables.IMAGE_WIDTH
 
@@ -2987,6 +3230,7 @@ class Scanner:
         self._diag_poll_timeout_details = []
         self._diag_poll_settle = []
         self._diag_poll_settle_max_s = 0.0
+        self._cal_acquisitions = []
         self._diag_warmup = None
         self._diag_park_waits = None
         started_utc = datetime.now(timezone.utc).isoformat()
@@ -3003,6 +3247,8 @@ class Scanner:
         dark_b_raw = self._run_phase(t.CAL_DARK_B)[0]
         if self._cal_capture is not None:
             self._cal_capture.note_buffer("dark_b", t.CAL_DARK_B.name, dark_b_raw)
+        self._cal_note_channel_means(t.CAL_DARK_A.name, dark_a_raw)
+        self._cal_note_channel_means(t.CAL_DARK_B.name, dark_b_raw)
         dark_a = np.frombuffer(dark_a_raw, dtype="<u2").reshape(-1, 3)
         dark_b = np.frombuffer(dark_b_raw, dtype="<u2").reshape(-1, 3)
         dark_b, dark_b_substituted, dark_b_fallback = self._dark_b_for_offsets(dark_b)
@@ -3023,11 +3269,15 @@ class Scanner:
         log.info("computed gain codes (%d dpi dual): R=%#04x G=%#04x B=%#04x", dpi, gain_r, gain_g, gain_b)
 
         # ---- gain-check pair (offset bracket, gain=computed) -----------
-        self._run_phase(
+        gain_a_bufs = self._run_phase(
             t.CAL_GAIN_CHECK_A,
             gain_r=bytes([gain_r]), gain_g=bytes([gain_g]), gain_b=bytes([gain_b]),
         )
-        self._run_phase(t.CAL_GAIN_CHECK_B)
+        gain_b_bufs = self._run_phase(t.CAL_GAIN_CHECK_B)
+        for _ph, _bufs in ((t.CAL_GAIN_CHECK_A, gain_a_bufs),
+                           (t.CAL_GAIN_CHECK_B, gain_b_bufs)):
+            if _bufs:
+                self._cal_note_channel_means(_ph.name, _bufs[0])
 
         # ---- shading measurement (offset=computed final) ---------------
         if dark_b_fallback is None:
@@ -3181,6 +3431,7 @@ class Scanner:
         # ---- park ---------------------------------------------------------
         self._park(t, ir=True)
 
+        integ = self._cal_integrity_diag(dark_b_substituted, dark_b_fallback)
         warmup = self._diag_warmup or {}
         self.last_cal_data = {
             "white_line": self._cal_white_line(),
@@ -3215,6 +3466,7 @@ class Scanner:
             "dark_b_mean": [float(x) for x in dark_b.astype(np.float64).mean(axis=0)],
             "dark_b_substituted": dark_b_substituted,
             "dark_b_fallback": dark_b_fallback,
+            **integ,
             "white_mean": warmup.get("white_mean"),
             "white_max": warmup.get("white_max"),
             "gain_codes": [gain_r, gain_g, gain_b],
@@ -3246,5 +3498,6 @@ class Scanner:
             # Only on slide scans, so a strip scan's record is unchanged.
             self.last_diag["holder"] = holder.SLIDE.name
             self.last_diag["slide"] = frame
+        self._warn_cal_integrity(frame, integ)
 
         return image, W, {"width": W, "alternating": True, "dpi": dpi}
