@@ -130,11 +130,12 @@ class _SlowDev:
 
     def __init__(self, replies, clock, delay):
         self.replies, self.clock, self.delay = list(replies), clock, delay
-        self.calls, self.timeouts = 0, []
+        self.calls, self.timeouts, self.starts = 0, [], []
 
     def ctrl_transfer(self, bm, br, wv, wi, length, timeout=None):
         self.calls += 1
         self.timeouts.append(timeout)
+        self.starts.append(self.clock["t"])
         self.clock["t"] += self.delay
         r = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         return bytes.fromhex(r)
@@ -169,6 +170,15 @@ def test_every_enforced_read_is_bounded_by_the_time_left():
     t = s.io.dev.timeouts
     assert t and all(isinstance(x, int) and 1 <= x <= FLOOR * 1000 for x in t)
     assert t == sorted(t, reverse=True) and t[-1] < t[0]
+
+
+@pytest.mark.parametrize("delay", [0.05, 0.07, 0.0995])
+def test_no_read_starts_after_the_deadline(delay):
+    s, exc = _slow_poll(["cd55"], delay=delay)
+    assert isinstance(exc, safety.CalibrationError)
+    st = s.io.dev.starts
+    # The poll's first clock read is one tick before the first transfer.
+    assert st[-1] - (st[0] - 0.01) <= FLOOR
 
 
 def test_row5_buffer_ready_on_the_first_read():
