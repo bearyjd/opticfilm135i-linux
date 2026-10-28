@@ -515,3 +515,48 @@ def test_verdict_function():
     assert st == "degraded" and len(rs) == 1
     assert v(clean, True, None)[0] == "degraded"
     assert v(clean, False, "default_offset_codes")[0] == "degraded"
+
+
+def test_identical_means_requires_all_three_channels():
+    # gain check A: R == G but B differs -> not identical; B: all equal.
+    dark = [_varied(2000), _varied(4500), _pixels(9000, 9000, 9001),
+            _pixels(9000, 9000, 9000)]
+    _, _, (d,) = _run(FRESH_DARK_B, dark=dark)
+    assert _acq(d, "cal_gain_check_a")["identical_channel_means"] is False
+    assert _acq(d, "cal_gain_check_b")["identical_channel_means"] is True
+
+
+def test_only_the_first_post_clear_read_of_each_register_counts():
+    import types
+    s = device.Scanner.__new__(device.Scanner)
+    s.session = types.SimpleNamespace(phase="cal_dark_a")
+    s._cal_acquisitions = []
+    s._cal_note_write(bytes.fromhex("0f01"))
+    s._cal_note_status_read(0x0022, bytes.fromhex("f155"))   # before the clear
+    s._cal_note_write(bytes.fromhex("0102"))
+    s._cal_note_status_read(0x0022, bytes.fromhex("f155"))
+    s._cal_note_status_read(0x0122, bytes.fromhex("dd55"))
+    s._cal_note_status_read(0x0022, bytes.fromhex("f055"))
+    s._cal_note_status_read(0x0122, bytes.fromhex("dc55"))
+    s.session.phase = "cal_dark_b"
+    s._cal_note_write(bytes.fromhex("0f01"))
+    b = s._cal_acquisitions[-1]
+    assert b["prev_post"]["reg_0x100"] == "f1"
+    assert b["prev_post"]["reg_0x101"] == "dd"
+    assert b["prev_running"] is True
+
+
+def test_malformed_post_reads_give_unknown_not_running():
+    import types
+    s = device.Scanner.__new__(device.Scanner)
+    s.session = types.SimpleNamespace(phase="cal_dark_a")
+    s._cal_acquisitions = []
+    s._cal_note_write(bytes.fromhex("0f01"))
+    s._cal_note_write(bytes.fromhex("0102"))
+    s._cal_note_status_read(0x0022, bytes.fromhex("f1"))
+    s._cal_note_status_read(0x0122, bytes.fromhex("dd00"))
+    s.session.phase = "cal_dark_b"
+    s._cal_note_write(bytes.fromhex("0f01"))
+    b = s._cal_acquisitions[-1]
+    assert b["prev_post"] is None and b["prev_running"] is None
+    assert device.cal_stale_suspect({**b, "served_fast": True}) is False
