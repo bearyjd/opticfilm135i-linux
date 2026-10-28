@@ -735,6 +735,7 @@ class Scanner:
     _scanstop_go_phase: str | None = None
     _scanstop_armed: str | None = None
     _scanstop_t_clear = 0.0
+    _scanstop_polled_s = 0.0
 
     @property
     def cal_wait_scanstop(self) -> str:
@@ -1159,8 +1160,19 @@ class Scanner:
                         op.wv, op.wi, got.hex(), op.resp.hex(),
                     )
             elif op.kind == "poll":
-                self._poll_one(op, strict=idx in strict_polls, mask=strict_mask,
-                               timeout_scale=poll_timeout_scale)
+                if (self._scanstop_armed is not None and op.wv == 0x018E
+                        and op.wi == 0x0022):
+                    # The phase's own post-clear poll of register 0x100 is
+                    # part of the stop gate's budget (enforce mode only).
+                    _t0 = time.monotonic()
+                    try:
+                        self._poll_one(op, strict=idx in strict_polls, mask=strict_mask,
+                                       timeout_scale=poll_timeout_scale)
+                    finally:
+                        self._scanstop_polled_s += time.monotonic() - _t0
+                else:
+                    self._poll_one(op, strict=idx in strict_polls, mask=strict_mask,
+                                   timeout_scale=poll_timeout_scale)
             elif op.kind == "bo":
                 if self._scanstop_armed is not None:
                     self._cal_wait_scan_stop()
@@ -1463,6 +1475,7 @@ class Scanner:
                 self._scanstop_go_phase = None
                 self._scanstop_armed = phase
                 self._scanstop_t_clear = time.monotonic()
+                self._scanstop_polled_s = 0.0
 
     @staticmethod
     def _bit0_clear(raw: bytes) -> bool:
@@ -1472,8 +1485,10 @@ class Scanner:
     def _cal_wait_scan_stop(self) -> None:
         """The armed stop gate (CAL_WAIT_SCANSTOP_MODES), run before the
         next OUT transfer: register 0x100 bit 0 clear, then register 0x101
-        bit 0 clear. ONE deadline, NONSTRICT_POLL_FLOOR_S from the gate's
-        start, for both registers; every read is bounded by the time left
+        bit 0 clear. ONE deadline for both registers: NONSTRICT_POLL_FLOOR_S
+        from the gate's start, less the time the phase's own post-clear poll
+        of register 0x100 already spent (that budget is not granted twice);
+        every read is bounded by the time left
         and a reply counts only if it arrived by the deadline. Reads only;
         at the deadline CalibrationError is raised before any write. The
         deadline is not taken from the SCAN-clear itself: legitimate host
@@ -1483,7 +1498,7 @@ class Scanner:
         self._scanstop_armed = None
         dev = self.io.dev
         t_start = time.monotonic()
-        deadline = t_start + NONSTRICT_POLL_FLOOR_S
+        deadline = t_start + max(0.0, NONSTRICT_POLL_FLOOR_S - self._scanstop_polled_s)
         rec = {"phase": phase, "reads_100": 0, "reads_101": 0,
                "last_100": None, "last_101": None, "outcome": None, "wait_s": None,
                "since_clear_s": None}

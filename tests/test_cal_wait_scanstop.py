@@ -303,6 +303,26 @@ def test_a_failed_gate_read_is_refused_or_propagated(late):
     assert fake.armed and all(k == "in" for k, *_ in fake.window)
 
 
+def test_the_phase_own_post_clear_poll_counts_against_the_budget():
+    # cal_shading_measure polls register 0x100 itself after its clear. When
+    # that poll uses up the floor (a status class it never accepts), the
+    # gate does not grant a second floor: refusal at about one floor after
+    # the clear, and no clear reply later than that is honoured.
+    def r100(dt):
+        return bytes([0xF0 if dt >= 0.45 else 0x91, 0x55])
+    fake, s, exc = _run("cal_shading_measure", r100, [0xDC], step=0.001)
+    _assert_gate_refused(fake, s, exc, "cal_shading_measure")
+    assert fake.window[-1][3] - fake.t_clear <= FLOOR + 0.02
+
+
+def test_a_quick_post_clear_poll_leaves_the_gate_its_budget():
+    def r100(dt):
+        return bytes([0xF0 if dt >= 0.2 else 0xF1, 0x55])     # class accepted at once
+    fake, s, exc = _run("cal_shading_measure", r100, [0xDC], step=0.001)
+    assert exc is None, exc
+    assert fake.windows[0][-1] == ("out", "cal_shading_upload")
+
+
 def test_a_host_gap_after_the_clear_is_not_a_refusal():
     # Host-side time between the clear and the next write (e.g. the lamp
     # warm-up's interval before it re-runs the white phase) is not part of
