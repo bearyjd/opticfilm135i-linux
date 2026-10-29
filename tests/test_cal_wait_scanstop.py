@@ -555,3 +555,80 @@ def test_explicit_off_does_not_gate_a_running_engine():
     fake, s, exc = _run("cal_dark_a", [0xF1], [0xDC], mode="off")
     assert not isinstance(exc, safety.CalibrationError) or "scan-stop" not in str(exc)
     assert s.last_diag["cal_scanstop_waits"] == []
+
+
+# ------------------------------------------- unpinned default, end to end
+# conftest pins the gate off in every other suite; these run on the true
+# default through the CLI and the library.
+
+
+def _status_stripped(wire_log):
+    return [e for e in wire_log if not _is_status_read(e)]
+
+
+def _cli_run(argv, tmp_path):
+    fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
+    # A simulated tick: cli_over's own clock jumps 1000 s per call, which
+    # would put every gate read past its deadline.
+    with cli_over(fake) as opened, sim_time(0.01):
+        code, _out, err = _cli(argv)
+    scanners = [o for o in opened if isinstance(o, Scanner)]
+    assert scanners
+    return fake, scanners[-1], code, err
+
+
+def _assert_default_equals_off_plus_status_reads(on, s_on, off, s_off):
+    waits = s_on.last_diag["cal_scanstop_waits"]
+    assert waits and all(w["outcome"] == "clear" for w in waits)
+    assert s_on.cal_wait_scanstop == "enforce" and s_off.cal_wait_scanstop == "off"
+    assert s_off.last_diag["cal_scanstop_waits"] == []
+    assert _status_stripped(on.wire_log) == _status_stripped(off.wire_log)
+    extra = len(on.wire_log) - len(off.wire_log)
+    assert extra == sum(map(_is_status_read, on.wire_log)) - sum(map(_is_status_read, off.wire_log))
+    assert extra > 0
+
+
+def test_cli_scan_default_is_off_sequence_plus_status_reads_only(tmp_path):
+    base = ["scan", "--frame", "1", "-o", str(tmp_path / "f.tiff")]
+    on, s_on, code_on, err = _cli_run(base, tmp_path)
+    assert code_on == 0, err
+    off, s_off, code_off, err = _cli_run(base + ["--cal-wait-scanstop", "off"], tmp_path)
+    assert code_off == 0, err
+    _assert_default_equals_off_plus_status_reads(on, s_on, off, s_off)
+
+
+def test_cli_digitize_default_is_off_sequence_plus_status_reads_only(tmp_path):
+    # On the idle fake the roll ends with exit 4 (aperture coverage not
+    # verified) whatever the gate does; the gate must not change that or
+    # refuse anything.
+    base = ["digitize", "-o", str(tmp_path / "roll"), "--assume-loaded"]
+    on, s_on, code_on, err_on = _cli_run(base, tmp_path)
+    off, s_off, code_off, _ = _cli_run(base + ["--cal-wait-scanstop", "off"], tmp_path)
+    assert code_on == code_off
+    assert "scan-stop" not in err_on
+    _assert_default_equals_off_plus_status_reads(on, s_on, off, s_off)
+
+
+#: Recorded 2026-10-29 from multi_plain_3600_frame1's scenario (see
+#: _plain) on the true default ("enforce"); the "off" sequence is
+#: BASELINE["multi_plain_3600_frame1"].
+DEFAULT_MULTI_PLAIN_3600_FRAME1 = (
+    "495434fe6a296892e8243357f5f57754257cb13bf7beaf8ffa0608f6b4d09f16", 10097)
+
+
+def test_true_default_sequence_for_multi_plain_3600_frame1():
+    fake, s = _plain(None, scripted=False)
+    assert s.cal_wait_scanstop == "enforce"
+    f_off, _ = _plain("off", scripted=False)
+    assert (_digest(f_off.wire_log), len(f_off.wire_log)) == BASELINE["multi_plain_3600_frame1"]
+    assert _status_stripped(fake.wire_log) == _status_stripped(f_off.wire_log)
+    assert (_digest(fake.wire_log), len(fake.wire_log)) == DEFAULT_MULTI_PLAIN_3600_FRAME1
+
+
+def test_refusal_message_says_enforced_by_default_and_how_to_disable():
+    _fake, _s, exc = _run("cal_dark_a", [0xF1], [0xDC])
+    msg = str(exc)
+    assert isinstance(exc, safety.CalibrationError)
+    assert "enforced by default" in msg and "`--cal-wait-scanstop off`" in msg
+    assert "Nothing further was sent" in msg
+    assert safety.NO_RECOVERY_ATTEMPTED in msg and safety.POWER_CYCLE_INSTRUCTION in msg

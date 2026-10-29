@@ -196,14 +196,21 @@ python -m pytest -q tests/test_cal_integrity.py
 ```
 
 The calibration stop-gate suite checks `--cal-wait-scanstop`, default
-`enforce` (hardware evidence pending; `off` is the explicit escape hatch):
-after the SCAN-clear
+`enforce` (DRAFT, hardware evidence pending and not validated; `off` is the
+explicit escape hatch). Hardware evidence so far: one unit, 5 gated runs
+(600 dpi x3 including arm-C and guard-fail variants, 3600 dpi x2), zero
+gate-caused failures, no gate-off comparison at 3600 dpi. After the SCAN-clear
 that closes a calibration execute pulse, and before the next OUT transfer,
 register 0x100 bit 0 and then register 0x101 bit 0 must read clear in
 2-byte replies with the 0x55 acknowledge, under one shared deadline of the
 existing non-strict poll floor; at the deadline `CalibrationError` is raised
 before any further write. It also checks that an explicit `off` leaves the
-transfer sequence identical to the stored baseline:
+transfer sequence identical to the stored baseline, and that the true
+default (unpinned, through `scan` and `digitize`) is that sequence plus
+only the register 0x100/0x101 status reads. `tests/conftest.py` pins the
+gate off for every other suite (including `tests/test_wire_baseline.py`,
+whose digests are unchanged and describe the `off` sequence), because their
+fakes script their own status replies and clocks:
 
 ```
 python -m pytest -q tests/test_cal_wait_scanstop.py

@@ -224,8 +224,8 @@ CAL_READBACK_GUARD_DEFAULT = "log"
 CAL_SERVED_FAST_S = 0.010
 
 # Calibration stop gate (Scanner.cal_wait_scanstop). Default "enforce"
-# (hardware evidence pending; "off" is the explicit escape hatch); it delays the next calibration execute
-# pulse, so it is motor-adjacent. In hardware logs the stale calibration
+# (hardware evidence pending; "off" is the explicit escape hatch); it
+# delays the next calibration execute pulse, so it is motor-adjacent. In hardware logs the stale calibration
 # reads (see CAL_SERVED_FAST_S) were re-armed while the previous
 # acquisition still showed data-enable (register 0x100 bit 0) and
 # motor-enable (register 0x101 bit 0) set; vendor-app traffic waits for
@@ -769,7 +769,7 @@ class Scanner:
 
     @property
     def cal_wait_scanstop(self) -> str:
-        """""enforce" (default) or "off": see CAL_WAIT_SCANSTOP_MODES.
+        """The mode, "enforce" (default) or "off": see CAL_WAIT_SCANSTOP_MODES.
         Hardware evidence pending."""
         return self._cal_wait_scanstop
 
@@ -1632,7 +1632,8 @@ class Scanner:
             f"calibration scan-stop gate after phase {phase}: the previous "
             f"acquisition is still running (register 0x{key} last reply {last}, "
             f"bit 0 not seen clear within {NONSTRICT_POLL_FLOOR_S}s of the "
-            f"scan-clear). Nothing further was sent (--cal-wait-scanstop enforce). "
+            f"scan-clear). Nothing further was sent. This gate is enforced by default; "
+            f"disable it with `--cal-wait-scanstop off`. "
             f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
             session=self.session.snapshot()) from cause
 

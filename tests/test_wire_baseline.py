@@ -198,7 +198,7 @@ def _record(name: str) -> tuple[str, int]:
 
 
 @pytest.mark.parametrize("name", sorted(SCENARIOS) + sorted(MULTI_READ))
-def test_default_wire_sequence_matches_pre_change_recording(name):
+def test_off_wire_sequence_under_the_conftest_pin_matches_pre_change_recording(name):
     digest, n = _record(name)
     assert n > 0, name
     assert digest == _record(name)[0], f"{name}: recording is not deterministic"
