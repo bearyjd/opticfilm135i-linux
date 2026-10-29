@@ -201,6 +201,8 @@ CAL_ACQUISITION_PHASES = frozenset({
 # "fail" (opt-in) raises CalibrationError before the phase's next
 # transfer; "off" is the previous behaviour exactly. The guard never
 # accepts anything and never changes a poll budget.
+# "fail" also refuses on the calibration integrity telemetry (below): see
+# Scanner._cal_integrity_refuse. EXPERIMENTAL, unverified on hardware.
 CAL_READBACK_GUARD_MODES = ("off", "log", "fail")
 CAL_READBACK_GUARD_DEFAULT = "log"
 
@@ -1762,6 +1764,45 @@ class Scanner:
         return {"cal_integrity": verdict, "cal_integrity_reasons": reasons,
                 "cal_acquisitions": accs}
 
+    def _cal_integrity_refuse(self, checkpoint: str) -> None:
+        """--cal-readback-guard fail only (EXPERIMENTAL, unverified on
+        hardware): raise CalibrationError when any calibration acquisition
+        recorded so far is stale_suspect (cal_stale_suspect) or has
+        identical per-channel means. Called after the dark pair (before any
+        dark_b substitution or default-offset fallback), after the
+        gain-check pair and after the shading verify (before POSITION).
+        Needs the integrity telemetry records (default on); with the
+        telemetry off there is nothing to judge. Host-side only."""
+        if self._cal_readback_guard != "fail" or not self._cal_integrity_telemetry:
+            return
+        reasons = self._cal_integrity_fail_reasons()
+        if not reasons:
+            return
+        log.warning("calibration integrity check failed %s: %s", checkpoint,
+                    "; ".join(reasons))
+        raise safety.CalibrationError(
+            f"calibration integrity check failed {checkpoint}: {'; '.join(reasons)}. "
+            f"The measurement is not trusted: no dark_b substitution and no default "
+            f"offsets are used, and the scan stops here (--cal-readback-guard fail). "
+            f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
+            session=self.session.snapshot())
+
+    def _cal_integrity_fail_reasons(self) -> list[str]:
+        """The reasons --cal-readback-guard fail refuses on, from this
+        scan's acquisition records (empty with the telemetry off)."""
+        if not self._cal_integrity_telemetry:
+            return []
+        reasons = []
+        for a in self._cal_acquisitions:
+            if cal_stale_suspect(a):
+                reasons.append(
+                    f"{a['phase']}: stale (re-armed while the previous acquisition was "
+                    f"still running; "
+                    f"{'acquisition not observed' if a.get('acq_not_observed') else 'data served fast'})")
+            if a.get("identical_channel_means") is True:
+                reasons.append(f"{a['phase']}: identical per-channel means")
+        return reasons
+
     @staticmethod
     def _warn_cal_integrity(frame, integ: dict) -> None:
         """ONE integrity summary warning per frame when its calibration is
@@ -3284,6 +3325,20 @@ class Scanner:
                                           cached_integ.get("cal_integrity_reasons", [])],
                 "cal_acquisitions": [],
             }
+            cached_fail = ((cache.get("cal_fail_reasons") or [])
+                           if self._cal_integrity_telemetry else [])
+            if (self._cal_readback_guard == "fail"
+                    and (integ["cal_integrity"] == "degraded" or cached_fail)):
+                # A calibration that fail mode would have refused (e.g.
+                # measured while the guard was "log") is not reused in fail
+                # mode: refuse before the cached rewrite, nothing further
+                # is sent.
+                why = "; ".join(list(integ["cal_integrity_reasons"]) + cached_fail)
+                raise safety.CalibrationError(
+                    f"cached calibration is degraded ({why}) and is not reused "
+                    f"(--cal-readback-guard fail). {safety.NO_RECOVERY_ATTEMPTED} "
+                    f"{safety.POWER_CYCLE_INSTRUCTION}",
+                    session=self.session.snapshot())
             log.info("calibration: reusing cached codes (gain R=%#04x G=%#04x B=%#04x, "
                      "offset R=%#06x G=%#06x B=%#06x)", gain_r, gain_g, gain_b,
                      off_r, off_g, off_b)
@@ -3300,6 +3355,7 @@ class Scanner:
                 self._cal_capture.note_buffer("dark_b", tables.CAL_DARK_B.name, dark_b_raw)
             self._cal_note_channel_means(tables.CAL_DARK_A.name, dark_a_raw)
             self._cal_note_channel_means(tables.CAL_DARK_B.name, dark_b_raw)
+            self._cal_integrity_refuse("after the dark pair")
             dark_a = np.frombuffer(dark_a_raw, dtype="<u2").reshape(-1, 3)
             dark_b = np.frombuffer(dark_b_raw, dtype="<u2").reshape(-1, 3)
             dark_b, dark_b_substituted, dark_b_fallback = self._dark_b_for_offsets(dark_b)
@@ -3321,6 +3377,7 @@ class Scanner:
                                (tables.CAL_GAIN_CHECK_B, gain_b_bufs)):
                 if _bufs:
                     self._cal_note_channel_means(_ph.name, _bufs[0])
+            self._cal_integrity_refuse("after the gain checks")
 
             # ---- shading measurement (offset=computed final) -------------
             if dark_b_fallback is None:
@@ -3361,6 +3418,7 @@ class Scanner:
             self._diag_phase_seconds["cal_shading_verify"] = (
                 self._diag_phase_seconds.get("cal_shading_verify", 0.0) + (time.monotonic() - _t0)
             )
+            self._cal_integrity_refuse("after the shading verify")
 
             dark_a_mean = [float(x) for x in dark_a.astype(np.float64).mean(axis=0)]
             dark_b_mean = [float(x) for x in dark_b.astype(np.float64).mean(axis=0)]
@@ -3401,6 +3459,9 @@ class Scanner:
                 "shading2_stats": shading2_stats,
                 "cal_integrity": {k: integ[k] for k in
                                   ("cal_integrity", "cal_integrity_reasons")},
+                # What --cal-readback-guard fail would refuse this
+                # calibration for (it can be cached in log mode).
+                "cal_fail_reasons": self._cal_integrity_fail_reasons(),
             }
 
         try:
@@ -3600,6 +3661,7 @@ class Scanner:
             self._cal_capture.note_buffer("dark_b", t.CAL_DARK_B.name, dark_b_raw)
         self._cal_note_channel_means(t.CAL_DARK_A.name, dark_a_raw)
         self._cal_note_channel_means(t.CAL_DARK_B.name, dark_b_raw)
+        self._cal_integrity_refuse("after the dark pair")
         dark_a = np.frombuffer(dark_a_raw, dtype="<u2").reshape(-1, 3)
         dark_b = np.frombuffer(dark_b_raw, dtype="<u2").reshape(-1, 3)
         dark_b, dark_b_substituted, dark_b_fallback = self._dark_b_for_offsets(dark_b)
@@ -3629,6 +3691,7 @@ class Scanner:
                            (t.CAL_GAIN_CHECK_B, gain_b_bufs)):
             if _bufs:
                 self._cal_note_channel_means(_ph.name, _bufs[0])
+        self._cal_integrity_refuse("after the gain checks")
 
         # ---- shading measurement (offset=computed final) ---------------
         if dark_b_fallback is None:
@@ -3686,6 +3749,7 @@ class Scanner:
         self._diag_phase_seconds["cal_shading_verify"] = (
             self._diag_phase_seconds.get("cal_shading_verify", 0.0) + (time.monotonic() - _t0)
         )
+        self._cal_integrity_refuse("after the shading verify")
 
         # ---- position: relative feed from current carriage position ------
         # POSITION uses mode 0x18 (feed) which advances FEEDL steps from

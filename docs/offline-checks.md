@@ -220,6 +220,18 @@ untouched; and `off` keeps the transfer sequence identical:
 python -m pytest -q tests/test_cal_wait_bufempty.py
 ```
 
+The fail-closed calibration integrity suite checks the EXPERIMENTAL
+extension of `--cal-readback-guard fail` (unverified on hardware): the scan
+stops with `CalibrationError` when any calibration acquisition so far is
+`stale_suspect` or has identical per-channel means, checked after the dark
+pair (before any dark_b substitution or default-offset fallback), after the
+gain checks and after the shading verify (before POSITION), in the plain
+and dual profiles; `log` and `off` keep today's behaviour and traffic:
+
+```
+python -m pytest -q tests/test_cal_integrity_fail.py
+```
+
 ### 4. Compiler-based suites (need `g++`, no backend)
 
 ```

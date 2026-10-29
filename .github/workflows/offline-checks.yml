@@ -82,6 +82,9 @@ jobs:
       - name: Opt-in calibration buffer-empty gate regressions
         run: python -m pytest -q tests/test_cal_wait_bufempty.py
 
+      - name: Fail-closed calibration integrity regressions
+        run: python -m pytest -q tests/test_cal_integrity_fail.py
+
       - name: Compiler-based suites (mark, ops, geometry, install)
         run: |
           set -e
