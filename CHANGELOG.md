@@ -6,6 +6,13 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- **DRAFT: `--cal-wait-scanstop` now defaults to `enforce`** (`scan`,
+  `digitize`, `Scanner.cal_wait_scanstop`). Hardware evidence is still
+  pending, so this must not merge before it is complete. Each calibration
+  SCAN-clear is followed by status reads of registers 0x100 and 0x101 before
+  the next OUT transfer, and a gate timeout fails the session
+  (`CalibrationError`, nothing further sent, power cycle). `--cal-wait-scanstop
+  off` restores the previous transfer sequence byte-for-byte.
 - **`--cal-readback-guard fail` now also refuses on calibration integrity**
   (opt-in; EXPERIMENTAL, unverified on hardware). Besides the existing
   refusal when a read-back shows no acquisition (before the bulk read),

@@ -223,8 +223,8 @@ CAL_READBACK_GUARD_DEFAULT = "log"
 # not a measured device limit. Nothing here sends, delays or decides.
 CAL_SERVED_FAST_S = 0.010
 
-# Calibration stop gate (Scanner.cal_wait_scanstop). EXPERIMENTAL,
-# unverified on hardware, opt-in; it delays the next calibration execute
+# Calibration stop gate (Scanner.cal_wait_scanstop). Default "enforce"
+# (hardware evidence pending; "off" is the explicit escape hatch); it delays the next calibration execute
 # pulse, so it is motor-adjacent. In hardware logs the stale calibration
 # reads (see CAL_SERVED_FAST_S) were re-armed while the previous
 # acquisition still showed data-enable (register 0x100 bit 0) and
@@ -236,7 +236,7 @@ CAL_SERVED_FAST_S = 0.010
 # until bit 0 is clear. Only a 2-byte reply with the 0x55 acknowledge
 # counts. Both waits share ONE deadline, NONSTRICT_POLL_FLOOR_S (no new or
 # longer budget); at that deadline CalibrationError is raised before any
-# further write. "off" (default): no read, sleep or clock call is added.
+# further write. "off" (explicit opt-out): no read, sleep or clock call is added.
 CAL_WAIT_SCANSTOP_MODES = ("off", "enforce")
 
 # Calibration buffer-empty gate (Scanner.cal_wait_bufempty). EXPERIMENTAL,
@@ -744,7 +744,7 @@ class Scanner:
     _position_require_motor_idle = False
     _cold_move_early_fail = False
     _cal_integrity_telemetry = True
-    _cal_wait_scanstop = "off"
+    _cal_wait_scanstop = "enforce"
     _cal_wait_bufempty = "off"
 
     @property
@@ -769,8 +769,8 @@ class Scanner:
 
     @property
     def cal_wait_scanstop(self) -> str:
-        """"off" (default) or "enforce": see CAL_WAIT_SCANSTOP_MODES.
-        EXPERIMENTAL, unverified on hardware."""
+        """""enforce" (default) or "off": see CAL_WAIT_SCANSTOP_MODES.
+        Hardware evidence pending."""
         return self._cal_wait_scanstop
 
     @cal_wait_scanstop.setter
