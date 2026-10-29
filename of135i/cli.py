@@ -449,6 +449,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scanner.dark_fallback = getattr(args, "dark_fallback", "strict")
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
         scanner.cal_wait_scanstop = getattr(args, "cal_wait_scanstop", "off")
+        scanner.cal_wait_bufempty = getattr(args, "cal_wait_bufempty", "off")
         scanner.diag_readback_regs = bool(getattr(args, "diag_readback_regs", False))
         scanner.position_require_motor_idle = bool(
             getattr(args, "position_require_motor_idle", False))
@@ -3005,6 +3006,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         scanner.recalibrate = bool(getattr(args, "recalibrate", False))
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
         scanner.cal_wait_scanstop = getattr(args, "cal_wait_scanstop", "off")
+        scanner.cal_wait_bufempty = getattr(args, "cal_wait_bufempty", "off")
         scanner.diag_readback_regs = bool(getattr(args, "diag_readback_regs", False))
         scanner.position_require_motor_idle = bool(
             getattr(args, "position_require_motor_idle", False))
@@ -3466,6 +3468,15 @@ def build_parser() -> argparse.ArgumentParser:
              "at that deadline the scan stops (CalibrationError, power cycle) "
              "before anything further is sent. Delays the next calibration "
              "execute pulse. Default: off, the transfer sequence is unchanged")
+    p_scan.add_argument("--cal-wait-bufempty", choices=("off", "enforce"),
+        default="off", help="EXPERIMENTAL, unverified on hardware: 'enforce' makes each "
+             "calibration read-back poll wait until the buffer-empty bit "
+             "(register 0x101 bit 0x40) reads clear in a well-formed reply "
+             "before the measurement's bulk read; the motor-enable and state-"
+             "class rules no longer end that poll. The poll's budget is "
+             "unchanged; at its deadline the scan stops (CalibrationError, "
+             "power cycle) before the bulk read. Default: off, the transfer "
+             "sequence is unchanged")
     p_scan.add_argument("--cal-readback-guard", choices=("off", "log", "fail"),
         default="log", help="calibration read-back check: when the engine has stopped with an "
              "empty buffer where the capture had data, 'log' (default) records "
@@ -3681,6 +3692,15 @@ def build_parser() -> argparse.ArgumentParser:
              "at that deadline the scan stops (CalibrationError, power cycle) "
              "before anything further is sent. Delays the next calibration "
              "execute pulse. Default: off, the transfer sequence is unchanged")
+    p_dig.add_argument("--cal-wait-bufempty", choices=("off", "enforce"),
+        default="off", help="EXPERIMENTAL, unverified on hardware: 'enforce' makes each "
+             "calibration read-back poll wait until the buffer-empty bit "
+             "(register 0x101 bit 0x40) reads clear in a well-formed reply "
+             "before the measurement's bulk read; the motor-enable and state-"
+             "class rules no longer end that poll. The poll's budget is "
+             "unchanged; at its deadline the scan stops (CalibrationError, "
+             "power cycle) before the bulk read. Default: off, the transfer "
+             "sequence is unchanged")
     p_dig.add_argument("--cal-readback-guard", choices=("off", "log", "fail"),
         default="log", help="calibration read-back check: when the engine has stopped with an "
              "empty buffer where the capture had data, 'log' (default) records "
