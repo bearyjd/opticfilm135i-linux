@@ -269,8 +269,9 @@ def _scan_with_signature_in(phase, mode, ir):
     scanner = make_scanner(fake)
     scanner.cal_readback_guard = mode
     # This fixture answers ad55 (motor on) at every calibration status read,
-    # including the post-clear ones, and serves data instantly: exactly the
-    # stale signature, which "fail" mode refuses after the dark pair
+    # including the post-clear ones, serves data instantly and its synthetic
+    # dark buffers have equal per-channel sums: the stale and identical-means
+    # signatures, which "fail" mode refuses after the dark pair
     # (test_cal_integrity_fail.py). This test is about the read-back poll
     # alone, so the integrity records are switched off here.
     scanner.cal_integrity_telemetry = False
