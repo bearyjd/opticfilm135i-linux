@@ -46,6 +46,7 @@ def _scanner(replies) -> Scanner:
     s._diag_poll_timeout_details = []
     s._diag_poll_settle = []
     s._diag_poll_settle_max_s = 0.0
+    s._cal_bufempty_waits = []
     s.session = types.SimpleNamespace(start_reg01="0x22", snapshot=lambda: {})
     return s
 

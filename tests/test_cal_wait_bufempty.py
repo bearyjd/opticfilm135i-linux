@@ -400,3 +400,56 @@ def test_digitize_sets_the_mode_on_its_scanner(tmp_path):
     scanners = [o for o in opened if isinstance(o, Scanner)]
     assert scanners and scanners[0].cal_wait_bufempty == "enforce"
     assert fake.out_count == 0
+
+
+# ------------------------------------------------- per-wait diag record
+
+
+def test_diag_record_engaged_wait():
+    s, exc, _ = _poll(["cd55", "cd55", "ed55", "ad55"], "bd55", "cal_dark_b")
+    assert exc is None
+    (rec,) = s._cal_bufempty_waits
+    assert set(rec) == {"phase", "outcome", "wait_s", "reads", "last_value", "engaged"}
+    assert rec["phase"] == "cal_dark_b"
+    assert rec["outcome"] == "clear"
+    assert rec["reads"] == 4
+    assert rec["last_value"] == "ad55"
+    assert rec["engaged"] is True
+    assert isinstance(rec["wait_s"], float) and rec["wait_s"] >= 0
+
+
+def test_diag_record_clear_on_first_read_is_not_engaged():
+    s, exc, _ = _poll(["ad55"], "bd55", "cal_dark_b")
+    assert exc is None
+    (rec,) = s._cal_bufempty_waits
+    assert rec["outcome"] == "clear" and rec["reads"] == 1 and rec["engaged"] is False
+
+
+def test_diag_record_absent_with_off():
+    s, exc, _ = _poll(["cd55", "ad55"], "bd55", "cal_dark_b", mode="off")
+    assert exc is None
+    assert s._cal_bufempty_waits == []
+
+
+def test_diag_record_present_on_refusal():
+    s, exc, _ = _poll(["cc55"], "bd55", "cal_gain_check_a")
+    assert isinstance(exc, safety.CalibrationError)
+    (rec,) = s._cal_bufempty_waits
+    assert rec["phase"] == "cal_gain_check_a"
+    assert rec["outcome"] == "timeout"
+    assert rec["reads"] >= 1 and rec["engaged"] is True
+    assert rec["last_value"] == "cc55"
+    assert rec["wait_s"] >= FLOOR - 0.03
+
+
+def test_diag_record_reaches_the_diag_and_adds_no_reads():
+    seq = [0xCD, 0xCD, 0xED, 0xAD]
+    fake, s, exc = _scan("enforce", {"cal_dark_b": lambda n: seq[min(n, 3)]})
+    assert exc is None, exc
+    rec = next(r for r in s._cal_bufempty_waits if r["phase"] == "cal_dark_b")
+    assert rec["reads"] == 4 and rec["last_value"] == "ad55"
+    assert all(r["reads"] >= 1 for r in s._cal_bufempty_waits)
+    assert s.last_diag["cal_bufempty_waits"] == s._cal_bufempty_waits
+    f_off, s_off, _ = _scan("off")
+    assert s_off.last_diag["cal_bufempty_waits"] == []
+    assert _scan("enforce")[0].wire_log == f_off.wire_log
