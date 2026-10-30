@@ -241,7 +241,8 @@ def test_unknown_op_rejected():
         rh.run(RECORDED, "nope")
 
 
-def test_cli_writes_outputs_and_refuses_existing_dir(tmp_path):
+def test_cli_writes_outputs_and_refuses_existing_dir(tmp_path, monkeypatch):
+    monkeypatch.setitem(rh.OPERATIONS, "cold_init", lambda s, dpi: s.check_start_state())
     cap = tmp_path / "c.jsonl"
     cap.write_text(json.dumps({"endpoint": 128, "setup": [0xC0, 4, 0x8E, 0x0122, 2],
                                "payload_hex": "2255", "status": 0, "submit_packet": 1}) + "\n")
@@ -251,3 +252,95 @@ def test_cli_writes_outputs_and_refuses_existing_dir(tmp_path):
     assert (out / "trace.jsonl").exists() and (out / "compiled.trace.json").exists()
     with pytest.raises(FileExistsError):
         rh.main(["x", str(cap), "--op", "cold_init", "--out", str(out)])
+
+
+# ------------------------------------------------- review hardening (round 2)
+class RealLooking:
+    """An object shaped like a pyusb device; any transfer is a test failure."""
+    idVendor, idProduct = 0x07B3, 0x1436
+
+    def ctrl_transfer(self, *a, **k):
+        raise AssertionError("a real-looking device received a transfer")
+
+    read = write = ctrl_transfer
+
+
+def test_run_rejects_a_device_that_is_not_the_fake():
+    with pytest.raises(TypeError):
+        rh.run(RECORDED, driver_seq, device=RealLooking())
+
+
+def test_run_rejects_a_scanner_whose_device_was_swapped():
+    def swap(s, dpi):
+        object.__setattr__(s.io.dev, "_GuardedDevice__raw", RealLooking())
+
+    res = rh.run(RECORDED, swap)
+    assert res["halt_type"] == "TypeError"
+
+
+def test_halt_rule_expected_vs_unexpected():
+    assert rh.halt_is_expected("LampWarmupError")
+    assert rh.halt_is_expected("CalibrationError")
+    assert not rh.halt_is_expected("RuntimeError")
+    assert not rh.halt_is_expected(None)
+
+
+def _cap(tmp_path):
+    cap = tmp_path / "c.jsonl"
+    cap.write_text(json.dumps({"endpoint": 128, "setup": [0xC0, 4, 0x8E, 0x0122, 2],
+                               "payload_hex": "2255", "status": 0, "submit_packet": 1}) + "\n")
+    return cap
+
+
+def _lamp_error():
+    from of135i import safety
+    return safety.LampWarmupError("dark", measurements=0, peak_history=[], elapsed_s=0.0)
+
+
+def _raiser(exc):
+    def op(s, dpi):
+        raise exc
+    return op
+
+
+def test_cli_unexpected_halt_is_nonzero_and_recorded(tmp_path, monkeypatch):
+    monkeypatch.setitem(rh.OPERATIONS, "boom", _raiser(RuntimeError("synthetic")))
+    out = tmp_path / "o"
+    assert rh.main(["x", str(_cap(tmp_path)), "--op", "boom", "--out", str(out)]) != 0
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["halted"] is True and summary["halt_type"] == "RuntimeError"
+    assert "synthetic" in summary["halt_message"] and summary["expected_halt"] is False
+    assert summary["transfers"] == 0 and summary["divergences"] == {}
+    assert (out / "diff.txt").read_text().splitlines()[-1].startswith("# HALTED RuntimeError")
+
+
+def test_cli_measurement_check_halt_stays_zero_but_recorded(tmp_path, monkeypatch):
+    monkeypatch.setitem(rh.OPERATIONS, "warm", _raiser(_lamp_error()))
+    out = tmp_path / "o"
+    assert rh.main(["x", str(_cap(tmp_path)), "--op", "warm", "--out", str(out)]) == 0
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["halted"] and summary["expected_halt"] is True
+    assert (out / "diff.txt").read_text().splitlines()[-1].startswith("# HALTED LampWarmupError")
+
+
+def test_cli_clean_run_summary(tmp_path, monkeypatch):
+    monkeypatch.setitem(rh.OPERATIONS, "noop", lambda s, dpi: None)
+    out = tmp_path / "o"
+    assert rh.main(["x", str(_cap(tmp_path)), "--op", "noop", "--out", str(out)]) == 0
+    assert json.loads((out / "summary.json").read_text())["halted"] is False
+
+
+@pytest.mark.parametrize("row, needle", [
+    ('[1, 2]', "row 1"),                                                  # not an object
+    ('{"endpoint": 0, "setup": [64, 4, 131], "submit_packet": 1}', "row 2"),   # short setup
+    ('{"endpoint": 0, "setup": [64, 4, 131, 0, 2], "payload_hex": "zz"}', "row 3"),  # bad hex
+    ('{"endpoint": "x", "submit_packet": 1}', "row 4"),                  # wrong type
+])
+def test_malformed_rows_raise_value_error_naming_the_row(tmp_path, row, needle):
+    good = json.dumps({"endpoint": 2, "payload_length": 1, "submit_packet": 1})
+    idx = int(needle.split()[1])
+    lines = [good] * (idx - 1) + [row]
+    p = tmp_path / "m.jsonl"
+    p.write_text("\n".join(lines) + "\n")
+    with pytest.raises(ValueError, match=needle):
+        load_capture(p)
