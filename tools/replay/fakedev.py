@@ -31,6 +31,14 @@ REG_READ_WVALUES = (0x008E, 0x018E)
 ACK = 0x55                      # second byte of a 2-byte register-read reply
 
 
+def require_fake(dev) -> FakeVendorDevice:
+    """Refuse anything but the replay's own fake device object."""
+    if not isinstance(dev, FakeVendorDevice):
+        raise TypeError(f"replay harness: refusing to drive {type(dev).__name__}; "
+                        "only FakeVendorDevice may be handed to the driver")
+    return dev
+
+
 class VirtualClock:
     """Replaces time.sleep / monotonic / perf_counter so the driver's poll
     loops run to their deadlines instantly. sleep() advances virtual time."""
