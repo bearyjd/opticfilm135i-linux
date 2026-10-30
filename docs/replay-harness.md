@@ -2,9 +2,9 @@
 
 Offline tool that plays the DEVICE side of a recorded USB capture into the
 driver and diffs what the driver sends against what the recorded host sent.
-It never opens a USB device: `usb.core.find`, `usb.core.Device.__init__`
-and the libusb backend are replaced by functions that raise `AssertionError`
-for the whole run.
+While a replay runs, the driver is given only the harness's own fake device
+object; the guard described under "Guarantees and limits of the guard"
+makes the usual ways of reaching real hardware raise.
 
 The harness reads a capture path you give it at run time. No capture,
 register table or recorded value ships with it; the tests use small
@@ -21,12 +21,22 @@ exist. It receives:
 
 - `diff.txt`: `ORDER` (ops only on one side) and `VALUE` (register value,
   bulk-OUT content) lines, then a summary line. Register level only.
+- `summary.json`: whether the run halted, the exception type and message,
+  transfer count and divergence counts by kind. A halt is also the final
+  line of `diff.txt` (`# HALTED Type: message`).
 - `divergences.jsonl`: every point where the driver asked something the
   recording could not answer (see below).
 - `trace.jsonl`: the driver's own `OF135I_TRACE` recorder output
   (`of135i-trace/1`), and `compiled.trace.json`, the same converted with
   `tools/trace_to_compiled.py`, for an external annotated-trace diff tool
   if you have one.
+
+Exit code: 0 for a complete run and for a documented measurement-check halt
+(`EXPECTED_HALT_TYPES` in `tools/replay_harness.py`: `LampWarmupError`,
+`CalibrationError`; the replay serves zeros for image data, so these are the
+normal end of a `scan`). Any other halt exits 1. A malformed capture row
+makes loading fail with a `ValueError` naming the row (line number) before
+anything is run.
 
 The exit summary prints driver transfer count, divergence counts by kind and
 `halted` (the first driver exception, if any; the run ends there).
@@ -39,6 +49,28 @@ One JSON object per USB transfer, as written by a usbmon decoder:
 `returned` (bulk IN), `status`, `submit_packet`. Standard/class requests and
 failed control transfers are dropped; empty interrupt reads (idle timeouts)
 are dropped.
+
+## Guarantees and limits of the guard
+
+While `run()` executes, `usb.core.find`, `usb.core.Device.__init__` and
+`usb.backend.libusb1.get_backend` are replaced by functions that raise
+`AssertionError`; they are restored afterwards. `run()` also refuses (with a
+`TypeError`) to drive anything but `FakeVendorDevice`: the device is checked
+before the operation starts and again when it ends, and a swapped-in object
+is replaced by the fake before the session closes so it is never disposed.
+
+Not covered:
+
+- Import time is not guarded. `tools/replay_harness.py` imports the driver
+  (and `usb.core`) before the guard is installed. This is safe because the
+  driver does only `import usb.core` at module level: it calls no find or
+  open at import time, and the libusb backend is loaded lazily.
+- Transfers through a device object that a caller obtained elsewhere and
+  passes to the driver by other means are not intercepted; the guard blocks
+  discovery and construction, not every possible use of a handle that
+  already exists.
+- The check on the fake is a type check at the two points above, not a
+  per-transfer check.
 
 ## How replies are matched
 
