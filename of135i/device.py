@@ -927,6 +927,8 @@ class Scanner:
         self._cal_acquisitions: list[dict] = []
         # Stop-gate waits of the current scan (cal_wait_scanstop).
         self._cal_scanstop_waits: list[dict] = []
+        # Buffer-empty waits of the current scan (cal_wait_bufempty enforce).
+        self._cal_bufempty_waits: list[dict] = []
         self._diag_warmup: dict | None = None
         # Set by a completed load_magazine(): the transport is at the
         # vendor's scan reference position (the load's traverse). A
@@ -1390,6 +1392,7 @@ class Scanner:
         CalibrationError, before the phase's bulk read."""
         dev = self.io.dev
         got = None
+        reads = 0
         while True:
             remaining = deadline - time.monotonic()
             if got is not None and remaining <= 0:
@@ -1397,11 +1400,13 @@ class Scanner:
             else:
                 got = bytes(dev.ctrl_transfer(op.bm, op.br, op.wv, op.wi, op.length,
                                               max(1, math.ceil(max(0.0, remaining) * 1000))))
+                reads += 1
                 if self._cal_integrity_telemetry:
                     self._cal_note_status_read(op.wi, got)
                 late = time.monotonic() > deadline
                 if not late and len(got) == 2 and got[1] == 0x55 and not got[0] & 0x40:
                     self._note_poll_settle(op, got, want, t_start, "bufempty_clear")
+                    self._note_bufempty_wait("clear", t_start, reads, got)
                     return
             if late:
                 self._diag_poll_timeouts += 1
@@ -1411,6 +1416,7 @@ class Scanner:
                               "last": got.hex(), "want": want.hex()}
                     self._diag_poll_timeout_details.append(detail)
                 entry = self._note_poll_settle(op, got, want, t_start, "timeout")
+                self._note_bufempty_wait("timeout", t_start, reads, got)
                 if entry is not None and self._cal_acquisition_not_observed(op, got, want):
                     entry["acq_not_observed"] = True
                 if self._diag_readback_regs:
@@ -1428,6 +1434,16 @@ class Scanner:
                     f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
                     session=self.session.snapshot())
             time.sleep(0.004)
+
+    def _note_bufempty_wait(self, outcome: str, t_start: float, reads: int,
+                            got: bytes) -> None:
+        """Record one enforced buffer-empty wait in the diag
+        (``cal_bufempty_waits``). ``engaged`` is False only when the first
+        read already cleared. Records what the poll already read."""
+        self._cal_bufempty_waits.append({
+            "phase": getattr(self.session, "phase", None), "outcome": outcome,
+            "wait_s": round(time.monotonic() - t_start, 4), "reads": reads,
+            "last_value": got.hex(), "engaged": not (outcome == "clear" and reads == 1)})
 
     def _note_poll_settle(self, op: Op, got: bytes, want: bytes, t_start: float,
                           how: str) -> dict | None:
@@ -3286,6 +3302,7 @@ class Scanner:
         self._diag_poll_settle_max_s = 0.0
         self._cal_acquisitions = []
         self._cal_scanstop_waits = []
+        self._cal_bufempty_waits = []
         self._scanstop_go_phase = None
         self._scanstop_armed = None
         self._diag_warmup = None
@@ -3549,6 +3566,7 @@ class Scanner:
             "dark_b_fallback": dark_b_fallback,
             **integ,
             "cal_scanstop_waits": list(self._cal_scanstop_waits),
+            "cal_bufempty_waits": list(self._cal_bufempty_waits),
             "white_mean": warmup.get("white_mean"),
             "white_max": warmup.get("white_max"),
             "gain_codes": [gain_r, gain_g, gain_b],
@@ -3641,6 +3659,7 @@ class Scanner:
         self._diag_poll_settle_max_s = 0.0
         self._cal_acquisitions = []
         self._cal_scanstop_waits = []
+        self._cal_bufempty_waits = []
         self._scanstop_go_phase = None
         self._scanstop_armed = None
         self._diag_warmup = None
@@ -3883,6 +3902,7 @@ class Scanner:
             "dark_b_fallback": dark_b_fallback,
             **integ,
             "cal_scanstop_waits": list(self._cal_scanstop_waits),
+            "cal_bufempty_waits": list(self._cal_bufempty_waits),
             "white_mean": warmup.get("white_mean"),
             "white_max": warmup.get("white_max"),
             "gain_codes": [gain_r, gain_g, gain_b],
