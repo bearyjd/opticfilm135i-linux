@@ -24,7 +24,12 @@ one exists; "offline" means implemented and tested without the scanner.
   (2-byte, 0x55-acknowledged) reply with that bit clear ends the poll. The
   poll's budget is unchanged; at its deadline the scan stops with
   `CalibrationError` before the bulk read. Image-scan, strict and other
-  status polls are not affected; `off` traffic is byte-identical.
+  status polls are not affected; `off` traffic is byte-identical. Each
+  enforced wait, including a refused one, is recorded in the diag
+  (`cal_bufempty_waits`: `phase`, `outcome` `clear`/`timeout`, `wait_s`,
+  `reads`, `last_value` (last status word, hex), `engaged` (false only if
+  the first read already cleared)); empty with `off`. Diagnostics only: no
+  extra transfers.
 - **Opt-in `--cal-wait-scanstop {off,enforce}`** (`scan`, `digitize`;
   `Scanner.cal_wait_scanstop`, default `off`). EXPERIMENTAL, motor-adjacent
   and unverified on hardware. In hardware logs the stale calibration reads
