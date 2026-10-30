@@ -19,12 +19,11 @@ LOADER_FEED = bytes.fromhex('1c0002183d003e1a3f227d007e757f308a008b008c008d008e0
 LOADER_EJECT = bytes.fromhex('1c0002183d003e0c3f127d007e757f308a008b008c008d008e008f00900091009200ae00afff')
 TRAVERSE_FEED = bytes.fromhex('021cae00afff3d013e173f42')
 
-# Vendor registration presence/cancel preflight (Scanapi_x64 1.4.28.0):
-# 0x180002c64 chip-ID ack (packets 6807-6811), then 0x180002c71 calls
-# 0x1800272e0 -> 0x180087030 -> bf0d0(refresh=1) -> 0702 leaf 0x1800aac80,
-# which re-reads live reg101 and returns bit08. Bit08 clear (capture 6813)
-# skips a possible cancel/drain path at 0x18002738f. Taking that branch also
-# requires configuration lookup == 1 and helper 559d0(1, 0) == 0; the
+# Vendor registration presence/cancel preflight: after the chip-ID ack
+# (packets 6807-6811) the vendor software runs a presence check that
+# re-reads live reg101 and returns bit08. Bit08 clear (capture 6813)
+# skips a possible cancel/drain path. Taking that branch also
+# requires a configuration lookup == 1 and a helper call returning 0; the
 # caller/alias mapping remains partly unproven. The native executor
 # conservatively refuses a set bit08 before base-register write 6825
 # because that possible path is unimplemented (docs/vendor-startup.md).
