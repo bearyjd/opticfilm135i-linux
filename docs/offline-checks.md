@@ -75,7 +75,7 @@ Each is a standalone script that prints `N tests passed` and exits 0:
 for t in test_safety test_calibrate test_hwblock test_park test_offline \
          test_diag test_dpi test_ir test_image_probe test_aperture_crop \
          test_overscan test_dual_overscan; do
-    .venv/bin/python tests/$t.py || exit 1
+    .venv/bin/python tests/run_suite.py $t || exit 1
 done
 ```
 
@@ -195,14 +195,22 @@ the transfer sequence nor any poll-loop clock or sleep call:
 python -m pytest -q tests/test_cal_integrity.py
 ```
 
-The calibration stop-gate suite checks the EXPERIMENTAL opt-in
-`--cal-wait-scanstop enforce` (unverified on hardware): after the SCAN-clear
+The calibration stop-gate suite checks `--cal-wait-scanstop`, default
+`enforce` (DRAFT, hardware evidence pending and not validated; `off` is the
+explicit escape hatch). Hardware evidence so far: one unit, 5 gated runs
+(600 dpi x3 including arm-C and guard-fail variants, 3600 dpi x2), zero
+gate-caused failures, no gate-off comparison at 3600 dpi. After the SCAN-clear
 that closes a calibration execute pulse, and before the next OUT transfer,
 register 0x100 bit 0 and then register 0x101 bit 0 must read clear in
 2-byte replies with the 0x55 acknowledge, under one shared deadline of the
 existing non-strict poll floor; at the deadline `CalibrationError` is raised
-before any further write. It also checks that the default `off` leaves the
-transfer sequence identical to the stored baseline:
+before any further write. It also checks that an explicit `off` leaves the
+transfer sequence identical to the stored baseline, and that the true
+default (unpinned, through `scan` and `digitize`) is that sequence plus
+only the register 0x100/0x101 status reads. `tests/conftest.py` pins the
+gate off for every other suite (including `tests/test_wire_baseline.py`,
+whose digests are unchanged and describe the `off` sequence), because their
+fakes script their own status replies and clocks:
 
 ```
 python -m pytest -q tests/test_cal_wait_scanstop.py
@@ -236,7 +244,7 @@ python -m pytest -q tests/test_cal_integrity_fail.py
 
 ```
 for t in test_sane_mark test_sane_ops test_sane_geometry test_sane_install; do
-    .venv/bin/python tests/$t.py || exit 1
+    .venv/bin/python tests/run_suite.py $t || exit 1
 done
 ```
 

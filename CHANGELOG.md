@@ -6,6 +6,21 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
+- **DRAFT: `--cal-wait-scanstop` now defaults to `enforce`** (`scan`,
+  `digitize`, `Scanner.cal_wait_scanstop`). Hardware evidence is pending and
+  this must not merge before it is complete; the default is not validated.
+  What exists so far: one unit, 5 gated runs (600 dpi x3, including the
+  arm-C and guard-fail variants, and 3600 dpi x2) with zero gate-caused
+  failures, and no gate-off comparison at 3600 dpi. Each calibration
+  SCAN-clear is now followed by status reads of registers 0x100 and 0x101
+  before the next OUT transfer, and a gate timeout fails the session
+  (`CalibrationError`, nothing further sent, power cycle). The default wire
+  sequence therefore differs from the previous one by those status reads
+  only (offline: `tests/test_cal_wait_scanstop.py`). The wire-baseline
+  digests in `tests/test_wire_baseline.py` are unchanged; they are checked
+  with the gate pinned off by `tests/conftest.py` and still hold.
+  `--cal-wait-scanstop off` restores the previous transfer sequence
+  byte-for-byte.
 - **`--cal-readback-guard fail` now also refuses on calibration integrity**
   (opt-in; EXPERIMENTAL, unverified on hardware). Besides the existing
   refusal when a read-back shows no acquisition (before the bulk read),

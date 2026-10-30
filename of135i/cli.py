@@ -448,7 +448,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scanner.recalibrate = bool(getattr(args, 'recalibrate', False))
         scanner.dark_fallback = getattr(args, "dark_fallback", "strict")
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
-        scanner.cal_wait_scanstop = getattr(args, "cal_wait_scanstop", "off")
+        scanner.cal_wait_scanstop = getattr(args, "cal_wait_scanstop", "enforce")
         scanner.cal_wait_bufempty = getattr(args, "cal_wait_bufempty", "off")
         scanner.diag_readback_regs = bool(getattr(args, "diag_readback_regs", False))
         scanner.position_require_motor_idle = bool(
@@ -3005,7 +3005,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         scanner.park_mode = args.park
         scanner.recalibrate = bool(getattr(args, "recalibrate", False))
         scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
-        scanner.cal_wait_scanstop = getattr(args, "cal_wait_scanstop", "off")
+        scanner.cal_wait_scanstop = getattr(args, "cal_wait_scanstop", "enforce")
         scanner.cal_wait_bufempty = getattr(args, "cal_wait_bufempty", "off")
         scanner.diag_readback_regs = bool(getattr(args, "diag_readback_regs", False))
         scanner.position_require_motor_idle = bool(
@@ -3460,14 +3460,15 @@ def build_parser() -> argparse.ArgumentParser:
              "the .diag.json poll records and the log. Default: off, the "
              "transfer sequence is unchanged")
     p_scan.add_argument("--cal-wait-scanstop", choices=("off", "enforce"),
-        default="off", help="EXPERIMENTAL, unverified on hardware, motor-adjacent: "
+        default="enforce", help="Motor-adjacent, hardware evidence pending: "
              "'enforce' waits, after each calibration acquisition's scan-clear and "
              "before the next write, until the data-enable bit (register 0x100) "
              "and then the motor-enable bit (register 0x101) read clear; both "
              "share the existing non-strict poll floor (no longer budget) and "
              "at that deadline the scan stops (CalibrationError, power cycle) "
              "before anything further is sent. Delays the next calibration "
-             "execute pulse. Default: off, the transfer sequence is unchanged")
+             "execute pulse. Default: enforce; 'off' disables the gate and leaves "
+             "the transfer sequence unchanged")
     p_scan.add_argument("--cal-wait-bufempty", choices=("off", "enforce"),
         default="off", help="EXPERIMENTAL, unverified on hardware: 'enforce' makes each "
              "calibration read-back poll wait until the buffer-empty bit "
@@ -3689,14 +3690,15 @@ def build_parser() -> argparse.ArgumentParser:
              "the .diag.json poll records and the log. Default: off, the "
              "transfer sequence is unchanged")
     p_dig.add_argument("--cal-wait-scanstop", choices=("off", "enforce"),
-        default="off", help="EXPERIMENTAL, unverified on hardware, motor-adjacent: "
+        default="enforce", help="Motor-adjacent, hardware evidence pending: "
              "'enforce' waits, after each calibration acquisition's scan-clear and "
              "before the next write, until the data-enable bit (register 0x100) "
              "and then the motor-enable bit (register 0x101) read clear; both "
              "share the existing non-strict poll floor (no longer budget) and "
              "at that deadline the scan stops (CalibrationError, power cycle) "
              "before anything further is sent. Delays the next calibration "
-             "execute pulse. Default: off, the transfer sequence is unchanged")
+             "execute pulse. Default: enforce; 'off' disables the gate and leaves "
+             "the transfer sequence unchanged")
     p_dig.add_argument("--cal-wait-bufempty", choices=("off", "enforce"),
         default="off", help="EXPERIMENTAL, unverified on hardware: 'enforce' makes each "
              "calibration read-back poll wait until the buffer-empty bit "

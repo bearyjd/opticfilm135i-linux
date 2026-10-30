@@ -618,8 +618,8 @@ power cycle to reappear. Run the offline test suite
 (no hardware needed):
 
 ```bash
-.venv/bin/python tests/test_offline.py
-.venv/bin/python tests/test_calibrate.py
+.venv/bin/python tests/run_suite.py test_offline
+.venv/bin/python tests/run_suite.py test_calibrate
 ```
 
 ## How it works
