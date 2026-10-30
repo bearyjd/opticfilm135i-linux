@@ -40,7 +40,7 @@ jobs:
                    test_aperture_crop test_overscan test_dual_overscan \
                    test_release_check test_film110 test_film110_digitize test_film110_report; do
             echo "== $t"
-            python tests/$t.py
+            python tests/run_suite.py $t
           done
 
       - name: Mounted-slide and DPI-aware cleaning regressions
@@ -77,7 +77,7 @@ jobs:
         run: python -m pytest -q tests/test_cal_integrity.py
 
       - name: Opt-in calibration stop-gate regressions
-        run: python -m pytest -q tests/test_cal_wait_scanstop.py
+        run: python -m pytest -q tests/test_cal_wait_scanstop.py tests/test_gate_pin_parity.py
 
       - name: Opt-in calibration buffer-empty gate regressions
         run: python -m pytest -q tests/test_cal_wait_bufempty.py
@@ -91,5 +91,5 @@ jobs:
           for t in test_sane_mark test_sane_ops test_sane_geometry \
                    test_sane_install; do
             echo "== $t"
-            python tests/$t.py
+            python tests/run_suite.py $t
           done

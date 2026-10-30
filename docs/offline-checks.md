@@ -75,7 +75,7 @@ Each is a standalone script that prints `N tests passed` and exits 0:
 for t in test_safety test_calibrate test_hwblock test_park test_offline \
          test_diag test_dpi test_ir test_image_probe test_aperture_crop \
          test_overscan test_dual_overscan; do
-    .venv/bin/python tests/$t.py || exit 1
+    .venv/bin/python tests/run_suite.py $t || exit 1
 done
 ```
 
@@ -244,7 +244,7 @@ python -m pytest -q tests/test_cal_integrity_fail.py
 
 ```
 for t in test_sane_mark test_sane_ops test_sane_geometry test_sane_install; do
-    .venv/bin/python tests/$t.py || exit 1
+    .venv/bin/python tests/run_suite.py $t || exit 1
 done
 ```
 
