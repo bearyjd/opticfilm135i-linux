@@ -37,6 +37,21 @@ def test_documented_script_loops_use_the_runner():
     assert "python tests/$t.py" not in _read("docs/offline-checks.md")
 
 
+def test_runner_starts_from_the_repo_root_without_pythonpath():
+    """CI runs `python tests/run_suite.py <suite>` from the repo root with no PYTHONPATH,
+    so only tests/ is on sys.path: the runner must find of135i itself."""
+    import subprocess
+
+    root = os.path.abspath(ROOT)
+    keep = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+            if p and os.path.abspath(p) != root]  # dependency overlays stay, the repo root goes
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(keep)}
+    res = subprocess.run([sys.executable, "tests/run_suite.py"], cwd=root, env=env,
+                         capture_output=True, text=True, timeout=60)
+    assert "ModuleNotFoundError" not in res.stderr, res.stderr
+    assert res.returncode == 2 and "usage: run_suite.py" in res.stderr, res.stderr
+
+
 def test_gate_off_pins_class_and_cli_defaults_then_restores():
     before = Scanner._cal_wait_scanstop
     assert before == "enforce"

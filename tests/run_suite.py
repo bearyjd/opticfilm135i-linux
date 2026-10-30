@@ -11,7 +11,10 @@ import os
 import runpy
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# Run as a script, only tests/ is on sys.path; _gate_pin imports of135i from the repo root.
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
 
 from _gate_pin import gate_off  # noqa: E402
 
