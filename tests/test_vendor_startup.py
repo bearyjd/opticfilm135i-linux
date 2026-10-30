@@ -333,7 +333,7 @@ def test_unrelated_register_bits_may_differ(wv,wi,n,reply):
 @pytest.mark.parametrize('reply',[b'\xd8\x55',b'\xf8\x55',b'\x08\x55'])
 def test_vendor_presence_preflight_bit08_set_stops_before_base_write(reply):
     # Occurrence 1 is the native entry gate; occurrence 2 is packet 6813,
-    # the DLL preflight read (0x1800272e0 -> 0x180087030 -> 0x1800aac80).
+    # the vendor software's presence-preflight read.
     fake = CorruptedRead(0x18e,0x122,2,reply)
     scanner = Scanner(UsbIo(fake))
     with pytest.raises(safety.SafetyError): scanner.vendor_startup(experimental=True)

@@ -19,11 +19,10 @@ refused without startup writes. A COLD power-on state remains unsupported by
 this operation: the capture did not record register 01 before its first write.
 
 After the captured chip-ID acknowledgement (packets 6807-6811), the read at
-packet 6813 is the DLL's presence/cancel preflight (`0x180002c71` →
-`0x1800272e0` → `0x180087030` → 0702 leaf `0x1800aac80`, a live reg101 read
-returning bit08). Bit08 clear skips a possible cancel/drain path. A set
-bit alone does not prove that the vendor takes that path: the branch also
-requires a configuration lookup to return 1 and helper `559d0(1, 0)` to return
+packet 6813 is the vendor software's presence/cancel preflight (a live
+reg101 read returning bit08). Bit08 clear skips a possible cancel/drain path.
+A set bit alone does not prove that the vendor takes that path: the branch
+also requires a configuration lookup to return 1 and a helper call to return
 0; the caller/alias mapping remains partly unproven. This implementation
 conservatively refuses a set bit08 because the possible cancel/drain path
 is unimplemented. It stops before the base-register write (6825) and any GO;
