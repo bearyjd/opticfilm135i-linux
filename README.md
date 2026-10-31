@@ -559,6 +559,15 @@ stdout/stderr pipe can no longer abort a scan.
 .venv/bin/python -m of135i buttons [--duration S]  # read-only: print button presses
 ```
 
+**Exit codes for `watch`:**
+
+- **0**: stopped while idle (Ctrl+C).
+- **1**: error, refused, or absent (including an unsafe start state);
+  a service manager may retry.
+- **75**: eject failed or was interrupted mid-move. The scanner state
+  is unknown: do not restart; power-cycle it. The watcher will not
+  restart itself; another button press sends no further commands.
+
 `doctor` is strictly read-only on the wire (USB control reads and
 descriptor queries only — no register writes, no motor commands, no
 `initialize()`/`cold_init()`): it prints USB descriptor info, the

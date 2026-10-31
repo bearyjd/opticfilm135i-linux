@@ -2199,10 +2199,89 @@ def test_cli_eject_and_watch_paths():
     fake.fault = lambda ev: _usb_timeout() if ev.get("pulse") else None
     with cli_over(fake) as opened:
         code, so, se = _cli(["watch"])
-    assert code == 1 and opened[0].session.state is SessionState.FAILED
+    assert code == 75 and opened[0].session.state is SessionState.FAILED
     assert len(fake.button_events) == 3, "watch kept polling after a failed eject"
     _assert_power_cycle_message(se)
     print("test_cli_eject_and_watch_paths OK")
+
+
+def test_watch_eject_failure_exit_75():
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.button_events.extend([0x48, None])
+    fake.fault = lambda ev: _usb_timeout() if ev.get("pulse") else None
+    with cli_over(fake) as opened:
+        code, so, se = _cli(["watch"])
+    assert code == 75, (code, se)
+    assert cli.EXIT_WATCH_EJECT_FAILED == 75
+    assert "eject failed: the scanner state is unknown; power-cycle it. The watcher will not restart itself (exit 75)." in se, se
+    assert "USBTimeoutError" in se and "ejected" not in so, (so, se)
+    assert opened[0].session.state is SessionState.FAILED
+    _assert_power_cycle_message(se)
+
+
+def test_watch_interrupt_during_eject_exit_75():
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.button_events.extend([0x48, None])
+    fake.fault = lambda ev: KeyboardInterrupt() if ev.get("pulse") else None
+    with cli_over(fake) as opened:
+        code, so, se = _cli(["watch"])
+    assert code == 75, (code, se)
+    assert "KeyboardInterrupt" in se and "exit 75" in se, se
+    assert "ejected" not in so and opened[0].session.state is SessionState.FAILED
+    _assert_power_cycle_message(se)
+
+
+def test_watch_idle_interrupt_exit_0():
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.button_events.append(KeyboardInterrupt())
+    with cli_over(fake):
+        code, so, se = _cli(["watch"])
+    assert code == 0 and "stopped" in so, (code, so, se)
+    assert fake.out_count == 0 and "exit 75" not in se, se
+
+
+def test_watch_absent_device_exit_1():
+    with real_open(None) as path:
+        code, so, se = _cli(["watch"])
+        _assert_lock_free(path)
+    assert code == 1 and "not found" in se, (code, se)
+    assert "exit 75" not in se, se
+
+
+def test_watch_unsafe_start_exit_1():
+    fake = FakeUsbDevice(reg01=0x23)
+    with cli_over(fake):
+        code, so, se = _cli(["watch"])
+    assert code == 1 and "refused" in se, (code, se)
+    assert fake.out_count == 0 and "exit 75" not in se, se
+
+
+def test_watch_failed_eject_leaves_second_press_unread_and_no_further_writes():
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.button_events.extend([0x48, None, 0x48, None, KeyboardInterrupt()])
+    failed_at = []
+    post_failure_events = []
+
+    def fault(ev):
+        if failed_at:
+            post_failure_events.append(ev)
+            raise AssertionError("USB transfer attempted after eject failed")
+        if ev.get("pulse"):
+            failed_at.append(fake.out_count)
+            return _usb_error()
+
+    fake.fault = fault
+    with cli_over(fake) as opened:
+        code, so, se = _cli(["watch"])
+    assert code == 75, (code, se)
+    assert list(fake.button_events)[:2] == [0x48, None], fake.button_events
+    assert post_failure_events == [], post_failure_events
+    assert fake.out_count == failed_at[0] and fake.pulses == 0
+    assert opened[0].session.state is SessionState.FAILED
 
 
 def _eject_stuck_after_go(value=0xF9):
@@ -2305,7 +2384,7 @@ def test_eject_reports_honest_outcome_and_fails_closed_when_unconfirmed():
     fake.button_events.extend([0x48, None, 0x48, None, 0x48])
     with cli_over(fake) as opened:
         code, so, se = _cli(["watch"])
-    assert code == 1 and fake.pulses == 1 and "ejected" not in so, (code, so)
+    assert code == 75 and fake.pulses == 1 and "ejected" not in so, (code, so)
     assert len(fake.button_events) == 3, "watch kept polling after an unconfirmed eject"
 
     with tempfile.TemporaryDirectory() as td:
@@ -2931,6 +3010,12 @@ def main() -> int:
         test_cli_scan_eject_watch_refuse_unsafe_states_with_zero_writes,
         test_cli_scan_normal_path_and_failure_reporting,
         test_cli_eject_and_watch_paths,
+        test_watch_eject_failure_exit_75,
+        test_watch_interrupt_during_eject_exit_75,
+        test_watch_idle_interrupt_exit_0,
+        test_watch_absent_device_exit_1,
+        test_watch_unsafe_start_exit_1,
+        test_watch_failed_eject_leaves_second_press_unread_and_no_further_writes,
         test_eject_reports_honest_outcome_and_fails_closed_when_unconfirmed,
         test_cli_load_and_version,
         test_interrupt_overflow_is_named_and_never_fatal,
