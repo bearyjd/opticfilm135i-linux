@@ -47,6 +47,9 @@ from .usbio import InterruptOverflowError, Of135iError, UsbIo
 
 log = logging.getLogger("of135i")
 
+#: EX_TEMPFAIL: watch stopped after an eject failure; an operator must power-cycle.
+EXIT_WATCH_EJECT_FAILED = 75
+
 #: Sanity ceiling on --overscan (mm). The real per-frame bound is the
 #: transport ceiling, checked by holder.overscan_geometry frame by frame;
 #: this only rejects absurd input early.
@@ -3360,7 +3363,16 @@ def _cmd_watch(args: argparse.Namespace) -> int:
                 elif name == "eject":
                     print("eject button pressed", flush=True)
                     if scanner.is_magazine_present():
-                        _report_eject(scanner.eject(), nothing_to_do_ok=True)
+                        try:
+                            outcome = scanner.eject()
+                        except (Exception, KeyboardInterrupt) as e:
+                            print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+                            _print_session_failure(scanner)
+                            print("eject failed: the scanner state is unknown; power-cycle it. "
+                                  "The watcher will not restart itself "
+                                  f"(exit {EXIT_WATCH_EJECT_FAILED}).", file=sys.stderr)
+                            return EXIT_WATCH_EJECT_FAILED
+                        _report_eject(outcome, nothing_to_do_ok=True)
                         sys.stdout.flush()
                     else:
                         print("magazine not detected, ignoring", flush=True)
@@ -3621,7 +3633,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="read and print status registers")
     p_status.set_defaults(func=_cmd_status)
 
-    p_watch = sub.add_parser("watch", help="poll buttons; eject on the eject button")
+    p_watch = sub.add_parser("watch", help="poll buttons; eject on the eject button",
+        epilog="Exit codes: 0 = stopped while idle; "
+               "1 = error, refused, or absent (a service manager may retry); "
+               "75 = eject failed or was interrupted mid-move "
+               "(do not restart; power-cycle the scanner). "
+               "The watcher will not restart itself.")
     p_watch.set_defaults(func=_cmd_watch)
     p_watch.add_argument("--cold-homing-rounds", type=int, choices=(1, 2, 3), default=3,
         metavar="N",
