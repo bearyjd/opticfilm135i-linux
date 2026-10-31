@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import sys
 
+from . import loadprobe
 from .device import Scanner, check_cold_homing_rounds
 from .safety import POWER_CYCLE_INSTRUCTION, SafetyError, SessionState
 from .usbio import Of135iError
@@ -128,7 +129,8 @@ it and use the full load."""
 
 
 def run(ask=input, release_only: bool = False, double_jog: bool = False,
-        next_strip: bool = False, cold_homing_rounds: int = 3) -> int:
+        next_strip: bool = False, cold_homing_rounds: int = 3,
+        probe_dir: str | None = None) -> int:
     """Run the vendor's magazine insert flow end to end; returns the
     process exit code (0 loaded, 1 failed/refused, 2 bad combination of
     modes, 130 interrupted). ``ask`` is called with the reinsert prompt
@@ -156,10 +158,24 @@ def run(ask=input, release_only: bool = False, double_jog: bool = False,
     ``cold_homing_rounds`` (1..3, default 3 = unchanged) is the opt-in
     EXPERIMENTAL Scanner.cold_homing_rounds setting for the cold start
     inside ``initialize()``; unverified on hardware. An invalid value
-    raises ValueError before the device is opened."""
+    raises ValueError before the device is opened.
+
+    ``probe_dir`` (``of135i load --probe DIR``, opt-in diagnostic) writes
+    read-only JSON register snapshots into DIR after the jog, at the stop
+    (after the reinsert prompt, before any load write) and after the load
+    -- see loadprobe.py. Reads only; the write sequence is identical with
+    and without it. Not combined with ``next_strip`` or ``double_jog``."""
     if next_strip and (release_only or double_jog):
         raise ValueError("next_strip is not combined with release_only or double_jog")
+    if probe_dir is not None and (next_strip or double_jog):
+        raise ValueError("probe_dir is not combined with next_strip or double_jog")
     check_cold_homing_rounds(cold_homing_rounds)
+    if probe_dir is not None:
+        try:
+            probe_dir = loadprobe.prepare_dir(probe_dir)
+        except OSError as e:
+            print(f"error: cannot create the probe directory: {e}", file=sys.stderr)
+            return 1
     scanner = None
     try:
         with Scanner.open() as scanner:
@@ -176,7 +192,9 @@ def run(ask=input, release_only: bool = False, double_jog: bool = False,
             scanner.initialize(prep=False)
             print("running the vendor app-start jog (feed, feed, eject)...")
             scanner.jog_magazine()       # raises StrictPollTimeoutError -> exit 1 below
-            print(f"interrupt events after the jog: {scanner.io.drain_events()}")
+            events = scanner.io.drain_events()
+            print(f"interrupt events after the jog: {events}")
+            _probe(scanner, probe_dir, "after-jog", events)
             if release_only:
                 print("magazine released (jog complete). Take the magazine out of the "
                       "slot, power-cycle the scanner, then run `of135i load` from the "
@@ -185,8 +203,10 @@ def run(ask=input, release_only: bool = False, double_jog: bool = False,
             reg32_before = scanner.io.read_reg(0x32)
             ask(REINSERT_PROMPT)
             reg32_after = scanner.io.read_reg(0x32)
-            print(f"interrupt events after the reinsert: {scanner.io.drain_events()}")
+            events = scanner.io.drain_events()
+            print(f"interrupt events after the reinsert: {events}")
             print(f"reg 0x32 before/after the reinsert: {reg32_before:#04x} / {reg32_after:#04x}")
+            _probe(scanner, probe_dir, "at-stop", events)
             if double_jog:
                 print("EXPERIMENT: running the app-start jog a second time, from the loose position...")
                 scanner.jog_magazine()
@@ -211,7 +231,9 @@ def run(ask=input, release_only: bool = False, double_jog: bool = False,
                 print(f"\n(technical cause: {type(e).__name__}: {cause})",
                       file=sys.stderr)
                 return 1
-            print(f"interrupt events after the load: {scanner.io.drain_events()}")
+            events = scanner.io.drain_events()
+            print(f"interrupt events after the load: {events}")
+            _probe(scanner, probe_dir, "after-load", events)
             print("load sequence completed (status class and loader-sensor bit matched the "
                   "capture after the feed, the traverse and a final read). This sets "
                   "the vendor's 'loaded' indication only: check by hand that the magazine "
@@ -266,6 +288,28 @@ def _run_next_strip(scanner) -> int:
           "the vendor's 'loaded' indication only: check by hand that the magazine "
           "is latched before scanning -- the sensor reports presence, not latching.")
     return 0
+
+
+def _probe(scanner, probe_dir, label: str, events) -> bool:
+    """Take one ``--probe`` snapshot (loadprobe.py); True if a file was
+    written. Reads only, through the session's own io. Never raises for
+    a failed snapshot (the load goes on) and takes none once the session
+    is refused or failed."""
+    if probe_dir is None:
+        return False
+    if scanner.session.state in (SessionState.REFUSED, SessionState.FAILED):
+        print(f"probe: no '{label}' snapshot -- the session is "
+              f"{scanner.session.state.value}", file=sys.stderr)
+        return False
+    try:
+        path = loadprobe.write_snapshot(
+            probe_dir, label, loadprobe.collect_snapshot(scanner.io, label, events))
+    except Exception as e:
+        print(f"probe: the '{label}' snapshot failed ({type(e).__name__}: {e}); "
+              "the load continues", file=sys.stderr)
+        return False
+    print(f"probe: wrote {path}")
+    return True
 
 
 def _report(scanner) -> None:

@@ -143,9 +143,11 @@ def _collect_usb(dev) -> dict:
     return info
 
 
-def _collect_regs(io) -> dict:
+def _collect_regs(io, regs=None) -> dict:
+    """Read each register of ``regs`` (default: known_read_regs(), the
+    doctor's set); a failed read is recorded, not raised."""
     out: dict = {}
-    for reg in known_read_regs():
+    for reg in (known_read_regs() if regs is None else regs):
         try:
             val = io.read_reg(reg) if reg <= 0xFF else io.read_ext_reg(reg)
             out[f"0x{reg:02x}"] = val
