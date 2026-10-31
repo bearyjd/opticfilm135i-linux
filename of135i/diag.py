@@ -143,14 +143,36 @@ def _collect_usb(dev) -> dict:
     return info
 
 
-def _collect_regs(io) -> dict:
+def _collect_regs(io, regs=None, *, max_consecutive_errors=None,
+                  deadline=None, clock=None, aborted=None) -> dict:
+    """Read each register of ``regs`` (default: known_read_regs(), the
+    doctor's set); a failed read is recorded, not raised.
+
+    Doctor passes none of the bounds. The load probe passes
+    ``max_consecutive_errors`` (stop after that many failed reads in a
+    row), ``deadline`` (a ``clock()`` value after which no further read
+    starts) and ``aborted`` (a list that receives the reason when a bound
+    stops the loop; the registers read so far are still returned)."""
     out: dict = {}
-    for reg in known_read_regs():
+    run = 0
+    for reg in (known_read_regs() if regs is None else regs):
+        if deadline is not None and clock() >= deadline:
+            if aborted is not None:
+                aborted.append("aborted: time budget exhausted before "
+                               f"reg 0x{reg:02x}")
+            break
         try:
             val = io.read_reg(reg) if reg <= 0xFF else io.read_ext_reg(reg)
             out[f"0x{reg:02x}"] = val
+            run = 0
         except Exception as e:
             out[f"0x{reg:02x}"] = {"error": str(e)}
+            run += 1
+            if max_consecutive_errors is not None and run >= max_consecutive_errors:
+                if aborted is not None:
+                    aborted.append(f"aborted: {run} consecutive read errors, "
+                                   f"last at reg 0x{reg:02x}")
+                break
     return out
 
 

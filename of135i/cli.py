@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
+import json
 import logging
 import os
 import re
@@ -1650,9 +1651,37 @@ def _cmd_load(args: argparse.Namespace) -> int:
     if args.next_strip and (args.release or args.double_jog):
         print("error: --next-strip excludes --release and --double-jog", file=sys.stderr)
         return 2
+    if args.probe and (args.next_strip or args.double_jog):
+        print("error: --probe excludes --next-strip and --double-jog", file=sys.stderr)
+        return 2
     return loadflow.run(ask=input, release_only=args.release, double_jog=args.double_jog,
                         next_strip=args.next_strip,
-                        cold_homing_rounds=args.cold_homing_rounds)
+                        cold_homing_rounds=args.cold_homing_rounds,
+                        probe_dir=args.probe)
+
+
+def _cmd_probe_diff(args: argparse.Namespace) -> int:
+    """Offline: print the register differences between two `load --probe`
+    snapshots. Opens no device."""
+    from . import loadprobe
+    snaps = []
+    for path in (args.a, args.b):
+        try:
+            with open(path) as f:
+                snap = json.load(f)
+            if not isinstance(snap, dict):
+                raise ValueError("not a snapshot object")
+            snaps.append(snap)
+        except (OSError, ValueError) as e:
+            print(f"error: cannot read snapshot {path}: {e}", file=sys.stderr)
+            return 1
+    try:
+        lines = loadprobe.probe_diff(snaps[0], snaps[1], ignore_written=args.ignore_written)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print("\n".join(lines) if lines else "no differences")
+    return 0
 
 
 def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
@@ -3538,7 +3567,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="only release a latched magazine (cold init + the app-start jog), then "
              "stop: the first cycle of the two-cycle exit after a power cycle with "
              "the magazine latched (docs/test-log.md Test 49)")
+    p_load.add_argument("--probe", metavar="DIR", default=None,
+        help="diagnostic, read-only: write JSON register snapshots (status word, reg "
+             "0x01, the registers `doctor` reads, loader-sensor bit, the interrupt events "
+             "the flow already read) into DIR after the jog, at the stop and after the "
+             "load (--release takes only the after-jog one). Stalled reads stop a "
+             "snapshot early (3 errors in a row or 2 s) without touching the load. "
+             "Never alters the load; excludes --next-strip and --double-jog")
     p_load.set_defaults(func=_cmd_load)
+
     p_load.add_argument("--double-jog", action="store_true",
         help="EXPERIMENT (docs/test-log.md Test 49 exit, unverified): after the first "
              "jog and reinsert, run the app-start jog a second time from the loose "
@@ -3549,6 +3586,16 @@ def build_parser() -> argparse.ArgumentParser:
              "reinsert prompt; the magazine must already be pushed in to the stop with "
              "the new strip. Refused on a cold (power-cycled) scanner. Hardware-"
              "verified once (docs/test-log.md Test 89)")
+
+    p_pdiff = sub.add_parser("probe-diff",
+        help="offline: show register differences between two `load --probe` snapshots")
+    p_pdiff.add_argument("a", metavar="A.json")
+    p_pdiff.add_argument("b", metavar="B.json")
+    p_pdiff.add_argument("--ignore-written", action="store_true",
+        help="hide registers set by the driver's static write tables, to show "
+             "candidate hardware inputs (incomplete: writes inline in device.py are not "
+             "covered, so remaining registers may still be driver-written)")
+    p_pdiff.set_defaults(func=_cmd_probe_diff)
 
     p_version = sub.add_parser("version", help="print the driver version and git revision")
     p_version.set_defaults(func=_cmd_version)
