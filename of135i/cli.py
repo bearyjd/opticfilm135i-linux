@@ -1675,7 +1675,11 @@ def _cmd_probe_diff(args: argparse.Namespace) -> int:
         except (OSError, ValueError) as e:
             print(f"error: cannot read snapshot {path}: {e}", file=sys.stderr)
             return 1
-    lines = loadprobe.probe_diff(snaps[0], snaps[1], ignore_written=args.ignore_written)
+    try:
+        lines = loadprobe.probe_diff(snaps[0], snaps[1], ignore_written=args.ignore_written)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     print("\n".join(lines) if lines else "no differences")
     return 0
 
@@ -3565,18 +3569,13 @@ def build_parser() -> argparse.ArgumentParser:
              "the magazine latched (docs/test-log.md Test 49)")
     p_load.add_argument("--probe", metavar="DIR", default=None,
         help="diagnostic, read-only: write JSON register snapshots (status word, reg "
-             "0x01, regs 0x00-0x120, loader-sensor bit, the interrupt events the flow "
-             "already read) into DIR after the jog, at the stop and after the load. "
+             "0x01, the registers `doctor` reads, loader-sensor bit, the interrupt events "
+             "the flow already read) into DIR after the jog, at the stop and after the "
+             "load (--release takes only the after-jog one). Stalled reads stop a "
+             "snapshot early (3 errors in a row or 2 s) without touching the load. "
              "Never alters the load; excludes --next-strip and --double-jog")
     p_load.set_defaults(func=_cmd_load)
 
-    p_pdiff = sub.add_parser("probe-diff",
-        help="offline: show register differences between two `load --probe` snapshots")
-    p_pdiff.add_argument("a", metavar="A.json")
-    p_pdiff.add_argument("b", metavar="B.json")
-    p_pdiff.add_argument("--ignore-written", action="store_true",
-        help="hide registers the driver's own write tables set (shows candidate hardware inputs)")
-    p_pdiff.set_defaults(func=_cmd_probe_diff)
     p_load.add_argument("--double-jog", action="store_true",
         help="EXPERIMENT (docs/test-log.md Test 49 exit, unverified): after the first "
              "jog and reinsert, run the app-start jog a second time from the loose "
@@ -3587,6 +3586,16 @@ def build_parser() -> argparse.ArgumentParser:
              "reinsert prompt; the magazine must already be pushed in to the stop with "
              "the new strip. Refused on a cold (power-cycled) scanner. Hardware-"
              "verified once (docs/test-log.md Test 89)")
+
+    p_pdiff = sub.add_parser("probe-diff",
+        help="offline: show register differences between two `load --probe` snapshots")
+    p_pdiff.add_argument("a", metavar="A.json")
+    p_pdiff.add_argument("b", metavar="B.json")
+    p_pdiff.add_argument("--ignore-written", action="store_true",
+        help="hide registers set by the driver's static write tables, to show "
+             "candidate hardware inputs (incomplete: writes inline in device.py are not "
+             "covered, so remaining registers may still be driver-written)")
+    p_pdiff.set_defaults(func=_cmd_probe_diff)
 
     p_version = sub.add_parser("version", help="print the driver version and git revision")
     p_version.set_defaults(func=_cmd_version)

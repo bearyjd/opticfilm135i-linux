@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from test_safety import (FakeUsbDevice, SessionState, _cli, cli_over,  # noqa: E402
                          patched, quiet, vendor_like_load_status)
 
-from of135i import cli, loadflow, loadprobe, safety  # noqa: E402
+from of135i import cli, diag, loadflow, loadprobe, safety  # noqa: E402
 
 # sha256 of repr(fake.wire_log) / repr(fake.out_log) for the default
 # `loadflow.run()` below, recorded from the driver BEFORE --probe existed.
@@ -94,7 +94,8 @@ def test_three_snapshots_in_order_with_expected_content(tmp_path):
         for key in ("timestamp_utc", "status_word", "reg01", "regs", "magazine_present",
                     "interrupt_events_seen_by_flow"):
             assert key in s, (name, key)
-        assert set(s["regs"]) == {f"0x{r:02x}" for r in range(0x121)}
+        assert set(s["regs"]) == {f"0x{r:02x}" for r in diag.known_read_regs()}
+        assert "regs_aborted" not in s
         assert s["reg01"] == "0x22"
         assert s["status_word"].startswith("0x")
         assert isinstance(s["magazine_present"], bool)
@@ -191,6 +192,7 @@ def test_failing_register_reads_are_recorded_and_the_load_still_succeeds(tmp_pat
     d = tmp_path / "p"
     assert _run(fake, d) == 0
     assert _writes(fake) == _writes(base)
+    assert len(_snaps(d)) == 3
     for _, s in _snaps(d):
         assert "injected read failure" in s["regs"]["0x10"]["error"]
         assert "injected ext read failure" in s["regs"]["0x120"]["error"]
@@ -347,3 +349,233 @@ def test_probe_diff_bad_input_exits_nonzero(tmp_path):
     assert code != 0 and err
     code, _o, err = _cli(["probe-diff", str(tmp_path / "missing.json"), str(bad)])
     assert code != 0 and err
+
+
+# ===================================================== review follow-ups
+
+
+def _probing(fake):
+    """Wrap loadprobe.collect_snapshot so the fake knows when a snapshot
+    runs (``fake.probing``); returns the patch context."""
+    fake.probing = False
+    real = loadprobe.collect_snapshot
+
+    def spy(io, label, events, **kw):
+        fake.probing = True
+        try:
+            return real(io, label, events, **kw)
+        finally:
+            fake.probing = False
+    return patched(loadprobe, "collect_snapshot", spy)
+
+
+def test_probe_register_set_is_exactly_the_doctors():
+    assert tuple(loadprobe.PROBE_REGS) == diag.known_read_regs()
+    assert 0x00 not in loadprobe.PROBE_REGS and len(loadprobe.PROBE_REGS) == 288
+
+
+def test_every_probe_read_is_a_register_the_doctor_reads(tmp_path):
+    fake = _fake()
+    assert _run(fake, tmp_path / "p") == 0
+    # Reg 0x00 is never read by a probe (the flow itself never reads it).
+    assert not any(e["t"] == "cr" and e["br"] == 0x04 and e["wv"] == 0x008E and e["wi"] >> 8 == 0x00
+                   for e in fake.wire_log)
+
+
+def test_three_consecutive_read_errors_abort_the_register_loop(tmp_path):
+    base = _fake()
+    assert _run(base) == 0
+    fake = _fake()
+    fake.reads_in_probe = 0
+
+    def fault(ev):
+        if getattr(fake, "probing", False) and ev["kind"] == "ctrl_in" and ev["wv"] == 0x008E \
+                and (ev["wi"] >> 8) >= 0x10:
+            fake.reads_in_probe += 1
+            return RuntimeError("stalled")
+        return None
+    fake.fault = fault
+    d = tmp_path / "p"
+    with _probing(fake):
+        assert _run(fake, d) == 0
+    assert _writes(fake) == _writes(base)
+    assert len(_snaps(d)) == 3
+    for _, s in _snaps(d):
+        assert s["regs_aborted"].startswith("aborted: ") and "3 consecutive" in s["regs_aborted"]
+        assert isinstance(s["regs"]["0x0f"], int)           # partial data kept
+        assert [k for k, v in s["regs"].items() if isinstance(v, dict)] == ["0x10", "0x11", "0x12"]
+        assert "0x13" not in s["regs"]
+    assert fake.reads_in_probe == 9                         # 3 per snapshot, then stop
+
+
+def test_isolated_read_errors_do_not_abort(tmp_path):
+    fake = _fake()
+    bad = {0x10, 0x12, 0x14}                                # never 3 in a row
+
+    def fault(ev):
+        if getattr(fake, "probing", False) and ev["kind"] == "ctrl_in" and ev["wv"] == 0x008E \
+                and (ev["wi"] >> 8) in bad:
+            return RuntimeError("one-off")
+        return None
+    fake.fault = fault
+    d = tmp_path / "p"
+    with _probing(fake):
+        assert _run(fake, d) == 0
+    assert len(_snaps(d)) == 3
+    for _, s in _snaps(d):
+        assert "regs_aborted" not in s
+        assert set(s["regs"]) == {f"0x{r:02x}" for r in diag.known_read_regs()}
+        assert {k for k, v in s["regs"].items() if isinstance(v, dict)} == {"0x10", "0x12", "0x14"}
+
+
+def test_time_budget_aborts_the_register_loop(tmp_path, monkeypatch):
+    base = _fake()
+    assert _run(base) == 0
+    fake = _fake()
+    tick = {"t": 0.0}
+
+    def clock():
+        tick["t"] += 0.5            # every check costs half a second
+        return tick["t"]
+    monkeypatch.setattr(loadprobe, "_clock", clock)
+    d = tmp_path / "p"
+    assert _run(fake, d) == 0
+    assert _writes(fake) == _writes(base)
+    assert len(_snaps(d)) == 3
+    for _, s in _snaps(d):
+        assert "time budget" in s["regs_aborted"] and s["regs_aborted"].startswith("aborted: ")
+        assert 0 < len(s["regs"]) < 288
+    assert loadprobe.SNAPSHOT_BUDGET_S == 2.0
+
+
+def test_every_probe_read_failing_still_completes_the_snapshot_and_the_load(tmp_path):
+    """Kills a `guarded` wrapper narrowed to some exception subclass."""
+    base = _fake()
+    assert _run(base) == 0
+    fake = _fake()
+
+    def fault(ev):
+        if getattr(fake, "probing", False) and ev["kind"] == "ctrl_in":
+            return KeyError("odd failure")
+        return None
+    fake.fault = fault
+    d = tmp_path / "p"
+    with _probing(fake):
+        assert _run(fake, d) == 0
+    assert _writes(fake) == _writes(base)
+    assert (fake.pulses, fake.out_count) == (base.pulses, base.out_count)
+    assert len(_snaps(d)) == 3
+    for _, s in _snaps(d):
+        assert "error" in s["status_word"] and "error" in s["reg01"]
+        assert "error" in s["magazine_present"]
+        assert s["regs_aborted"].startswith("aborted: ")
+
+
+def _ep83_reads(fake):
+    log = []
+    orig = fake.read
+
+    def read(endpoint, *a, **k):
+        if endpoint == 0x83:
+            log.append((len(fake.wire_log), len(fake.button_events)))
+        return orig(endpoint, *a, **k)
+    fake.read = read
+    return log
+
+
+def test_probe_never_reads_the_interrupt_endpoint_itself(tmp_path):
+    def run(probe):
+        fake = _fake()
+        fake.button_events.extend([0x48, None, 0x04, None, 0x20])
+        log = _ep83_reads(fake)
+        assert _run(fake, (tmp_path / "p") if probe else None) == 0
+        return len(log), [e for e in log], len(fake.button_events)
+    n0, _l0, left0 = run(False)
+    n1, _l1, left1 = run(True)
+    assert (n1, left1) == (n0, left0) and n0 > 0
+
+
+def test_run_itself_rejects_probe_with_next_strip_or_double_jog(tmp_path):
+    for kw in ({"next_strip": True}, {"double_jog": True}):
+        with pytest.raises(ValueError):
+            loadflow.run(ask=lambda p: "", probe_dir=str(tmp_path / "x"), **kw)
+    assert not (tmp_path / "x").exists()
+
+
+# ----------------------------------------------------- files: atomic, dirs
+
+
+def test_interrupted_write_leaves_no_partial_file(tmp_path, monkeypatch):
+    d = loadprobe.prepare_dir(str(tmp_path / "p"))
+
+    def half_dump(obj, f, **kw):
+        f.write('{"partial": ')
+        raise OSError("disk went away")
+    monkeypatch.setattr(loadprobe.json, "dump", half_dump)
+    with pytest.raises(OSError):
+        loadprobe.write_snapshot(d, "at-stop", {"a": 1})
+    assert os.listdir(d) == []
+
+
+def test_prepare_dir_refuses_a_symlink(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    with pytest.raises(OSError, match="symlink"):
+        loadprobe.prepare_dir(str(link))
+    assert _run_rc_with_dir(link) == 1
+
+
+def _run_rc_with_dir(d):
+    fake = _fake()
+    rc = _run(fake, d)
+    assert fake.out_count == 0 and fake.in_count == 0       # refused before the device
+    return rc
+
+
+def test_prepare_dir_refuses_a_wide_existing_dir_and_accepts_0700(tmp_path):
+    wide = tmp_path / "wide"
+    wide.mkdir()
+    os.chmod(wide, 0o755)
+    with pytest.raises(OSError, match="0700"):
+        loadprobe.prepare_dir(str(wide))
+    assert stat.S_IMODE(os.stat(wide).st_mode) == 0o755      # left as found
+    ok = tmp_path / "ok"
+    ok.mkdir(mode=0o700)
+    assert loadprobe.prepare_dir(str(ok)) == str(ok)
+
+
+def test_prepare_dir_creates_parents_0700(tmp_path):
+    old = os.umask(0)
+    try:
+        loadprobe.prepare_dir(str(tmp_path / "a" / "b" / "p"))
+        for sub in ("a", "a/b", "a/b/p"):
+            assert stat.S_IMODE(os.stat(tmp_path / sub).st_mode) == 0o700
+    finally:
+        os.umask(old)
+
+
+# --------------------------------------------------------- probe-diff input
+
+
+@pytest.mark.parametrize("regs", [[1, 2], "nope", {"zz": 1}])
+def test_probe_diff_malformed_regs_report_a_clear_message(tmp_path, regs):
+    good = _snap_file(tmp_path, "a.json", {"0x10": 1})
+    bad = _snap_file(tmp_path, "b.json", regs)
+    code, _o, err = _cli(["probe-diff", good, bad])
+    assert code == 1 and err.startswith("error:") and "Traceback" not in err
+
+
+def test_help_wording_is_honest():
+    with pytest.raises(SystemExit):
+        with quiet():
+            cli.main(["probe-diff", "--help"])
+    from test_safety import _STDOUT
+    h = " ".join(_STDOUT.getvalue().split())
+    assert "incomplete" in h and "inline in device.py" in h
+    with pytest.raises(SystemExit):
+        with quiet():
+            cli.main(["load", "--help"])
+    h = " ".join(_STDOUT.getvalue().split())
+    assert "--release" in h and "after-jog" in h
