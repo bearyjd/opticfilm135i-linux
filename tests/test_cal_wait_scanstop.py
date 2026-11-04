@@ -1,6 +1,6 @@
 """Default-on stop gate after a calibration SCAN-clear (Scanner.cal_wait_scanstop).
 
-Motor-adjacent; default "enforce" (hardware evidence pending), "off" is the
+Motor-adjacent; fork production default "enforce", "off" is the
 explicit escape hatch (it delays the next
 calibration execute pulse). In hardware logs, calibration reads that
 returned stale data were re-armed a few milliseconds after the previous
@@ -30,11 +30,15 @@ All status values are synthetic. Pure offline logic: no USB, no scanner.
 from __future__ import annotations
 
 import os
+import types
 import sys
 import time
 from contextlib import contextmanager
 
-import pytest
+try:
+    import pytest as _pytest
+except ImportError:
+    _pytest = None
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -48,6 +52,43 @@ from of135i.device import Scanner  # noqa: E402
 
 FLOOR = device.NONSTRICT_POLL_FLOOR_S
 R100, R101 = 0x0022, 0x0122
+
+
+def parametrize(argnames, values, ids=None):
+    """The pytest parametrize mark when pytest is present, and always a
+    ``_cases`` list on the function for the plain runner. Stacks."""
+    names = [n.strip() for n in argnames.split(",")]
+
+    def deco(fn):
+        cases = list(getattr(fn, "_cases", [{}]))
+        new = []
+        for i, v in enumerate(values):
+            vals = tuple(v) if len(names) > 1 else (v,)
+            label = ids[i] if ids else "-".join(str(x) for x in vals)
+            for c in cases:
+                d = dict(c)
+                d.update(zip(names, vals))
+                d["_id"] = (c.get("_id", "") + "/" + label).strip("/")
+                new.append(d)
+        fn._cases = new
+        if _pytest is not None:
+            fn = _pytest.mark.parametrize(argnames, values, ids=ids)(fn)
+        return fn
+    return deco
+
+
+@contextmanager
+def raises(exc_types):
+    """Stand-in for the pytest context manager of the same name: yields
+    an object whose ``value`` is the caught exception; fails if nothing
+    was raised."""
+    info = types.SimpleNamespace(value=None)
+    try:
+        yield info
+    except exc_types as e:
+        info.value = e
+        return
+    raise AssertionError(f"expected {exc_types} to be raised")
 
 
 @contextmanager
@@ -225,14 +266,14 @@ def test_row4_shading_upload_only_after_engine_stopped():
     assert w[-1] == ("out", "cal_shading_upload")
 
 
-@pytest.mark.parametrize("bad", [b"\xf0\x00", b"\xf0", b"\xf0\x55\x00"],
+@parametrize("bad", [b"\xf0\x00", b"\xf0", b"\xf0\x55\x00"],
                          ids=["bad-ack", "short", "long"])
 def test_row6_malformed_data_enable_reply_is_not_clear(bad):
     fake, s, exc = _run("cal_dark_a", [bad], [0xDC])
     _assert_gate_refused(fake, s, exc, "cal_dark_a")
 
 
-@pytest.mark.parametrize("bad", [b"\xdc\x00", b"\xdc"], ids=["bad-ack", "short"])
+@parametrize("bad", [b"\xdc\x00", b"\xdc"], ids=["bad-ack", "short"])
 def test_row6_malformed_motor_enable_reply_is_not_clear(bad):
     fake, s, exc = _run("cal_dark_a", [0xF0], [bad])
     _assert_gate_refused(fake, s, exc, "cal_dark_a")
@@ -255,7 +296,7 @@ def test_both_waits_share_one_deadline():
     assert any(wi == R101 for _, wi, *_ in ins), "0x101 must be polled once 0x100 cleared"
 
 
-@pytest.mark.parametrize("slow", [R100, R101], ids=["reg100", "reg101"])
+@parametrize("slow", [R100, R101], ids=["reg100", "reg101"])
 def test_a_clear_reply_arriving_after_the_deadline_does_not_count(slow):
     # One gate read (of ``slow``) takes 0.4 s and returns "clear" past the
     # floor: that reply must not authorise the next write.
@@ -281,7 +322,7 @@ class _Stall(Exception):
     pass
 
 
-@pytest.mark.parametrize("late", [True, False])
+@parametrize("late", [True, False])
 def test_a_failed_gate_read_is_refused_or_propagated(late):
     def hook(fake, wi):
         if len([e for e in fake.window if e[0] == "in"]) >= 2:
@@ -289,7 +330,7 @@ def test_a_failed_gate_read_is_refused_or_propagated(late):
                 fake.clock["t"] += 1.0          # the read timed out at the deadline
             raise _Stall("read failed")
     fake, s, exc = None, None, None
-    with pytest.raises((_Stall, safety.CalibrationError)) as ei:
+    with raises((_Stall, safety.CalibrationError)) as ei:
         with sim_time(0.01) as clock:
             fake = GateFake("cal_dark_a", [0xF0], [0xDC], clock=clock, read_hook=hook)
             s = make_scanner(fake)
@@ -342,8 +383,8 @@ def test_shading_verify_clear_with_other_bits_set_arms_the_gate():
     assert _ins(fake.windows[0])[-2:] == [(R100, "f055"), (R101, "dc55")]
 
 
-@pytest.mark.parametrize("ir", [False, True], ids=["plain", "dual"])
-@pytest.mark.parametrize("phase", sorted(device.CAL_ACQUISITION_PHASES))
+@parametrize("ir", [False, True], ids=["plain", "dual"])
+@parametrize("phase", sorted(device.CAL_ACQUISITION_PHASES))
 def test_every_calibration_acquisition_is_gated(phase, ir):
     fake, s, exc = _run(phase, [0xF1], [0xDC], ir=ir)
     _assert_gate_refused(fake, s, exc, phase)
@@ -382,7 +423,7 @@ def _ops_run(phase, mode, last=None):
     return fake, exc
 
 
-@pytest.mark.parametrize("phase", ["scan", "position", "prep", None])
+@parametrize("phase", ["scan", "position", "prep", "cal_rewrite", None])
 def test_gate_not_applied_outside_calibration(phase):
     fake, exc = _ops_run(phase, "enforce")
     assert exc is None
@@ -455,9 +496,28 @@ def _is_status_read(e):
     return e["t"] == "cr" and e["wv"] == 0x018E and e["wi"] in (R100, R101)
 
 
-def test_enforce_on_an_idle_engine_adds_only_status_reads():
-    f_base, _ = _plain("off", scripted=False)
-    f_enf, s = _plain("enforce", scripted=False)
+def _frame1(mode, *, ir=False, dpi=3600, scripted=False):
+    exc = None
+    with sim_time(0.01) as clock:
+        if scripted:
+            fake = GateFake("cal_dark_a", [0xF1], [0xDD], clock=clock)
+        else:
+            fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
+        s = make_scanner(fake)
+        if scripted:
+            fake.scanner = s
+        if mode is not None:
+            s.cal_wait_scanstop = mode
+        s.initialize(ir=ir)
+        s.scan(frame=1, ir=ir, dpi=dpi)
+    return fake, s
+
+
+@parametrize("ir,dpi", [(False, 3600), (False, 600), (True, 3600)],
+                         ids=["plain3600", "dual600", "ir3600"])
+def test_enforce_on_an_idle_engine_adds_only_status_reads(ir, dpi):
+    f_base, _ = _frame1("off", ir=ir, dpi=dpi)
+    f_enf, s = _frame1("enforce", ir=ir, dpi=dpi)
     strip = [e for e in f_enf.wire_log if not _is_status_read(e)]
     assert strip == [e for e in f_base.wire_log if not _is_status_read(e)]
     extra = (sum(map(_is_status_read, f_enf.wire_log))
@@ -467,7 +527,9 @@ def test_enforce_on_an_idle_engine_adds_only_status_reads():
     assert extra == 2 * len(waits)               # one read of each register
     assert all(w["outcome"] == "clear" and w["reads_100"] == 1 and w["reads_101"] == 1
                for w in waits)
-    assert [w["phase"] for w in waits][:2] == ["cal_dark_a", "cal_dark_b"]
+    assert [w["phase"] for w in waits] == [
+        "cal_dark_a", "cal_dark_b", "cal_white", "cal_gain_check_a",
+        "cal_gain_check_b", "cal_shading_measure", "cal_shading_verify"]
 
 
 def test_diag_records_the_wait():
@@ -492,30 +554,31 @@ def test_default_and_validation():
     s.cal_wait_scanstop = "enforce"
     assert s.cal_wait_scanstop == "enforce"
     for bad in ("observe", "on", True, None, ""):
-        with pytest.raises(ValueError):
+        with raises(ValueError):
             s.cal_wait_scanstop = bad
 
 
-@pytest.mark.parametrize("cmd", [["digitize", "-o", "x"], ["scan", "--frame", "1", "-o", "f.tiff"]])
+@parametrize("cmd", [["digitize", "-o", "x"], ["scan", "--frame", "1", "-o", "f.tiff"]])
 def test_parsers_default_enforce_and_accept_off(cmd):
     parser = cli.build_parser()
     assert parser.parse_args(cmd).cal_wait_scanstop == "enforce"
     assert parser.parse_args(cmd + ["--cal-wait-scanstop", "off"]).cal_wait_scanstop == "off"
     assert parser.parse_args(cmd + ["--cal-wait-scanstop", "enforce"]).cal_wait_scanstop == "enforce"
-    with pytest.raises(SystemExit):
+    with raises(SystemExit):
         parser.parse_args(cmd + ["--cal-wait-scanstop", "observe"])
 
 
-def test_help_text_says_default_enforce_and_pending():
+def test_help_text_says_fork_default_enforce_and_upstream_off():
     parser = cli.build_parser()
     for sub in ("scan", "digitize"):
         sp = parser._subparsers._group_actions[0].choices[sub]
         act = next(a for a in sp._actions if "--cal-wait-scanstop" in a.option_strings)
         h = act.help.lower()
-        assert "pending" in h and "default: enforce" in h and "'off'" in h
+        assert "fork production default" in h and "upstream defaults off" in h
+        assert "default: enforce" in h and "'off'" in h
 
 
-@pytest.mark.parametrize("argv_mode,expected", [(None, "enforce"), ("off", "off"),
+@parametrize("argv_mode,expected", [(None, "enforce"), ("off", "off"),
                                                 ("enforce", "enforce")])
 def test_scan_cli_flag_reaches_the_scanner(tmp_path, argv_mode, expected):
     fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
@@ -531,7 +594,7 @@ def test_scan_cli_flag_reaches_the_scanner(tmp_path, argv_mode, expected):
     assert code == 0, err
 
 
-@pytest.mark.parametrize("extra,expected", [([], "enforce"),
+@parametrize("extra,expected", [([], "enforce"),
                                             (["--cal-wait-scanstop", "off"], "off"),
                                             (["--cal-wait-scanstop", "enforce"], "enforce")])
 def test_digitize_sets_the_mode_on_its_scanner(tmp_path, extra, expected):
@@ -598,10 +661,11 @@ def test_cli_scan_default_is_off_sequence_plus_status_reads_only(tmp_path):
 
 
 def test_cli_digitize_default_is_off_sequence_plus_status_reads_only(tmp_path):
-    # On the idle fake the roll ends with exit 4 (aperture coverage not
-    # verified) whatever the gate does; the gate must not change that or
-    # refuse anything.
-    base = ["digitize", "-o", str(tmp_path / "roll"), "--assume-loaded"]
+    # Keep the default IR path, with one small frame and no host-side dust
+    # cleanup: this regression compares the gate's USB traffic. Aperture
+    # coverage on the synthetic fake must give the same exit either way.
+    base = ["digitize", "-o", str(tmp_path / "roll"), "--assume-loaded",
+            "--dpi", "600", "--frames", "1", "--no-clean"]
     on, s_on, code_on, err_on = _cli_run(base, tmp_path)
     off, s_off, code_off, _ = _cli_run(base + ["--cal-wait-scanstop", "off"], tmp_path)
     assert code_on == code_off
@@ -632,3 +696,108 @@ def test_refusal_message_says_enforced_by_default_and_how_to_disable():
     assert "enforced by default" in msg and "`--cal-wait-scanstop off`" in msg
     assert "Nothing further was sent" in msg
     assert safety.NO_RECOVERY_ATTEMPTED in msg and safety.POWER_CYCLE_INSTRUCTION in msg
+
+
+def test_shading_verify_gate_runs_before_the_re_upload_not_before_position():
+    # cal_shading_verify's SCAN-clear is followed, inside the phase, by the
+    # re-upload of the second shading table: the gate fires before that
+    # descriptor. Nothing arms after it, so POSITION and the image pass
+    # (the _exec_ops NOTE about never waiting during the pass) are never
+    # delayed.
+    fake, s, exc = _run("cal_shading_verify", [0xF1, 0xF1, 0xF0], [0xDC])
+    assert exc is None, exc
+    assert len(fake.windows) == 1
+    assert _ins(fake.windows[0])[-2:] == [(R100, "f055"), (R101, "dc55")]
+    assert fake.windows[0][-1] == ("out", "cal_shading_verify")
+    phases = [w["phase"] for w in s.last_diag["cal_scanstop_waits"]]
+    assert phases[-1] == "cal_shading_verify"
+    assert not any(p in ("position", "scan", "park", "cal_shading_upload") for p in phases)
+
+
+def test_cached_calibration_frame_is_not_gated():
+    # Frame 2 of a plain-3600 session reuses the cached calibration
+    # (cal_rewrite): no acquisition, no gate, an empty wait list.
+    with sim_time(0.01):
+        fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
+        s = make_scanner(fake)
+        s.cal_wait_scanstop = "enforce"
+        s.initialize()
+        s.scan(frame=1)
+        assert len(s.last_diag["cal_scanstop_waits"]) == 7
+        s.initialize()
+        s.scan(frame=2)
+    assert s.last_diag["calibration"] == "cached"
+    assert s.last_diag["cal_scanstop_waits"] == []
+
+
+def test_sweep_default_gate_refuses_before_any_further_write():
+    with sim_time(0.01) as clock:
+        fake = GateFake("cal_dark_a", [0xF1], [0xDC], clock=clock)
+        s = make_scanner(fake)
+        fake.scanner = s
+        s.initialize(ir=True)
+        with raises(safety.CalibrationError) as caught:
+            s.sweep(1, 2, dpi=600, sink=lambda _chunk: None)
+    assert s.cal_wait_scanstop == "enforce"
+    assert fake.armed and all(k == "in" for k, *_ in fake.window)
+    _assert_failed_and_frozen(fake, s, caught.value, operation="sweep", phase_prefix="cal_")
+
+
+def test_sweep_default_records_fresh_gate_and_integrity_diagnostics():
+    with sim_time(0.01):
+        fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
+        s = make_scanner(fake)
+        s._cal_acquisitions = [{"phase": "old-acquisition"}]
+        s._cal_bufempty_waits = [{"phase": "old-wait"}]
+        s.initialize(ir=True)
+        s.sweep(1, 2, dpi=600, sink=lambda _chunk: None)
+    diag = s.last_diag
+    assert s.cal_wait_scanstop == "enforce"
+    assert len(diag["cal_scanstop_waits"]) == 7
+    assert len(diag["cal_acquisitions"]) == 7
+    assert all(a["phase"] in device.CAL_ACQUISITION_PHASES for a in diag["cal_acquisitions"])
+    assert diag["cal_integrity"] == "clean"
+    assert diag["dark_b_fallback"] is None
+    assert diag["cal_bufempty_waits"] == []
+
+
+def test_sweep_position_motor_idle_failure_sends_nothing_further():
+    class RunningPositionFake(FakeUsbDevice):
+        scanner = None
+
+        def ctrl_transfer(self, bm, br, wv, wi, data_or_wLength, timeout=None):
+            if (self.scanner is not None and self.scanner.session.phase == "position"
+                    and bm == 0xC0 and wv == 0x018E and wi == R101):
+                return b"\xf5\x55"  # correct state class, motor still enabled
+            return super().ctrl_transfer(bm, br, wv, wi, data_or_wLength, timeout)
+
+    with sim_time(0.01):
+        fake = RunningPositionFake(reg01=0x22, cal_buffers=_cal_buffers())
+        s = make_scanner(fake)
+        fake.scanner = s
+        s.position_require_motor_idle = True
+        s.initialize(ir=True)
+        with raises(safety.StrictPollTimeoutError) as caught:
+            s.sweep(1, 2, dpi=600, sink=lambda _chunk: None)
+    _assert_failed_and_frozen(fake, s, caught.value, operation="sweep", phase_prefix="position")
+
+
+if __name__ == "__main__":
+    import inspect
+    import pathlib
+    import tempfile
+
+    fns = [f for n, f in sorted(globals().items())
+           if n.startswith("test_") and inspect.isfunction(f)]
+    n = 0
+    for f in fns:
+        params = inspect.signature(f).parameters
+        for case in getattr(f, "_cases", [{}]):
+            kw = {k: v for k, v in case.items() if k in params}
+            if "tmp_path" in params:
+                with tempfile.TemporaryDirectory() as d:
+                    f(tmp_path=pathlib.Path(d), **kw)
+            else:
+                f(**kw)
+            n += 1
+    print(f"{n} tests passed")

@@ -6,21 +6,15 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
-- **DRAFT: `--cal-wait-scanstop` now defaults to `enforce`** (`scan`,
-  `digitize`, `Scanner.cal_wait_scanstop`). Hardware evidence is pending and
-  this must not merge before it is complete; the default is not validated.
-  What exists so far: one unit, 5 gated runs (600 dpi x3, including the
-  arm-C and guard-fail variants, and 3600 dpi x2) with zero gate-caused
-  failures, and no gate-off comparison at 3600 dpi. Each calibration
-  SCAN-clear is now followed by status reads of registers 0x100 and 0x101
-  before the next OUT transfer, and a gate timeout fails the session
-  (`CalibrationError`, nothing further sent, power cycle). The default wire
-  sequence therefore differs from the previous one by those status reads
-  only (offline: `tests/test_cal_wait_scanstop.py`). The wire-baseline
-  digests in `tests/test_wire_baseline.py` are unchanged; they are checked
-  with the gate pinned off by `tests/conftest.py` and still hold.
-  `--cal-wait-scanstop off` restores the previous transfer sequence
-  byte-for-byte.
+- **Deliberate fork difference: calibration stop gate defaults to `enforce`.**
+  Upstream PR #46 keeps `--cal-wait-scanstop` opt-in (`off`); this fork
+  retains the owner's production choice for `scan`, `digitize` and
+  `Scanner.cal_wait_scanstop`, based on the owner's hardware A/B evidence.
+  The shared gate mechanism and upstream documentation are retained;
+  see `docs/cal-scanstop-gate.md` for evidence and limits. A timeout fails
+  closed before the next OUT transfer. Explicit `off` restores the pre-gate
+  wire sequence; offline wire baselines are pinned off, with separate
+  unpinned tests for the fork's `enforce` default.
 - **`--cal-readback-guard fail` now also refuses on calibration integrity**
   (opt-in; EXPERIMENTAL, unverified on hardware). Besides the existing
   refusal when a read-back shows no acquisition (before the bulk read),
@@ -45,19 +39,6 @@ one exists; "offline" means implemented and tested without the scanner.
   `reads`, `last_value` (last status word, hex), `engaged` (false only if
   the first read already cleared)); empty with `off`. Diagnostics only: no
   extra transfers.
-- **Opt-in `--cal-wait-scanstop {off,enforce}`** (`scan`, `digitize`;
-  `Scanner.cal_wait_scanstop`, default `off`). EXPERIMENTAL, motor-adjacent
-  and unverified on hardware. In hardware logs the stale calibration reads
-  were re-armed a few milliseconds after the previous acquisition's
-  SCAN-clear while its data-enable (register 0x100 bit 0) and motor-enable
-  (register 0x101 bit 0) bits still read set. `enforce` waits, after each
-  such SCAN-clear in a calibration acquisition phase and before the next
-  OUT transfer (including the shading upload), until both read clear in
-  well-formed (2-byte, 0x55-acknowledged) replies. Both waits share one
-  deadline, the existing 0.3 s non-strict poll floor; at the deadline the
-  scan stops with `CalibrationError` before anything further is sent. Each
-  wait is recorded in the diag (`cal_scanstop_waits`). `off` traffic is
-  byte-identical to before (wire fingerprints unchanged).
 - **Calibration integrity telemetry** (offline, default on, diagnostics
   only): each calibration acquisition records its re-arm gap after the
   previous SCAN-clear, the previous acquisition's post-clear status reads
@@ -96,6 +77,195 @@ one exists; "offline" means implemented and tested without the scanner.
   transfer path is unchanged (wire fingerprints identical).
   `tools/trace_to_compiled.py` converts a recording to the compiled trace
   format for offline comparison.
+- **Docs: the driver is no longer single-unit.** README, CONTRIBUTING and
+  the ROADMAP now say what is true as of 2026-11-03: the driver has
+  scanned on two units besides the maintainer's (a Steam Deck and a fork's
+  unit, issue #35), both of which show an intermittent calibration failure
+  this unit never has; the fix below came from one of those users. README
+  gains an Acknowledgements section. No code change.
+- **Upstream calibration stop gate, opt-in** (`scan`/`digitize --cal-wait-scanstop
+  {off,enforce}`, default `off`; `Scanner.cal_wait_scanstop`;
+  docs/cal-scanstop-gate.md). Issue #35: on a Steam Deck the residual
+  dark_b of Test 32 appears on frame 1, which Test 33's substitution
+  cannot cover. Our tables read registers 0x100/0x101 once after every
+  calibration SCAN-clear and move on; a fast host re-arms the next
+  acquisition while the engine still runs. `enforce` polls reg 0x100 bit 0
+  (data enable) and then reg 0x101 bit 0 (motor enable) clear before the
+  next OUT transfer, within the existing 0.3 s non-strict poll floor, and
+  fails closed (`CalibrationError`, power cycle) at the deadline; waits are
+  recorded in the `.diag.json` as `cal_scanstop_waits`. Ported from
+  bearyjd's fork (`feat/cal-wait-scanstop`, f462b0b) with its offline tests
+  (`tests/test_cal_wait_scanstop.py`, which also pins the default wire
+  against pre-gate digests). Hardware: Test 114 (owner's unit, 2026-11-02)
+  ran it off/on/on/off over frames 1–4 at 3600 dpi plus gated 600 dpi and
+  IR frame-1 runs: harmless (every wait ≤ 8 ms against 0.3 s) but the
+  residual dark_b did not occur in any frame, so its effect is unproven;
+  stays opt-in until the issue's reporter runs it. The SANE backend has no
+  gate.
+  Credit: the mechanism, the code and the offline tests are by bearyjd
+  (https://github.com/bearyjd); the report and the Steam Deck logs are by
+  Krustenviech (https://github.com/Krustenviech), issue #35.
+- **Sweeps longer than four apertures are refused** (`sweep.SWEEP_MAX_APERTURES_VERIFIED`,
+  checked in `digitize --sweep` before any hardware step, exit 2, and in
+  `Scanner.sweep`). Every hardware-run sweep so far covered 1–4 or 1–2;
+  after Test 112 the owner decided (2026-10-31) that a six-aperture colour
+  sweep gets its own hardware test (Test 113 plan,
+  docs/whole-strip-sweep-design.md) before it is allowed. Offline change;
+  the per-frame cycle covers 1–6 as before.
+- **Plain-3600 whole-strip sweep WITHDRAWN after Test 112** (2026-10-31,
+  `docs/test-log.md`). `digitize --sweep --no-ir` exits 2 before any
+  hardware step and `Scanner.sweep(ir=False)` raises, both naming the
+  test; black-and-white film keeps the per-frame cycle. The first (and
+  only) hardware run of the path completed its scan pass but the
+  acquisition had started ≈ 19 mm later along the film than the geometry
+  assumed, the magazine ended displaced against the slot's front edge and
+  the park stalled (power cut by the operator). The dual sweep is
+  unaffected. The code path (`holder.plain_sweep_geometry`,
+  `Scanner._sweep_plain`, `sweep.visible_profile`,
+  `find_windows(wire_per_vis=1)`, `sweep.json` `dual`/`wire_per_vis`) stays
+  in the tree for the record, unreachable from the CLI.
+- Recovery finding (vendor capture 2026-10-31, same entry): when the
+  status word shows the loader bit 0x08 clear at app start, the vendor
+  runs the LOAD traverse (mode 0x1c, 71 490 steps) BEFORE the app-start
+  jog, which re-seats the cassette; our `cold_init` jogs directly and
+  stopped fail-closed on the displaced magazine. Owner's decision: the
+  driver gets this recovery (offline from the capture, then its own
+  hardware test).
+- **Cold start re-seats a displaced cassette first** (offline, from the
+  2026-10-31 vendor capture; NOT hardware-verified, hardware test pending
+  on the owner's go). `Scanner.cold_init` now runs the LOAD flow's
+  traverse (`_cold_reseat_traverse`: mode 0x1c, 71 490 steps, loader slope
+  tables, strict completion against `load_completion_target()` under
+  `LOAD_STATUS_MASK`, 30 s budget, fail-closed) between the first
+  pre-move status read of homing round 1 and the jog, only when a magazine
+  was present at the opening status word (loader bit set, read before any
+  table is written) AND the loader bit reads clear at that pre-move read.
+  Every other cold start is byte-identical on the wire to before
+  (golden op lists, `tests/test_cold_reseat.py`). The SANE backend's
+  cold start does not have the step yet (`docs/sane-port.md`).
+- Earlier the same day (PR #42, merged, now superseded by the
+  withdrawal): the plain sweep had been implemented offline with an
+  anchoring gate limiting it to four apertures; `_scan_plain`'s
+  calibration block was extracted into `_plain_calibration` with the
+  phase sequence unchanged (kept).
+
+## v0.2.9 — 2026-10-30
+
+- Progress lines during the sweep: `scanning frame N @ <dpi> dpi (sweep pass,
+  aperture N of first–last, P%)` as the pass reaches each aperture's
+  predicted leading edge, `cutting frame N from the sweep (...)` per cut
+  (PR #37). Test 111 production confirmation, evening 1: seven colour-135
+  strips through the calling application, all exit 0, 4/4 apertures by edges,
+  device phases identical to the A/B run (`docs/test-log.md`). Every
+  production strip counts as test data from here on.
+- CLI exit code 3 when another of135i process holds the scanner lock
+  (`ScannerBusyError`), distinct from 1 (a real failure), for every
+  hardware command that goes through `_run_writing_session` or
+  `loadflow.run` (including `digitize`). The message now says "No power
+  cycle is needed: nothing was sent to the scanner", and `digitize` /
+  `digitize --sweep` print "roll N not started", write no manifest record and
+  do not consume the roll number (the old "Power-cycle before the next strip"
+  line is gone for this case). Production observation 2026-10-30: a lock
+  refusal during a next-strip load was read as a hardware failure by the
+  calling application and the operator power-cycled needlessly; nothing had
+  been sent. Offline only (no hardware evidence needed: no command stream
+  changed).
+
+## v0.2.8 — 2026-10-30
+
+- `digitize --sweep` (135, dual-light profiles): scan the whole strip in ONE
+  pass — one calibration, one positioning move, one park — into
+  `<roll>/sweep.raw` (streamed to disk chunk by chunk), then cut the frames
+  from it in software through the unchanged per-frame writer, each judged by
+  the same aperture coverage check. Aperture numbers come from the measured
+  run edges plus the holder pitch relative to the sweep's commanded start; an
+  inconsistent sweep is *unresolved* (no products, exit 4, `sweep.raw` kept).
+  `--keep-sweep` keeps the raw file after a successful roll, `--from-sweep
+  --roll N` rebuilds a roll offline from `sweep.raw` + `sweep.json`. The
+  per-frame path's command stream is unchanged (the calibration block was
+  extracted verbatim). **First hardware run Test 111 (2026-10-30, dual
+  3600 with IR, one four-frame strip): 4 of 4 apertures verified, 192 s
+  against 277 s per frame, eye-accepted by the owner.** The
+  window finder's IR profile registers the colour-line stagger as
+  `image.split_ir` does (the first run was unresolved without it and was
+  rebuilt from the kept `sweep.raw`). Other profiles and plain 3600 remain
+  unverified (docs/whole-strip-sweep-design.md).
+
+## v0.2.7 — 2026-10-28
+
+- Test 110 (2026-10-28, black-and-white 110, offline on the stored frames):
+  **no more lost or unnumbered photographs from three gaps.** A hole's
+  prediction past an aperture's end is carried to the next aperture (a
+  strip's last picture, followed by fogged film); a pass-1 strip seated
+  between the placement phases is numbered from its first whole image
+  (placement "free", provisional) instead of refused; passes without IR are
+  recognised in log intensity.
+
+- Test 109 (2026-10-28, first black-and-white 110 strip, fixed offline on
+  the stored frames): **dense black-and-white 110 is detected.** A dark run
+  between other columns must be dark at the 95th percentile too to count as
+  rail (dense pictures are as dark as the rail in the median); the hole
+  search retries with an edge threshold of 0.9 x air when 0.6 finds nothing
+  (a black-and-white clear base reads 0.78); side-band coverage decides on
+  the bands that see the longest opening (a strip tip only shortens the
+  bands it covers). Rebuild of the two stored passes: 4 of 4 delivered.
+
+- Test 108 (2026-10-28, offline on production frames): **a thin, low-contrast
+  110 photograph is no longer taken for a blank frame position.** A window
+  that reads as clear film along transport must now also be flat across
+  (`film110.BLANK_TEXTURE_MAX`); 138 of 142 stored apertures unchanged, the
+  4 changes all corrections.
+- **`digitize --film 110` scans all six apertures by default** (`--frames`
+  default `1-6`; 135 stays `1-4`). A long 110 strip (up to ~8 images, 227 mm
+  holder) reaches apertures 5-6; a short one costs nothing, the
+  stop-at-empty rule ends the run after the first empty aperture that
+  follows film. Offline test: an 8-image strip in both placements numbers
+  all eight and leaves nothing missing.
+- **110 on the plain path (`--no-ir`): coverage no longer depends on film
+  density** (offline). When the central-band verdict fails (for 110 also when
+  its opening is not the holder's length -- dense film at a bar), coverage is
+  measured on the bare air beside the strip
+  (`aperture_crop.measure_coverage_side_band`): column bands that verify
+  and show the holder's own opening length (35.92 mm ± 1.0), agreeing
+  within 0.3 mm. Manifest `coverage_source: "visible-side"`; otherwise the
+  usual refusal, reason naming both failures. 135 and dual paths unchanged
+  (docs/film-110.md §10).
+
+## v0.2.6 — 2026-10-26
+
+- Test 107 (2026-10-26, offline): **film in the white reference's light path
+  no longer clips a pass.** A 110 strip whose front end lies a little into
+  the holder's end at aperture 1 blocked the calibration's white measurement
+  over the film band (2–3 % of the clear level over ~2240 columns); the gain
+  table over-corrected those columns and visible R and IR clipped inside the
+  photographs of every frame of the pass. `calibrate.guard_white_blockage`
+  finds a wide region bounded by steep steps (20 of 389 stored calibrations,
+  all from strips in that position, none of the clean ones: their steepest
+  step is 0.87 against 0.03) and fills it from the newest clean profile of
+  the same kind (`of135i/white_reference.py`, kept current by every clean
+  calibration; `tools/white_reference_seed.py` seeds it), scaled on the clear
+  columns either side; filled real measurements are flat to ±1 % across the
+  former band. Sidecar field `white_blocked`. Owner's rule: where the strip
+  lies is never the operator's problem. Needs one hardware pass to confirm.
+
+- Test 107 (2026-10-26, first live 110 pass after b4e073b, offline fix): a
+  whole photograph lying free in aperture 3 was dropped without a file. Three
+  fixes (docs/film-110.md §4, §15.3, §15.7, §15.9): (1) **a hole is air across
+  the zone**, not one bright pixel in it — the strip's unexposed edge rim read
+  0.85–0.95 × air, rim noise made false 1.5 mm "holes" and the real hole was
+  lost in one 4.7 mm air run, so the image window landed 8 mm off (on the
+  printed border); (2) a printed-border gap extended past 9.5 mm (into a dense
+  white fence) is no longer dropped; (3) a whole image the pass's numbering
+  cannot place (off phase, between phases, off slot 2's grid) is written
+  **unnumbered** with exit 5 instead of nothing. Old vs new detector over 123
+  distinct stored real 110 frames: 119 identical or within 0.2 mm with the
+  same classification, three corrected (Test 107 apertures 2 and 3, Testigen
+  roll 3 pass 4 aperture 2 — the same failure on the same film, eye-checked),
+  one split image's start moved 0.4 mm. The next-pass text now names **which
+  photograph to move and why**, never a distance ("move image 3 (now split by
+  bar 2) whole into an aperture"); the measured placement stays in
+  `advice.next`.
+
 - **Scanned and complete images are never discarded** (owner's founding
   requirement, docs/film-110.md §15.9): when numbering cannot be established
   for a pass, its whole and near-whole images are written unnumbered

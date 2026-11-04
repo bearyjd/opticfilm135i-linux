@@ -218,6 +218,32 @@ scanner reading `0x23`, where it reports the state and the power-cycle
 advice but does nothing about it. `doctor` may diagnose an interrupted
 scanner; it must never try to fix it.
 
+## Power-cycled with the magazine present and the jog failing (Test 112)
+
+If, after a power cycle with the magazine still in the slot, the cold
+start's jog fails at feed 6690 with status word `f055` (loader bit clear),
+the cassette is displaced. Since the re-seating step (`cold_init` runs the
+LOAD traverse first when a magazine was present at the opening and the
+loader bit is clear at the first pre-move read; docs/load-analysis.md,
+"Cold start on a displaced cassette") the recovery is to run `of135i
+load` again. **Not yet hardware-verified** -- implemented offline from the
+vendor's recovery capture; its hardware test waits for the owner's go. If
+the traverse itself does not complete in 30 s the driver stops with
+nothing further written: power-cycle and do not retry blindly.
+
+## Calibration stop gate (opt-in, not hardware-verified)
+
+`--cal-wait-scanstop enforce` (docs/cal-scanstop-gate.md, issue #35)
+adds one wait condition inside calibration: after each acquisition's
+SCAN-clear it polls reg 0x100 bit 0 and then reg 0x101 bit 0 clear
+before the next OUT transfer, within the existing 0.3 s non-strict poll
+floor. Reads only; at the deadline it raises `CalibrationError` before
+any write, the session is FAILED, no recovery is sent, power cycle. It
+never arms outside the seven calibration acquisition phases, so POSITION,
+the image pass and PARK are not delayed. Default `off` is byte-identical
+on the wire (pinned by `tests/test_cal_wait_scanstop.py`). Offline
+verified only; its hardware test (Test 114) waits for the owner's go.
+
 ## Cross-process exclusion
 
 `UsbIo.open()` takes an exclusive `flock` on `/tmp/of135i-07b3-1436.lock`

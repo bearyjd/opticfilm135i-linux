@@ -158,7 +158,10 @@ def test_interrupt_events_replayed_then_timeout():
 
 
 # ------------------------------------------------------------------- guard
-def test_guard_blocks_real_usb():
+def test_guard_blocks_real_usb(tmp_path, monkeypatch):
+    # Exercise the USB refusal without contending with a live driver's lock.
+    from of135i.safety import LOCK_PATH_ENV
+    monkeypatch.setenv(LOCK_PATH_ENV, str(tmp_path / "replay-guard.lock"))
     real_find = usb.core.find
     with no_real_usb():
         with pytest.raises(AssertionError):

@@ -7,6 +7,7 @@ gives pytest also applies (the script-run suites never see conftest.py).
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 import runpy
 import sys
@@ -24,7 +25,8 @@ def main(argv: list[str]) -> int:
         print("usage: run_suite.py test_<name>", file=sys.stderr)
         return 2
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), argv[1] + ".py")
-    with gate_off():
+    with (nullcontext() if argv[1] in ("test_cal_wait_scanstop", "test_gate_pin_parity")
+          else gate_off()):
         try:
             runpy.run_path(path, run_name="__main__")
         except SystemExit as e:
