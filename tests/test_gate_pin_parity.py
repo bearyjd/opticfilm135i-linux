@@ -61,3 +61,21 @@ def test_gate_off_pins_class_and_cli_defaults_then_restores():
             assert cli.build_parser().parse_args(cmd).cal_wait_scanstop == "off"
     assert Scanner._cal_wait_scanstop == "enforce"
     assert cli.build_parser().parse_args(["digitize", "-o", "x"]).cal_wait_scanstop == "enforce"
+
+
+def test_script_runner_preserves_gate_owners_and_pins_legacy(monkeypatch):
+    import run_suite
+
+    seen = []
+
+    def run_path(path, *, run_name):
+        assert run_name == "__main__"
+        seen.append((Scanner._cal_wait_scanstop,
+                     cli.build_parser().parse_args(
+                         ["digitize", "-o", "x"]).cal_wait_scanstop))
+
+    monkeypatch.setattr(run_suite.runpy, "run_path", run_path)
+    for suite in ("test_cal_wait_scanstop", "test_gate_pin_parity", "test_safety"):
+        assert run_suite.main(["run_suite.py", suite]) == 0
+        assert Scanner._cal_wait_scanstop == "enforce"
+    assert seen == [("enforce", "enforce"), ("enforce", "enforce"), ("off", "off")]

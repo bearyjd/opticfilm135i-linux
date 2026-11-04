@@ -45,6 +45,8 @@ from . import diag, holder, image, safety, tables
 from .device import SUPPORTED_DPIS, Scanner
 from .usbio import InterruptOverflowError, Of135iError, UsbIo
 
+EXIT_BUSY = safety.EXIT_BUSY   # another of135i process holds the scanner lock
+
 log = logging.getLogger("of135i")
 
 #: EX_TEMPFAIL: watch stopped after an eject failure; an operator must power-cycle.
@@ -179,6 +181,10 @@ def _run_writing_session(body: Callable[[Scanner], int]) -> int:
         print("\ninterrupted.", file=sys.stderr)
         _print_session_failure(scanner)
         return 130
+    except safety.ScannerBusyError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        print(safety.BUSY_NO_RECOVERY_MSG, file=sys.stderr)
+        return EXIT_BUSY
     except safety.SafetyError as e:
         print(f"refused: {e}", file=sys.stderr)
         return 1
@@ -190,6 +196,15 @@ def _run_writing_session(body: Callable[[Scanner], int]) -> int:
         print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
         _print_session_failure(scanner)
         raise
+
+
+def _busy_not_started(roll) -> int:
+    """The scanner lock was held by another process: nothing was sent, no
+    manifest record is written and the roll's number is not consumed."""
+    print(f"roll {roll} not started: the scanner is busy (another of135i "
+          f"process holds the lock). {safety.BUSY_NO_RECOVERY_MSG}",
+          file=sys.stderr)
+    return EXIT_BUSY
 
 
 def _print_session_failure(scanner: Scanner | None) -> None:
@@ -612,6 +627,13 @@ class Film110State:
         self.slot = slot
         self.strips = strips
         self.anchor_mm: "float | None" = None
+        # A strip seated between the two placements' phases (pass 1, front end
+        # not seen): numbered from its first image on the A grid's numbers,
+        # with this phase instead of A's (`_film110_protocol_number`).
+        self.phase_mm: "float | None" = None
+        # (aperture, [(g0, g1) mm]): images a hole of `aperture` predicts
+        # past its end, tried in the next aperture (film110.detect carried).
+        self.carry: "tuple | None" = None
         from . import film110
         self.first_aperture = (slot - 1) * film110.SLOT_APERTURES + 1
         self.last_aperture = self.first_aperture + film110.SLOT_APERTURES - 1
@@ -801,7 +823,15 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
         state.placement_given = True
         state.placement_source = "given"
 
-    find = film110.detect(vis_crop, dpi=args.dpi, film=_holder.FILM_110)
+    ppm = args.dpi / film110.MM_PER_INCH
+    carried = []
+    if state.carry is not None and state.carry[0] == aperture - 1:
+        base = film110.global_position_mm(aperture, 0.0, args.dpi)
+        carried = [((g0 - base) * ppm, (g1 - base) * ppm) for (g0, g1) in state.carry[1]]
+    find = film110.detect(vis_crop, dpi=args.dpi, film=_holder.FILM_110, carried=carried)
+    state.carry = (aperture, [(film110.global_position_mm(aperture, l0, args.dpi),
+                               film110.global_position_mm(aperture, l1, args.dpi))
+                              for (l0, l1) in find.beyond])
     if find.empty:
         print(f"110: aperture {aperture} — empty")
         return
@@ -900,6 +930,19 @@ def _film110_process_aperture(args: argparse.Namespace, state: Film110State,
               f"image from the previous aperture")
 
 
+def _film110_protocol_number(state: "Film110State", aperture: int, line0: float,
+                             dpi: float) -> tuple:
+    """`film110.image_number` for the state's placement; a strip numbered
+    from its own first image (`state.phase_mm`, placement "free") uses that
+    phase on the same grid."""
+    from . import film110
+    if state.phase_mm is None:
+        return film110.image_number(aperture, line0, dpi, state.placement)
+    g = film110.global_position_mm(aperture, line0, dpi)
+    k = (g - state.phase_mm) / film110.FILM_110.pitch_mm
+    return round(k) + 1, (k - round(k)) * film110.FILM_110.pitch_mm
+
+
 def _film110_apply_front_shift(state: Film110State, n: int, g: float) -> int:
     """Protocol number -> frame-position number counted from the strip's
     front end (docs/film-110.md §15). Only a pass that numbers by the
@@ -947,7 +990,7 @@ def _film110_number_blank(args: argparse.Namespace, state: Film110State,
             if inferred is None:
                 return
             state.placement, state.placement_source = inferred, "inferred"
-        n, residual = film110.image_number(aperture, window[0], args.dpi, state.placement)
+        n, residual = _film110_protocol_number(state, aperture, window[0], args.dpi)
         if abs(residual) > film110.PLACEMENT_PHASE_TOLERANCE_MM or n < 1:
             return
         n = _film110_apply_front_shift(state, n, g)
@@ -957,6 +1000,48 @@ def _film110_number_blank(args: argparse.Namespace, state: Film110State,
                          "located_by": "frame"})
     parts.append(f"frame position {n} is blank (clear film between two printed "
                  f"borders): consumes a number, no file")
+
+
+def _film110_write_off_grid(args: argparse.Namespace, state: Film110State,
+                            aperture: int, it: dict, emit, why: str) -> str:
+    """A WHOLE (or near-whole) image that the pass's numbering cannot place
+    (off the placement's phase, between the two phases, off slot 2's grid)
+    is still a scanned, complete photograph: it is written UNNUMBERED as
+    p<k>-a<aperture>-<i>.tiff (+ -ir), recorded in `state.unidentified`
+    (number null, identified false -- never a reference, never changes
+    done/missing/free_end) and the run ends with exit 5 (Test 107: a whole
+    photograph lying free in aperture 3 was dropped without a file).
+    Returns the text for the aperture line; a split image gets `why` and
+    "nothing written" (a later pass delivers it)."""
+    from . import film110
+    fr = it["fr"]
+    if not (fr.whole or fr.cut_mm is not None):
+        return f"{why}; split, nothing written"
+    idx = 1 + sum(1 for e in state.unidentified if e["aperture"] == aperture)
+    g = film110.global_position_mm(aperture, fr.line0, args.dpi)
+    entry = {"number": None, "identified": False, "aperture": aperture,
+             "index": idx, "whole": bool(fr.whole), "split": fr.split,
+             "free_end_near": bool(fr.free_end_near),
+             "located_by": getattr(fr, "located_by", "holes"),
+             "position_mm": round(float(g), 2), "crop": it["vis_bounds"],
+             "extent_mm": [round(float(it["extent"][0]), 2),
+                           round(float(it["extent"][1]), 2)],
+             "main": None, "ir": None, "kept": False, "uncertain": False,
+             "size_mm": [round(float(fr.size_mm[0]), 2),
+                         round(float(fr.size_mm[1]), 2)],
+             "replaced_free_end_copy": False, "unnumbered_reason": why}
+    if fr.cut_mm is not None:
+        entry["cut_mm"] = round(float(fr.cut_mm), 2)
+    if fr.end_gap_mm is not None:
+        entry["end_gap_mm"] = round(float(fr.end_gap_mm), 2)
+    writer = getattr(emit, "unnumbered", None)
+    if writer is None:                  # `scan --film 110` has no roll directory
+        return f"{why}; whole image NOT numbered, no 110 product written"
+    res = writer(state.pass_index, aperture, idx, it["crops"])
+    entry["main"], entry["ir"] = res.get("main"), res.get("ir")
+    state.unidentified.append(entry)
+    return (f"{why}; whole image written UNNUMBERED as "
+            f"p{state.pass_index}-a{aperture}-{idx}.tiff")
 
 
 def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
@@ -1041,40 +1126,63 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
             n, residual = film110.image_number_anchored(g, state.anchor_mm)
             if (abs(residual) > film110.PLACEMENT_PHASE_TOLERANCE_MM
                     or n < 1):
-                msg = (f"image at {pos_mm:.1f} mm does not fit the slot's "
-                       f"film grid (off by {residual:+.1f} mm from the "
-                       f"first image, number {n}) -> check the strip; no "
-                       f"110 product written")
+                msg = _film110_write_off_grid(
+                    args, state, aperture, it, emit,
+                    f"image at {pos_mm:.1f} mm does not fit the slot's "
+                    f"film grid (off by {residual:+.1f} mm from the "
+                    f"first image, number {n}) -> check the strip")
                 parts.append(note + msg)
                 state.problems.append(msg)
                 continue
         else:
             if state.placement is None:
                 inferred, _res = film110.infer_placement(aperture, fr.line0, args.dpi)
-                if inferred is None:
+                if inferred is None and not deliver:
+                    # A split (or a hole's ghost before the strip) between
+                    # the phases anchors nothing: as before, a later whole
+                    # image decides.
                     _na, res_a = film110.image_number(aperture, fr.line0, args.dpi, "A")
                     _nb, res_b = film110.image_number(aperture, fr.line0, args.dpi, "B")
-                    msg = (f"image at {pos_mm:.1f} mm lies between the two "
-                           f"placements' phases (A off by {res_a:+.1f} mm, B off "
-                           f"by {res_b:+.1f} mm) -> give --placement A or B; no "
-                           f"110 product written")
+                    msg = _film110_write_off_grid(
+                        args, state, aperture, it, emit,
+                        f"image at {pos_mm:.1f} mm lies between the two "
+                        f"placements' phases (A off by {res_a:+.1f} mm, B off "
+                        f"by {res_b:+.1f} mm)")
                     parts.append(msg)
                     state.problems.append(msg)
                     continue
-                state.placement = inferred
-                state.placement_source = "inferred"
+                if inferred is None:
+                    # Midway between the two phases (Test 108/110: three strips
+                    # in one evening, all seated ~4.5 mm before A, front end
+                    # out of view): number from this image on A's grid of
+                    # numbers instead of refusing -- the numbers are
+                    # provisional until the front end is seen, which then
+                    # renumbers the roll (number_basis), and a later pass
+                    # recognises the strip by content against them.
+                    n_a, res_a = film110.image_number(aperture, fr.line0, args.dpi, "A")
+                    _nb, res_b = film110.image_number(aperture, fr.line0, args.dpi, "B")
+                    state.placement = "free"
+                    state.placement_source = "between phases"
+                    state.phase_mm = g - (n_a - 1) * film110.FILM_110.pitch_mm
+                    note = (f"placement free (between the phases: A off by "
+                            f"{res_a:+.1f} mm, B off by {res_b:+.1f} mm; numbered "
+                            f"from this image); ")
+                    state.announced = True
+                else:
+                    state.placement = inferred
+                    state.placement_source = "inferred"
             if not state.announced:
                 how = "given" if state.placement_given else "inferred"
                 note = f"placement {state.placement} ({how}); "
                 state.announced = True
 
-            n, residual = film110.image_number(aperture, fr.line0, args.dpi,
-                                               state.placement)
+            n, residual = _film110_protocol_number(state, aperture, fr.line0, args.dpi)
             if (abs(residual) > film110.PLACEMENT_PHASE_TOLERANCE_MM
                     or n < 1):
-                msg = (f"image at {pos_mm:.1f} mm is not at placement "
-                       f"{state.placement}'s phase (off by {residual:+.1f} mm) "
-                       f"-> check the placement; no 110 product written")
+                msg = _film110_write_off_grid(
+                    args, state, aperture, it, emit,
+                    f"image at {pos_mm:.1f} mm is not at placement "
+                    f"{state.placement}'s phase (off by {residual:+.1f} mm) -> check the placement")
                 parts.append(note + msg)
                 state.problems.append(msg)
                 continue
@@ -1282,9 +1390,12 @@ def _film110_finalize(args: argparse.Namespace, state: Film110State, roll: int,
                 end_shift = None            # the two ends disagree: no evidence
                 break
             end_shift = e
+    # Black-and-white (both passes without IR -- colour always has it) is
+    # compared in density: its pictures sit near black (Test 110).
+    log = not getattr(args, "ir", True) and ref.get("ir") is False
     dec = film110.decide_orientation(
         new, old, pos_range=film110.slot_position_range(state.slot, state.strips),
-        end_shift=end_shift)
+        end_shift=end_shift, log=log)
     if dec is None:
         state.aborted = (
             f"could not tell whether the strip slid or was turned since "
@@ -1563,7 +1674,8 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
 
 
 def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
-                        frame: int, coverage=None, film=None) -> None:
+                        frame: int, coverage=None, film=None,
+                        extra: dict | None = None) -> None:
     """Write <out>'s .diag.json sidecar from scanner.last_diag (see
     diag.py/device.py) unless --no-diag was given, and log a one-line
     INFO summary of the per-frame calibration/health counters.
@@ -1627,6 +1739,10 @@ def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
             log.warning("could not write the calibration data file: %s", e)
             cal_path = None
     sidecar["cal_data"] = cal_path
+    if extra:
+        # whole-strip sweep (docs/whole-strip-sweep-design.md section 6):
+        # window, sweep diag, shared calibration file name.
+        sidecar.update(extra)
     path = diag.sidecar_path(out)
     diag.write_sidecar(path, sidecar)
     print(f"wrote {path}")
@@ -1685,6 +1801,16 @@ def _cmd_probe_diff(args: argparse.Namespace) -> int:
         return 1
     print("\n".join(lines) if lines else "no differences")
     return 0
+
+
+def _opening_is_holders(coverage, dpi) -> bool:
+    """A verified coverage's opening has the holder's aperture length
+    (aperture_crop.SIDE_BAND_LENGTH_TOL_MM): the 110 plain-path check that
+    a film edge did not pose as the plastic's."""
+    from . import aperture_crop, holder
+    length = ((coverage.trailing_line - coverage.leading_line)
+              * aperture_crop.MM_PER_INCH / dpi)
+    return abs(length - holder.STRIP.aperture_mm) <= aperture_crop.SIDE_BAND_LENGTH_TOL_MM
 
 
 def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
@@ -1808,6 +1934,32 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
     else:
         full = image.align_channels(image.assemble(raw, width), dpi=args.dpi)
         coverage = aperture_crop.measure_coverage(full, dpi=args.dpi)
+        if film110 is not None and coverage.verified and not _opening_is_holders(coverage, args.dpi):
+            # Dense film against a crossbar can leave a lit run of 25 mm or
+            # more: the central verdict then "verifies" on the film's edge,
+            # not the plastic's, and the crop would cut the film off. For
+            # 110 the opening must be the holder's own length, as for the
+            # side bands below.
+            length = ((coverage.trailing_line - coverage.leading_line)
+                      * aperture_crop.MM_PER_INCH / args.dpi)
+            from dataclasses import replace as _replace
+            coverage = _replace(coverage, verified=False,
+                                reason=f"opening {length:.1f} mm is not the holder's aperture")
+        if film110 is not None and not coverage.verified:
+            # 110 on the plain path (e.g. --no-ir for black-and-white,
+            # whose silver image blocks IR): a 16 mm strip fills most of
+            # the central band the normal verdict reads, and dense film
+            # against a crossbar hides the edge. Measure again on the bare
+            # air beside the strip (aperture_crop.measure_coverage_side_band;
+            # accepts only the holder's own opening length). 135 and the
+            # dual paths never come here.
+            side = aperture_crop.measure_coverage_side_band(full, dpi=args.dpi)
+            if side.verified:
+                coverage = side
+            else:
+                from dataclasses import replace as _replace
+                coverage = _replace(
+                    coverage, reason=f"visible: {coverage.reason}; {side.reason}")
         # Preserve the full overscan frame regardless of the verdict
         # (raw-data principle) -- rotated like the main negative, never
         # mirrored.
@@ -1825,7 +1977,9 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
                   f"Kept the full overscan at {raw_out}; no main negative "
                   f"written for this frame.", file=sys.stderr)
             return None, None, None, False, coverage
-        print(f"aperture coverage: VERIFIED — margins lead "
+        print(f"aperture coverage: VERIFIED"
+              f"{' (' + coverage.reason + ')' if coverage.source != 'visible' else ''}"
+              f" — margins lead "
               f"{coverage.leading_margin_mm:.3f} mm, trail "
               f"{coverage.trailing_margin_mm:.3f} mm")
         _note_margin(coverage)
@@ -2325,11 +2479,12 @@ def _film110_fill_record(record: dict, state: Film110State, rdir: Path,
                 e = got[n]
                 under = e.get("under") or "plastic"
                 under = ("the " + under) if under.startswith("end wall") else under
-                body = nxt["text"].replace("Next pass: ", "", 1).rstrip(".")
                 nxt["optional"] = True
-                nxt["text"] = (f"Optional: {body}; this would replace image {n}'s near-whole "
-                               f"copy ({e.get('cut_mm', 0):.2f} mm under {under}) with a "
-                               f"whole, supported one.")
+                nxt["text"] = (f"Optional: move image {n} whole into an aperture; this would "
+                               f"replace its near-whole copy ({e.get('cut_mm', 0):.2f} mm under "
+                               f"{under}) with a whole, supported one. Keep at least one image "
+                               f"already scanned in an aperture, so that the pass can recognise "
+                               f"the strip.")
             else:
                 nxt = None
         why_none: list = []
@@ -2740,9 +2895,9 @@ def _digitize_from_frames(args: argparse.Namespace) -> int:
     _film110_print_roll_summary(roll, state, per_frame, rdir, record["advice"],
                                 record=record)
     if unident:
-        print(f"roll {roll}: numbering could NOT be established for pass(es) "
-              f"{', '.join(map(str, unident))}; their whole photographs were written "
-              f"UNNUMBERED (p<pass>-a<aperture>-<i>.tiff), the other passes are "
+        print(f"roll {roll}: pass(es) {', '.join(map(str, unident))} have whole "
+              f"photographs that could not be numbered; they were written "
+              f"UNNUMBERED (p<pass>-a<aperture>-<i>.tiff), everything else is "
               f"numbered and rebuilt.", file=sys.stderr)
         return 5
     return 0
@@ -2824,13 +2979,476 @@ def _rebuild_attempt(args, roll, rdir, plan, default_rec, dpi, ir, shift, may_re
         _film110_fill_record(record, state, stage, prior)
         if state.aborted:
             unidentified.append(k)             # written unnumbered; the rebuild goes on
-        elif may_restart and record.get("anchor_shift"):
-            return 0, last, int(record["anchor_shift"]), prior, None, unidentified
+        else:
+            if state.unidentified:
+                unidentified.append(k)         # whole images off the numbering, unnumbered
+            if may_restart and record.get("anchor_shift"):
+                return 0, last, int(record["anchor_shift"]), prior, None, unidentified
         record.update(per_frame=per_frame, finished_utc=now, status="ok", stage=None,
                       source="frames", from_pass=k, rebuilt_utc=now)
         prior.append(record)
         last = (state, record, per_frame)
     return 0, last, None, prior, None, unidentified
+
+
+# ------------------------------------------------ whole-strip sweep (digitize)
+#
+# docs/whole-strip-sweep-design.md section 6. One calibration, one
+# positioning, one pass, one park into <roll>/sweep.raw; the frames are cut
+# in software and every cut goes through the EXISTING per-frame writer
+# (_finish_digitize_frame), so nothing about a product differs from the
+# per-frame cycle. The dual sweep (IR on, or any dpi other than 3600) has
+# run on hardware (Test 111 and production). The plain-3600 sweep (--no-ir,
+# black-and-white film) is WITHDRAWN after its first hardware run, Test 112
+# (2026-10-31, docs/test-log.md): the plain engine's long pass did not start
+# where the geometry assumed, the magazine was displaced and the park
+# stalled. The code path stays in the tree for the record but is refused
+# here and in Scanner.sweep until the mechanism is understood.
+
+_SWEEP_PLAIN_WITHDRAWN_MSG = (
+    "the plain-3600 sweep (--sweep with --no-ir) is withdrawn after Test 112 "
+    "(2026-10-31): the long plain pass displaced the magazine and stalled the "
+    "park; black-and-white film keeps the per-frame cycle. Nothing was sent to "
+    "the scanner.")
+
+
+def _sweep_validate(args: argparse.Namespace) -> "tuple[list[int] | None, str | None]":
+    """Every --sweep argument check, BEFORE any hardware step (exit 2).
+    Returns (frames, None) or (None, message)."""
+    if not getattr(args, "sweep", False):
+        return None, "--keep-sweep and --from-sweep need --sweep"
+    if getattr(args, "film", "135") != "135":
+        return None, "--sweep is for 135 only; --film 110 keeps the per-frame cycle"
+    if getattr(args, "from_frames", False):
+        return None, "--from-frames (110) cannot be combined with --sweep"
+    if int(getattr(args, "strips", 1) or 1) != 1:
+        return None, "--sweep does not support --strips 2"
+    if getattr(args, "placement", None) is not None:
+        return None, "--placement only applies with --film 110"
+    try:
+        frames = _parse_frames(getattr(args, "frames", None) or "1-4")
+    except ValueError as e:
+        return None, str(e)
+    if frames != list(range(frames[0], frames[-1] + 1)):
+        return None, ("--sweep needs --frames to be one contiguous range a-b "
+                      f"(got {args.frames!r}): the pass covers every aperture "
+                      f"between its first and last")
+    from . import sweep as _sweep_mod
+    if len(frames) > _sweep_mod.SWEEP_MAX_APERTURES_VERIFIED:
+        return None, (f"--sweep over {len(frames)} apertures ({frames[0]}-{frames[-1]}) is "
+                      f"refused: no sweep longer than "
+                      f"{_sweep_mod.SWEEP_MAX_APERTURES_VERIFIED} apertures has run on "
+                      f"hardware yet (owner's decision after Test 112, 2026-10-31); use "
+                      f"the per-frame cycle for this range. Nothing was sent to the scanner.")
+    if getattr(args, "from_sweep", False) and args.roll is None:
+        return None, "--from-sweep needs --roll N"
+    dual = bool(args.ir or args.dpi != 3600)
+    if not dual:
+        return None, _SWEEP_PLAIN_WITHDRAWN_MSG
+    try:
+        from .device import dual_tables
+        t = dual_tables(args.dpi) if dual else tables
+        Scanner._sweep_geometry(t, frames[0], frames[-1],
+                                getattr(args, "overscan", None) or holder.OVERSCAN_MM)
+    except (safety.FrameOutOfRangeError, safety.FeedlOutOfRangeError, ValueError) as e:
+        return None, f"the sweep window is not valid: {e}"
+    return frames, None
+
+
+def _sweep_meta(geom, width: int, dpi: int, overscan_mm: float,
+                dual: bool = True) -> dict:
+    """The sweep's geometry as sweep.json stores it (and the window finder
+    reads it back, see _sweep_geom_from_meta)."""
+    return {
+        "first": geom.first, "last": geom.last, "dpi": dpi, "feedl": geom.feedl,
+        "end_hwdpi": geom.end_hwdpi, "wire_lines": geom.wire_lines,
+        "chunk_count": geom.chunks, "overscan_mm": overscan_mm, "width": width,
+        "lines_per_mm": geom.lines_per_mm,
+        "dual": bool(dual), "wire_per_vis": 2 if dual else 1,
+        "predicted_edges": {str(k): list(v) for k, v in geom.predicted_edges.items()},
+    }
+
+
+def _sweep_geom_from_meta(meta: dict):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        first=int(meta["first"]), last=int(meta["last"]),
+        lines_per_mm=float(meta["lines_per_mm"]),
+        predicted_edges={int(k): tuple(v) for k, v in meta["predicted_edges"].items()})
+
+
+def _sweep_kept_note(raw_path: Path) -> None:
+    """Whenever sweep.raw stays on disk, say so in plain words with its
+    size and path (design doc section 6)."""
+    try:
+        gb = raw_path.stat().st_size / 1e9
+    except OSError:
+        return
+    print(f"sweep.raw kept ({gb:.1f} GB): {raw_path} — delete it when the "
+          f"strip is accepted, or keep it for --from-sweep", file=sys.stderr)
+
+
+def _sweep_resolve(raw_path: Path, meta: dict):
+    """Memory-map sweep.raw and run the window finder. Returns (mm, res)."""
+    from . import sweep as _sweep
+    mm = _sweep.open_raw(raw_path, int(meta["width"]))
+    # sweep.json files written before the plain sweep existed carry no
+    # "dual" key: they are dual sweeps.
+    dual = bool(meta.get("dual", True))
+    if dual:
+        prof = _sweep.ir_profile(mm, dpi=int(meta["dpi"]))
+    else:
+        prof = _sweep.visible_profile(mm, dpi=int(meta["dpi"]))
+    res = _sweep.find_windows(prof, _sweep_geom_from_meta(meta), dpi=int(meta["dpi"]),
+                              overscan_mm=float(meta["overscan_mm"]),
+                              wire_per_vis=int(meta.get("wire_per_vis", 2 if dual else 1)))
+    return mm, res
+
+
+def _sweep_cut(args: argparse.Namespace, rdir: Path, mm, res, meta: dict,
+               scanlike, per_frame: list, *, rebuild: bool) -> list:
+    """Cut every aperture of a resolved sweep through _finish_digitize_frame
+    and fill ``per_frame`` (appended to as it goes, so a failure part-way
+    leaves a record). Returns the frames whose coverage did not verify.
+
+    Calibration data: ``f<first>.cal.npz`` is written once by the first
+    sidecar and HARD-LINKED (copy if linking fails) as ``fN.cal.npz`` for
+    every other frame, so each sidecar names its own file exactly as the
+    per-frame path does (design doc section 6). On a rebuild the existing
+    ``fN.cal.npz`` files are kept and referenced."""
+    from . import digitize, sweep as _sweep
+    width = int(meta["width"])
+    first = int(meta["first"])
+    incomplete: list[int] = []
+    first_cal = diag.cal_data_path(str(digitize.frame_path(args.out, args.prefix,
+                                                           args.roll_n, first)))
+    for k in range(first, int(meta["last"]) + 1):
+        out = str(digitize.frame_path(args.out, args.prefix, args.roll_n, k))
+        entry: dict = {"frame": k, "main": None, "ir": None, "preview": None,
+                       "dust_cleaned": None, "stage": "write"}
+        per_frame.append(entry)
+        if not res.resolved:
+            entry.update(stage=None, coverage_verified=False,
+                         coverage_reason=f"sweep unresolved: {res.reason}")
+            incomplete.append(k)
+            continue
+        w = res.windows[k]
+        entry["located_by"] = w.located_by
+        print(f"cutting frame {k} from the sweep (wire lines {w.wire_start}-{w.wire_end}, "
+              f"located by {w.located_by})")
+        raw = _sweep.window_bytes(mm, w)
+        main, irf, prev, cleaned, cov = _finish_digitize_frame(
+            args, raw, width, out, bool(meta.get("dual", True)), progress=entry)
+        entry.update(main=main, ir=irf, preview=prev, dust_cleaned=cleaned)
+        film = None
+        if cov is not None:
+            entry["coverage_verified"] = bool(cov.verified)
+            entry["coverage_reason"] = cov.reason
+            entry["coverage_source"] = cov.source
+            if not cov.verified:
+                incomplete.append(k)
+            elif "film_present" in entry:
+                film = {"present": entry["film_present"],
+                        "saturated_share": entry["saturated_share"]}
+                if not film["present"]:
+                    entry["coverage_reason"] = "empty aperture"
+        del raw
+        entry["stage"] = "diag"
+        extra = {"sweep_window": {"aperture": k, "wire_start": w.wire_start,
+                                  "wire_end": w.wire_end, "located_by": w.located_by},
+                 "sweep": (scanlike.last_diag or {}).get("sweep") or meta,
+                 "cal_data_shared": True}
+        if k != first or rebuild:
+            own = diag.cal_data_path(out)
+            if not rebuild and not getattr(args, "no_diag", False) and os.path.exists(first_cal):
+                if os.path.exists(own):
+                    os.unlink(own)
+                try:
+                    os.link(first_cal, own)
+                except OSError:
+                    shutil.copy2(first_cal, own)
+            extra["cal_data"] = own if os.path.exists(own) else None
+        kw = {"film": film} if film is not None else {}
+        _write_diag_sidecar(args, scanlike, out, k, coverage=cov, extra=extra, **kw)
+        scanlike.last_cal_data = None       # written once, next to frame `first`
+        d = scanlike.last_diag or {}
+        entry.update(stage=None, calibration=d.get("calibration"),
+                     gain_codes=d.get("gain_codes"), offset_codes=d.get("offset_codes"),
+                     dark_b_substituted=d.get("dark_b_substituted"))
+    return incomplete
+
+
+def _sweep_record_fields(meta: dict, res, diag_d: dict, raw_kept: bool) -> dict:
+    ps = (diag_d or {}).get("phase_seconds") or {}
+    return {"sweep": {
+        "first": meta["first"], "last": meta["last"], "offset_mm": res.offset_mm,
+        "resolved": res.resolved, "reason": res.reason,
+        "located_by": {str(k): w.located_by for k, w in res.windows.items()},
+        "seconds": {
+            "position": ps.get("position"), "scan": ps.get("scan"),
+            "park": ps.get("park"),
+            "calibration": sum(v for n, v in ps.items() if n.startswith("cal_")),
+            "total": (diag_d or {}).get("total_seconds"),
+        },
+        "raw_kept": raw_kept,
+    }}
+
+
+def _digitize_sweep(args: argparse.Namespace) -> int:
+    """`digitize --sweep`: see the block comment above and
+    docs/whole-strip-sweep-design.md. Exit 0 ok, 2 refused before any
+    hardware, 4 coverage/resolution failure (products absent or partial,
+    sweep.raw kept), other codes as the per-frame flow."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from . import digitize, loadflow
+
+    frames, err = _sweep_validate(args)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    if getattr(args, "from_sweep", False):
+        return _digitize_from_sweep(args, frames)
+    first, last = frames[0], frames[-1]
+    roll = args.roll if args.roll is not None else digitize.next_roll(args.out, args.prefix)
+    args.roll_n = roll
+    rdir = digitize.roll_dir(args.out, args.prefix, roll)
+    raw_path = rdir / digitize.SWEEP_RAW_NAME
+    json_path = rdir / digitize.SWEEP_JSON_NAME
+    if not args.force and (digitize.roll_dir_has_output(args.out, args.prefix, roll)
+                           or digitize.roll_is_done(args.out, roll, args.prefix)):
+        print(f"error: roll {roll} already has output in {rdir} (or is recorded "
+              f"done); use --roll for a different one, or --force to redo it.",
+              file=sys.stderr)
+        return 2
+    print(f"=== digitize --sweep roll {roll} -> {rdir} (apertures {first}-{last}) ===")
+    if args.force:
+        removed = digitize.clear_roll_outputs(args.out, args.prefix, roll)
+        if removed:
+            print(f"--force: removed {len(removed)} existing file(s) in {rdir} "
+                  f"before re-scanning")
+    args.eject = True
+    started = datetime.now(timezone.utc).isoformat()
+    record = {"roll": roll, "prefix": args.prefix, "dir": str(rdir),
+              "started_utc": started, "dpi": args.dpi, "positive": args.positive,
+              "ir": args.ir, "frames": frames, "no_clean": args.no_clean,
+              "rotate": args.rotate}
+
+    def record_failed(stage: str, **extra) -> None:
+        try:
+            record.update(status="failed", stage=stage,
+                          finished_utc=datetime.now(timezone.utc).isoformat(), **extra)
+            digitize.append_manifest(args.out, record)
+        except Exception as me:
+            log.warning("manifest write failed while recording a failed roll "
+                        "(original error preserved): %s", me)
+
+    def keep_note() -> None:
+        if raw_path.exists():
+            _sweep_kept_note(raw_path)
+
+    if not args.assume_loaded:
+        rc = loadflow.run(ask=input, cold_homing_rounds=getattr(args, "cold_homing_rounds", 3))
+        if rc == EXIT_BUSY:
+            return _busy_not_started(roll)
+        if rc != 0:
+            record_failed("load", load_rc=rc)
+            print(f"load failed (rc {rc}); roll {roll} recorded as failed. "
+                  f"Power-cycle before retrying.", file=sys.stderr)
+            return rc
+    rdir.mkdir(parents=True, exist_ok=True)
+
+    state: dict = {}
+
+    def body(scanner: Scanner) -> int:
+        scanner.park_mode = args.park
+        scanner.recalibrate = bool(getattr(args, "recalibrate", False))
+        scanner.cal_readback_guard = getattr(args, "cal_readback_guard", "log")
+        scanner.cal_wait_scanstop = getattr(args, "cal_wait_scanstop", "enforce")
+        scanner.cal_wait_bufempty = getattr(args, "cal_wait_bufempty", "off")
+        scanner.diag_readback_regs = bool(getattr(args, "diag_readback_regs", False))
+        scanner.position_require_motor_idle = bool(
+            getattr(args, "position_require_motor_idle", False))
+        scanner.cold_move_early_fail = bool(getattr(args, "cold_move_early_fail", False))
+        scanner.cold_homing_rounds = getattr(args, "cold_homing_rounds", 3)
+        if getattr(args, "warmup_budget", None) is not None:
+            scanner.warmup_budget_s = float(args.warmup_budget)
+        scanner.check_start_state()
+        if not scanner.is_magazine_present():
+            print("error: no magazine detected after load", file=sys.stderr)
+            return 1
+        dual = bool(args.ir or args.dpi != 3600)    # the per-frame rule
+        scanner.initialize(ir=dual, dpi=args.dpi)
+        log.info("sweeping apertures %d-%d @ %d dpi (one pass, %s)", first, last,
+                 args.dpi, "dual" if dual else "plain")
+        overscan = getattr(args, "overscan", None) or holder.OVERSCAN_MM
+        with open(raw_path, "wb") as fh:
+            width, smeta = scanner.sweep(first, last, dpi=args.dpi,
+                                         overscan_mm=overscan, sink=fh.write, ir=dual)
+        d = dict(scanner.last_diag or {})
+        meta = _sweep_meta(smeta["geometry"], width, args.dpi, overscan, dual=dual)
+        state.update(meta=meta, diag=d, cal=scanner.last_cal_data)
+        _sweep_write_json(json_path, meta, None, d)
+        print(f"sweep done: {raw_path.stat().st_size / 1e9:.2f} GB written")
+        # Eject now: the carriage is parked and the scanner idle; the
+        # post-processing below takes minutes and the scanner drops USB
+        # after ~5 min of standby.
+        scanner.eject()
+        print("ejected")
+        return 0
+
+    try:
+        rc = _run_writing_session(body)
+    except BaseException as e:
+        record_failed("sweep", error=repr(e))
+        keep_note()
+        raise
+    if rc == EXIT_BUSY:
+        return _busy_not_started(roll)
+    if rc != 0:
+        record_failed("sweep", rc=rc)
+        keep_note()
+        extra = (" The sweep itself completed and is on disk; rebuild with "
+                 "--from-sweep." if "meta" in state else "")
+        print(f"roll {roll} FAILED at the sweep (rc {rc}); recorded. "
+              f"Power-cycle before the next strip.{extra}", file=sys.stderr)
+        return rc
+
+    meta, d = state["meta"], state["diag"]
+    scanlike = SimpleNamespace(last_diag=d, last_cal_data=state["cal"])
+    per_frame: list = []
+    try:
+        mm, res = _sweep_resolve(raw_path, meta)
+        _sweep_write_json(json_path, meta, res, d)
+        incomplete = _sweep_cut(args, rdir, mm, res, meta, scanlike, per_frame,
+                                rebuild=False)
+        del mm
+    except BaseException as e:
+        record_failed("write", error=repr(e), per_frame=per_frame)
+        keep_note()
+        raise
+    return _sweep_finish(args, record, rdir, raw_path, meta, res, d, per_frame,
+                         incomplete, rc_extra={})
+
+
+def _sweep_write_json(path: Path, meta: dict, res, diag_d: dict) -> None:
+    """sweep.json: geometry, resolution (None until the finder has run),
+    timing and the device diag of the one calibration."""
+    ps = diag_d.get("phase_seconds") if diag_d else None
+    doc = {"geometry": meta,
+           "resolution": res.to_dict() if res is not None else None,
+           "timing": {"phase_seconds": ps,
+                      "total_seconds": (diag_d or {}).get("total_seconds"),
+                      "started_utc": (diag_d or {}).get("started_utc"),
+                      "finished_utc": (diag_d or {}).get("finished_utc")},
+           "diag": diag_d}
+    diag.write_sidecar(str(path), doc)
+
+
+def _sweep_finish(args, record: dict, rdir: Path, raw_path: Path, meta: dict, res,
+                  d: dict, per_frame: list, incomplete: list, *, rc_extra: dict) -> int:
+    """Close a sweep roll: status, raw retention, manifest, messages."""
+    from datetime import datetime, timezone
+    from . import digitize
+    rebuilt = bool(rc_extra.get("rebuilt"))
+    ok = not incomplete
+    keep = (not ok) or bool(getattr(args, "keep_sweep", False)) or rebuilt
+    if not keep:
+        try:
+            raw_path.unlink()
+        except OSError as e:
+            log.warning("could not remove %s: %s", raw_path, e)
+            keep = True
+    record.update(finished_utc=datetime.now(timezone.utc).isoformat(),
+                  per_frame=per_frame, status="ok" if ok else "failed",
+                  stage=None if ok else "scan",
+                  **_sweep_record_fields(meta, res, d, keep))
+    if rebuilt:
+        record["rebuilt_from_sweep"] = True
+    try:
+        digitize.append_manifest(args.out, record)
+    except Exception as me:
+        print(f"warning: roll {record['roll']} processed but the manifest write "
+              f"failed ({me!r}); the images are saved in {rdir}.", file=sys.stderr)
+    if keep and raw_path.exists():
+        _sweep_kept_note(raw_path)
+    if not ok:
+        why = (f"sweep unresolved: {res.reason}" if not res.resolved else
+               f"aperture coverage NOT verified for frame(s) "
+               f"{', '.join(map(str, incomplete))}")
+        print(f"error: {why} — no main negative was written for them; see the "
+              f".diag.json and .overscan file(s), and sweep.json", file=sys.stderr)
+        print(f"roll {record['roll']} recorded FAILED. Re-run with --force, or "
+              f"rebuild from the kept sweep with --from-sweep.", file=sys.stderr)
+        return 4
+    subs = [pf["frame"] for pf in per_frame if pf.get("dark_b_substituted")]
+    note = f" (dark_b substituted on frame(s) {subs})" if subs else ""
+    print(f"roll {record['roll']} done: {len(per_frame)} frames -> {rdir}{note}. "
+          f"Next: insert the next strip and run 'of135i digitize --sweep' again "
+          f"(roll {record['roll'] + 1}).")
+    return 0
+
+
+def _digitize_from_sweep(args: argparse.Namespace, frames: list) -> int:
+    """`digitize --sweep --from-sweep --roll N`: rebuild the roll offline
+    from its sweep.raw + sweep.json (no scanner, no load, no eject). Clears
+    the roll's frame products first, never the sweep files; appends a
+    manifest record with ``rebuilt_from_sweep: true``."""
+    import json
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from . import digitize
+
+    def refuse(msg: str) -> int:
+        print(f"error: {msg}", file=sys.stderr)
+        return 2
+
+    roll = args.roll
+    args.roll_n = roll
+    rdir = digitize.roll_dir(args.out, args.prefix, roll)
+    raw_path = rdir / digitize.SWEEP_RAW_NAME
+    json_path = rdir / digitize.SWEEP_JSON_NAME
+    if not raw_path.is_file() or not json_path.is_file():
+        return refuse(f"--from-sweep needs both {raw_path} and {json_path}")
+    try:
+        doc = json.loads(json_path.read_text())
+        meta = doc["geometry"]
+        meta["first"], meta["predicted_edges"], meta["width"]   # shape check
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return refuse(f"{json_path} is unreadable ({e!r})")
+    if int(meta["dpi"]) != args.dpi:
+        print(f"note: using the sweep's own dpi {meta['dpi']} (not --dpi {args.dpi})")
+        args.dpi = int(meta["dpi"])
+    removed = digitize.clear_roll_outputs(args.out, args.prefix, roll, include_sweep=False)
+    if removed:
+        print(f"--from-sweep: removed {len(removed)} frame file(s) in {rdir} before the rebuild")
+    args.eject = True
+    record = {"roll": roll, "prefix": args.prefix, "dir": str(rdir),
+              "started_utc": datetime.now(timezone.utc).isoformat(),
+              "dpi": args.dpi, "positive": args.positive, "ir": args.ir,
+              "frames": list(range(int(meta["first"]), int(meta["last"]) + 1)),
+              "no_clean": args.no_clean, "rotate": args.rotate,
+              "rebuilt_from_sweep": True}
+    d = doc.get("diag") or {}
+    scanlike = SimpleNamespace(last_diag=d, last_cal_data=None)
+    per_frame: list = []
+    try:
+        mm, res = _sweep_resolve(raw_path, meta)
+        incomplete = _sweep_cut(args, rdir, mm, res, meta, scanlike, per_frame,
+                                rebuild=True)
+        del mm
+    except BaseException as e:
+        try:
+            record.update(status="failed", stage="write", error=repr(e),
+                          per_frame=per_frame,
+                          finished_utc=datetime.now(timezone.utc).isoformat())
+            digitize.append_manifest(args.out, record)
+        except Exception as me:
+            log.warning("manifest write failed: %s", me)
+        _sweep_kept_note(raw_path)
+        raise
+    return _sweep_finish(args, record, rdir, raw_path, meta, res, d, per_frame,
+                         incomplete, rc_extra={"rebuilt": True})
 
 
 def _cmd_digitize(args: argparse.Namespace) -> int:
@@ -2853,18 +3471,28 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     from types import SimpleNamespace
     from . import digitize, film110 as _film110, loadflow
 
+    if (getattr(args, "sweep", False) or getattr(args, "from_sweep", False)
+            or getattr(args, "keep_sweep", False)):
+        # Whole-strip sweep (docs/whole-strip-sweep-design.md): its own
+        # flow, validated before any hardware step.
+        return _digitize_sweep(args)
+
     if getattr(args, "from_frames", False):
         # Offline: never reaches the load flow or a Scanner.
         return _digitize_from_frames(args)
 
     strips = int(getattr(args, "strips", 1) or 1)
-    # --frames decides the strip length. The default stays 1-4: most
-    # strips in hand are four frames, and a longer default would scan
-    # empty apertures for everyone with a shorter strip (two strips: 1-6).
-    # Validated here, before the load prompt and before any hardware.
+    # --frames decides the strip length. 135 defaults to 1-4 (a longer
+    # default would scan empty apertures for everyone with a shorter
+    # strip). 110 defaults to 1-6: a long 110 strip (up to ~8 images)
+    # reaches apertures 5-6, and a short one costs nothing because the
+    # stop-at-empty rule ends the run after the first empty aperture that
+    # follows film. Validated here, before the load prompt and any hardware.
     try:
-        dig_frames = _parse_frames(getattr(args, "frames", None)
-                                   or ("1-6" if strips == 2 else "1-4"))
+        dig_frames = _parse_frames(
+            getattr(args, "frames", None)
+            or ("1-6" if (strips == 2 or getattr(args, "film", "135") == "110")
+                else "1-4"))
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -2991,6 +3619,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     #    scanner in an unknown state -- power cycle -- so we record and stop.
     if not args.assume_loaded:
         rc = loadflow.run(ask=input, cold_homing_rounds=getattr(args, "cold_homing_rounds", 3))
+        if rc == EXIT_BUSY:
+            return _busy_not_started(roll)
         if rc != 0:
             record_failed("load", load_rc=rc)
             print(f"load failed (rc {rc}); roll {roll} recorded as failed. "
@@ -3165,6 +3795,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                   f"and .overscan file(s); no main negative was written for "
                   f"them", file=sys.stderr)
             return 4
+        if film110 and any(c.state.unidentified for c in ctxs):
+            return 5                    # whole images written unnumbered
         return 0
 
     # Even if the scan/write flow raises (e.g. an OSError writing an image),
@@ -3176,10 +3808,13 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
     except BaseException as e:
         record_failed(fail_stage["stage"], error=repr(e))
         raise
+    if rc == EXIT_BUSY:
+        return _busy_not_started(roll)
     finished = datetime.now(timezone.utc).isoformat()
     for c in ctxs:
         ok = (rc == 0 or (rc == 4 and not c.incomplete)
-              or (rc == 5 and film110 and c.state.numbering_basis == "unidentified"))
+              or (rc == 5 and film110 and (c.state.numbering_basis == "unidentified"
+                                           or c.state.unidentified)))
         c.record.update(finished_utc=finished, per_frame=c.per_frame,
                         status="ok" if ok else "failed",
                         stage=None if ok else fail_stage["stage"])
@@ -3200,8 +3835,8 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
                   file=sys.stderr)
 
     c0 = ctxs[0]
-    if (film110 and strips == 1 and rc == 0 and c0.record.get("status") == "ok"
-            and c0.record.get("anchor_shift")):
+    if (film110 and strips == 1 and rc in (0, 5) and not c0.state.aborted
+            and c0.record.get("status") == "ok" and c0.record.get("anchor_shift")):
         # The strip's front end was seen for the first time in this pass, so
         # the numbers of the passes before it were provisional. The scanner
         # is ejected and idle: replay the roll from its stored frames (no
@@ -3214,7 +3849,7 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
         rargs.from_frames, rargs.roll = True, roll
         rargs._anchor_shift = int(c0.record["anchor_shift"])
         rrc = _digitize_from_frames(rargs)
-        if rrc != 0:
+        if rrc not in (0, 5):
             print(f"warning: the automatic renumbering of roll {roll} stopped "
                   f"(exit {rrc}); the pass itself is recorded. Run 'of135i "
                   f"digitize --film 110 --roll {roll} --from-frames' again once "
@@ -3234,6 +3869,19 @@ def _cmd_digitize(args: argparse.Namespace) -> int:
             print(f"roll {roll} done: {len(c0.per_frame)} frames -> {c0.rdir}{note}. "
                   f"Next: insert the next strip and run 'of135i digitize' again "
                   f"(roll {roll + 1}).")
+    elif rc == 5 and film110 and not any(c.state.aborted for c in ctxs):
+        # Numbering held, but whole image(s) did not fit it: the numbered
+        # ones are written as usual, the others unnumbered.
+        if strips == 2:
+            _film110_print_pair_summary(args, ctxs, "")
+        else:
+            _film110_print_roll_summary(roll, c0.state, c0.per_frame, c0.rdir,
+                                        c0.record["advice"], "", c0.record)
+        n_un = sum(len(c.state.unidentified) for c in ctxs)
+        print(f"roll {roll}: {n_un} whole photograph(s) did not fit the roll's "
+              f"numbering and were written UNNUMBERED (p<pass>-a<aperture>-<i>.tiff); "
+              f"see 'problems'. The frame files are kept (re-run with --from-frames "
+              f"once the cause is clear).", file=sys.stderr)
     elif rc == 5 and film110:
         from . import film110_report as rep
         why = next(c.state.aborted for c in ctxs if c.state.aborted)
@@ -3501,7 +4149,7 @@ def build_parser() -> argparse.ArgumentParser:
              "the .diag.json poll records and the log. Default: off, the "
              "transfer sequence is unchanged")
     p_scan.add_argument("--cal-wait-scanstop", choices=("off", "enforce"),
-        default="enforce", help="Motor-adjacent, hardware evidence pending: "
+        default="enforce", help="Fork production default; upstream defaults off: "
              "'enforce' waits, after each calibration acquisition's scan-clear and "
              "before the next write, until the data-enable bit (register 0x100) "
              "and then the motor-enable bit (register 0x101) read clear; both "
@@ -3675,11 +4323,12 @@ def build_parser() -> argparse.ArgumentParser:
              "first so the dir is not a mix of two runs (--film 110: "
              "both placements' files and the image<N> photographs)")
     p_dig.add_argument("--frames", default=None, metavar="SPEC",
-        help=f"which frames of the strip to scan, e.g. 1-4 (default; 1-6 "
-             f"with --film 110 --strips 2), "
-             f"1-6 for a full-length strip, or 1,3-4. The holder holds "
-             f"{holder.DEFAULT.frames}; the default stays 1-4 so a "
-             f"shorter strip does not scan empty apertures.")
+        help=f"which frames of the strip to scan, e.g. 1-4 (default for "
+             f"135; 1-6 with --film 110, where the stop-at-empty rule ends "
+             f"a short strip early), 1-6 for a full-length strip, or "
+             f"1,3-4. The holder holds {holder.DEFAULT.frames}; the 135 "
+             f"default stays 1-4 so a shorter strip does not scan empty "
+             f"apertures.")
     p_dig.add_argument("--from-frames", action="store_true",
         help="--film 110 --roll N only: rebuild the roll offline from its "
              "stored frame files (p<k>-f<N>.tiff): every pass is replayed in "
@@ -3688,6 +4337,23 @@ def build_parser() -> argparse.ArgumentParser:
              "to superseded-<UTC>/ (never deleted), new manifest records "
              "follow. No scanner is touched; dpi/ir/rotate come from the "
              "stored records (docs/film-110.md §14)")
+    p_dig.add_argument("--sweep", action="store_true",
+        help="135: scan the whole strip in ONE pass "
+             "(one calibration, one positioning, one park) into <roll>/sweep.raw "
+             "and cut the frames from it in software, each judged by the same "
+             "aperture coverage check (docs/whole-strip-sweep-design.md). "
+             "Dual-light profiles only: with --no-ir at 3600 dpi (plain, "
+             "black-and-white film) the sweep is refused (withdrawn after "
+             "Test 112, 2026-10-31; the per-frame cycle stays). "
+             "--frames must be a contiguous range of at most four apertures "
+             "(longer sweeps refused until Test 113; owner's decision 2026-10-31)")
+    p_dig.add_argument("--keep-sweep", action="store_true",
+        help="--sweep: keep sweep.raw (1.3-2 GB) after a fully successful "
+             "roll (default: removed; always kept on any failure)")
+    p_dig.add_argument("--from-sweep", action="store_true",
+        help="--sweep --roll N: rebuild the roll offline from its sweep.raw + "
+             "sweep.json (no scanner, no load/eject); clears the roll's frame "
+             "products first, never the sweep files")
     p_dig.add_argument("--assume-loaded", action="store_true",
         help="skip the load flow (the magazine is already latched)")
     p_dig.add_argument("--dpi", type=int, default=3600, choices=SUPPORTED_DPIS,
@@ -3754,7 +4420,7 @@ def build_parser() -> argparse.ArgumentParser:
              "the .diag.json poll records and the log. Default: off, the "
              "transfer sequence is unchanged")
     p_dig.add_argument("--cal-wait-scanstop", choices=("off", "enforce"),
-        default="enforce", help="Motor-adjacent, hardware evidence pending: "
+        default="enforce", help="Fork production default; upstream defaults off: "
              "'enforce' waits, after each calibration acquisition's scan-clear and "
              "before the next write, until the data-enable bit (register 0x100) "
              "and then the motor-enable bit (register 0x101) read clear; both "

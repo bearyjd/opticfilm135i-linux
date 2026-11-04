@@ -41,6 +41,8 @@ import math
 import os
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Callable
 from datetime import datetime, timezone
 
 import numpy as np
@@ -182,6 +184,17 @@ _POLL_SETTLE_CAP = 48
 # their tolerance is unchanged. The dark_b residual substitution (Test
 # 32) and the --dark-fallback option are content rules on a complete
 # buffer and are unchanged.
+
+# Calibration ACQUISITION phases: each exposes one calibration block with
+# an execute pulse (0x0f=0x01), ends it with a SCAN-clear (register 0x01
+# written with bit 0 clear) and -- in the captured vendor stream -- then
+# reads register 0x100 (wi=0x0022, captured f055: data-enable bit 0
+# clear) and register 0x101 (wi=0x0122, captured dc55/d855: motor-enable
+# bit 0 clear) ONCE each before the next phase's register writes. On the
+# vendor's host the engine had stopped by that single read; the driver
+# reads once, counts a mismatch (_diag_cr_mismatches) and moves on.
+# cal_rewrite (the cached-calibration path), position, scan and park are
+# NOT acquisitions in this sense and are not in the set.
 CAL_ACQUISITION_PHASES = frozenset({
     "cal_dark_a", "cal_dark_b", "cal_white",
     "cal_gain_check_a", "cal_gain_check_b",
@@ -223,8 +236,8 @@ CAL_READBACK_GUARD_DEFAULT = "log"
 # not a measured device limit. Nothing here sends, delays or decides.
 CAL_SERVED_FAST_S = 0.010
 
-# Calibration stop gate (Scanner.cal_wait_scanstop). Default "enforce"
-# (hardware evidence pending; "off" is the explicit escape hatch); it
+# Calibration stop gate (Scanner.cal_wait_scanstop). Fork production default
+# "enforce" (upstream defaults off; "off" is the explicit escape hatch); it
 # delays the next calibration execute pulse, so it is motor-adjacent. In hardware logs the stale calibration
 # reads (see CAL_SERVED_FAST_S) were re-armed while the previous
 # acquisition still showed data-enable (register 0x100 bit 0) and
@@ -735,6 +748,49 @@ def check_cold_homing_rounds(n):
             f"{COLD_HOMING_ROUNDS_DEFAULT}, got {n!r}")
     return n
 
+@dataclass
+class _DualCal:
+    """What _calibrate_dual measured and uploaded (see there)."""
+
+    dark_a: np.ndarray
+    dark_b: np.ndarray
+    dark_b_substituted: bool
+    dark_b_fallback: str | None
+    integrity: dict
+    gain_codes: tuple
+    offset_codes: tuple
+    shading_meas: np.ndarray
+    verify_meas: np.ndarray
+    shading_a: bytes
+    shading_b: bytes
+    shading2_a: bytes
+    shading2_b: bytes
+    dips_a: list
+    dips_b: list
+    blocks_a: list
+    blocks_b: list
+
+
+@dataclass
+class _PlainCal:
+    """What _plain_calibration measured (or reused) -- everything the
+    plain scan/sweep diagnostics need."""
+
+    calibration: str            #: "fresh" or "cached"
+    cal_data: dict | None       #: None on a cache hit
+    gain_codes: tuple
+    offset_codes: tuple
+    dark_a_mean: list
+    dark_b_mean: list
+    dark_b_substituted: bool
+    dark_b_fallback: str | None
+    integrity: dict
+    warmup: dict
+    shading_stats: dict
+    shading2_stats: dict
+    white_dips_diag: list | None
+    white_blocked_diag: list | None
+
 
 class Scanner:
     """Drives the of135i scan sequence over a UsbIo transport."""
@@ -759,27 +815,6 @@ class Scanner:
             raise ValueError(
                 f"cal_wait_bufempty must be one of {CAL_WAIT_BUFEMPTY_MODES}, got {mode!r}")
         self._cal_wait_bufempty = mode
-    # Stop-gate state (CAL_WAIT_SCANSTOP_MODES): an execute pulse seen in
-    # the current calibration phase, and the phase whose SCAN-clear armed
-    # the gate (None = not armed). Only ever set in "enforce" mode.
-    _scanstop_go_phase: str | None = None
-    _scanstop_armed: str | None = None
-    _scanstop_t_clear = 0.0
-    _scanstop_polled_s = 0.0
-
-    @property
-    def cal_wait_scanstop(self) -> str:
-        """The mode, "enforce" (default) or "off": see CAL_WAIT_SCANSTOP_MODES.
-        Hardware evidence pending."""
-        return self._cal_wait_scanstop
-
-    @cal_wait_scanstop.setter
-    def cal_wait_scanstop(self, mode: str) -> None:
-        if not isinstance(mode, str) or mode not in CAL_WAIT_SCANSTOP_MODES:
-            raise ValueError(
-                f"cal_wait_scanstop must be one of {CAL_WAIT_SCANSTOP_MODES}, got {mode!r}")
-        self._cal_wait_scanstop = mode
-
     @property
     def cal_integrity_telemetry(self) -> bool:
         """Default True: record per-acquisition calibration timing and the
@@ -866,8 +901,12 @@ class Scanner:
                 f"got {mode!r}")
         self._cal_readback_guard = mode
 
-    def __init__(self, io: UsbIo):
+    def __init__(self, io: UsbIo, white_reference=None):
         self.io = io
+        # Clean white-reference profiles kept between runs (white_reference.py):
+        # fills the columns a strip in front of aperture 1 blocks in the white
+        # measurement. Only the real scanner (open()) has one.
+        self._white_reference = white_reference
         self._base_initialized = False
         # Set by initialize(), cleared by scan(): the vendor re-runs its
         # PREP/AFE_BASE equivalent before every frame, and a scan
@@ -984,6 +1023,17 @@ class Scanner:
         # codes calibrate._OFFSET_DEFAULT and records that in last_diag.
         self.dark_fallback: str = "strict"
 
+        # Calibration stop gate (CAL_WAIT_SCANSTOP_MODES): the mode, the
+        # phase whose execute pulse opened the current acquisition, the
+        # phase whose SCAN-clear armed the gate (None = not armed), the
+        # clear's host time, the seconds the phase's own post-clear 0x100
+        # poll already spent, and the waits recorded for the diag
+        # ("cal_scanstop_waits"). The state is only ever set in "enforce".
+        self._scanstop_go_phase: str | None = None
+        self._scanstop_armed: str | None = None
+        self._scanstop_t_clear: float = 0.0
+        self._scanstop_polled_s: float = 0.0
+
         # Per-session calibration cache (see _scan_plain, _calibration_
         # rewrite(), docs/driver-design.md's calibration-cache section).
         # Vendor evidence: docs/protocol-notes.md pass 14 + its
@@ -1017,7 +1067,8 @@ class Scanner:
 
     @classmethod
     def open(cls) -> "Scanner":
-        return cls(UsbIo.open())
+        from .white_reference import WhiteReferenceStore
+        return cls(UsbIo.open(), white_reference=WhiteReferenceStore())
 
     def close(self) -> None:
         self.io.close()
@@ -1108,11 +1159,25 @@ class Scanner:
         write/execute counters, phase, failure record)."""
         return self.session.snapshot()
 
+    @property
+    def cal_wait_scanstop(self) -> str:
+        """"enforce" (default) or "off": see CAL_WAIT_SCANSTOP_MODES.
+        Fork production default; upstream defaults off."""
+        return self._cal_wait_scanstop
+
+    @cal_wait_scanstop.setter
+    def cal_wait_scanstop(self, mode: str) -> None:
+        if not isinstance(mode, str) or mode not in CAL_WAIT_SCANSTOP_MODES:
+            raise ValueError(
+                f"cal_wait_scanstop must be one of {CAL_WAIT_SCANSTOP_MODES}, got {mode!r}")
+        self._cal_wait_scanstop = mode
+
     # ------------------------------------------------------- op execution
 
     def _exec_ops(self, ops: list[Op], strict_polls: frozenset[int] = frozenset(),
                   strict_mask: int = LOAD_STATUS_MASK,
-                  poll_timeout_scale: float = 1.0) -> list[bytes]:
+                  poll_timeout_scale: float = 1.0, *,
+                  chunk_sink: Callable[[bytes], None] | None = None) -> list[bytes]:
         """Execute a verbatim op list with replay_trace.py semantics:
 
           - cw: ctrl_transfer verbatim; if it's a wv=0x82 buffer
@@ -1136,6 +1201,12 @@ class Scanner:
         0 or 1; "scan" produces one per image chunk plus the trailing
         drain).
 
+        ``chunk_sink`` (whole-strip sweep, docs/whole-strip-sweep-design.md
+        section 4): when set, each completed read buffer is handed to the
+        sink instead of being appended to the returned list, which is then
+        empty -- a multi-GB sweep never accumulates in memory. Nothing
+        else changes.
+
         Refuses to run outside a hardware operation (see _operation):
         this is the only way op streams reach the wire, and every
         caller must therefore be a guarded public method.
@@ -1153,7 +1224,10 @@ class Scanner:
         def flush() -> None:
             nonlocal cur
             if cur is not None:
-                collected.append(bytes(cur))
+                if chunk_sink is not None:
+                    chunk_sink(bytes(cur))
+                else:
+                    collected.append(bytes(cur))
                 cur = None
 
         for idx, op in enumerate(ops):
@@ -1194,8 +1268,10 @@ class Scanner:
             elif op.kind == "poll":
                 if (self._scanstop_armed is not None and op.wv == 0x018E
                         and op.wi == 0x0022):
-                    # The phase's own post-clear poll of register 0x100 is
-                    # part of the stop gate's budget (enforce mode only).
+                    # The phase's own post-clear poll of register 0x100
+                    # (tables.CAL_SHADING_MEASURE) counts against the stop
+                    # gate's budget ("enforce" only; the gate is never
+                    # armed otherwise).
                     _t0 = time.monotonic()
                     try:
                         self._poll_one(op, strict=idx in strict_polls, mask=strict_mask,
@@ -1563,96 +1639,6 @@ class Scanner:
                 f"fail). {safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
                 session=self.session.snapshot())
 
-    # ------------------------------------------- calibration stop gate
-
-    def _scanstop_note_write(self, data: bytes) -> None:
-        """A register write that reached the device ("enforce" only): an
-        execute pulse in a calibration acquisition phase opens an
-        acquisition; a later write of register 0x01 with bit 0 clear in
-        the same phase arms the gate. Pairs are taken in wire order."""
-        phase = getattr(self.session, "phase", None)
-        if phase not in CAL_ACQUISITION_PHASES:
-            self._scanstop_go_phase = None
-            return
-        for i in range(0, len(data) - 1, 2):
-            reg, val = data[i], data[i + 1]
-            if reg == 0x0F and val == 0x01:
-                self._scanstop_go_phase = phase
-            elif reg == 0x01 and not val & 0x01 and self._scanstop_go_phase == phase:
-                self._scanstop_go_phase = None
-                self._scanstop_armed = phase
-                self._scanstop_t_clear = time.monotonic()
-                self._scanstop_polled_s = 0.0
-
-    @staticmethod
-    def _bit0_clear(raw: bytes) -> bool:
-        """A 2-byte reply with the 0x55 acknowledge and bit 0 clear."""
-        return len(raw) == 2 and raw[1] == 0x55 and not raw[0] & 0x01
-
-    def _cal_wait_scan_stop(self) -> None:
-        """The armed stop gate (CAL_WAIT_SCANSTOP_MODES), run before the
-        next OUT transfer: register 0x100 bit 0 clear, then register 0x101
-        bit 0 clear. ONE deadline for both registers: NONSTRICT_POLL_FLOOR_S
-        from the gate's start, less the time the phase's own post-clear poll
-        of register 0x100 already spent (that budget is not granted twice);
-        every read is bounded by the time left
-        and a reply counts only if it arrived by the deadline. Reads only;
-        at the deadline CalibrationError is raised before any write. The
-        deadline is not taken from the SCAN-clear itself: legitimate host
-        gaps can follow a clear (the lamp warm-up re-runs the white phase
-        after an interval sleep), and they must not turn into refusals."""
-        phase = self._scanstop_armed
-        self._scanstop_armed = None
-        dev = self.io.dev
-        t_start = time.monotonic()
-        deadline = t_start + max(0.0, NONSTRICT_POLL_FLOOR_S - self._scanstop_polled_s)
-        rec = {"phase": phase, "reads_100": 0, "reads_101": 0,
-               "last_100": None, "last_101": None, "outcome": None, "wait_s": None,
-               "since_clear_s": None}
-        self._cal_scanstop_waits.append(rec)
-        for wi, key in ((0x0022, "100"), (0x0122, "101")):
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self._scanstop_refuse(rec, phase, key, t_start)
-                try:
-                    got = bytes(dev.ctrl_transfer(0xC0, 0x04, 0x018E, wi, 2,
-                                                  max(1, math.ceil(remaining * 1000))))
-                except Exception as e:
-                    if time.monotonic() >= deadline:
-                        self._scanstop_refuse(rec, phase, key, t_start, cause=e)
-                    raise
-                rec[f"reads_{key}"] += 1
-                rec[f"last_{key}"] = got.hex()
-                if time.monotonic() > deadline:
-                    self._scanstop_refuse(rec, phase, key, t_start)
-                if self._bit0_clear(got):
-                    break
-                time.sleep(0.004)
-        now = time.monotonic()
-        rec["outcome"] = "clear"
-        rec["wait_s"] = round(now - t_start, 4)
-        rec["since_clear_s"] = round(now - self._scanstop_t_clear, 4)
-
-    def _scanstop_refuse(self, rec: dict, phase, key: str, t_start: float,
-                         cause: BaseException | None = None) -> None:
-        """Record the stop gate's timeout and raise CalibrationError."""
-        now = time.monotonic()
-        last = rec.get(f"last_{key}")
-        rec["outcome"] = "timeout"
-        rec["wait_s"] = round(now - t_start, 4)
-        rec["since_clear_s"] = round(now - self._scanstop_t_clear, 4)
-        log.warning("calibration stop gate after phase %s: register 0x%s bit 0 not "
-                    "seen clear (last %s) by the deadline", phase, key, last)
-        raise safety.CalibrationError(
-            f"calibration scan-stop gate after phase {phase}: the previous "
-            f"acquisition is still running (register 0x{key} last reply {last}, "
-            f"bit 0 not seen clear within {NONSTRICT_POLL_FLOOR_S}s of the "
-            f"scan-clear). Nothing further was sent. This gate is enforced by default; "
-            f"disable it with `--cal-wait-scanstop off`. "
-            f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
-            session=self.session.snapshot()) from cause
-
     # ------------------------------------- calibration stale-read telemetry
     # Observers called from _exec_ops/_note_poll_settle AFTER a transfer
     # the driver makes anyway (see CAL_SERVED_FAST_S). They read only
@@ -1830,8 +1816,107 @@ class Scanner:
                         "(diagnostic only; the scan continued unchanged)",
                         frame, "; ".join(integ.get("cal_integrity_reasons") or []))
 
+    # ------------------------------------------- calibration stop gate
+    # Ported from bearyjd/opticfilm135i-linux feat/cal-wait-scanstop
+    # (f462b0b); see CAL_WAIT_SCANSTOP_MODES and docs/cal-scanstop-gate.md.
+
+    def _scanstop_note_write(self, data: bytes) -> None:
+        """A register batch that reached the device ("enforce" only): an
+        execute pulse in a calibration acquisition phase opens an
+        acquisition; a later write of register 0x01 with bit 0 clear in
+        the same phase arms the gate. Pairs are taken in wire order. A
+        write in any other phase drops a pending pulse (the gate is never
+        armed by position/scan/park)."""
+        phase = getattr(self.session, "phase", None)
+        if phase not in CAL_ACQUISITION_PHASES:
+            self._scanstop_go_phase = None
+            return
+        for i in range(0, len(data) - 1, 2):
+            reg, val = data[i], data[i + 1]
+            if reg == 0x0F and val == 0x01:
+                self._scanstop_go_phase = phase
+            elif reg == 0x01 and not val & 0x01 and self._scanstop_go_phase == phase:
+                self._scanstop_go_phase = None
+                self._scanstop_armed = phase
+                self._scanstop_t_clear = time.monotonic()
+                self._scanstop_polled_s = 0.0
+
+    @staticmethod
+    def _bit0_clear(raw: bytes) -> bool:
+        """A 2-byte reply with the 0x55 acknowledge and bit 0 clear."""
+        return len(raw) == 2 and raw[1] == 0x55 and not raw[0] & 0x01
+
+    def _cal_wait_scan_stop(self) -> None:
+        """The armed stop gate (CAL_WAIT_SCANSTOP_MODES), run before the
+        next OUT transfer: register 0x100 bit 0 clear, then register 0x101
+        bit 0 clear. ONE deadline for both registers: NONSTRICT_POLL_FLOOR_S
+        from the gate's start, less the time the phase's own post-clear poll
+        of register 0x100 already spent (that budget is not granted twice);
+        every read is bounded by the time left and a reply counts only if
+        it arrived by the deadline. Reads only; at the deadline
+        CalibrationError is raised before any write. The deadline is not
+        taken from the SCAN-clear itself: legitimate host gaps can follow a
+        clear (the lamp warm-up re-runs the white phase after an interval
+        sleep), and they must not turn into refusals; the diag records
+        both ``wait_s`` (the gate's own time) and ``since_clear_s``."""
+        phase = self._scanstop_armed
+        self._scanstop_armed = None
+        dev = self.io.dev
+        t_start = time.monotonic()
+        deadline = t_start + max(0.0, NONSTRICT_POLL_FLOOR_S - self._scanstop_polled_s)
+        rec = {"phase": phase, "reads_100": 0, "reads_101": 0,
+               "last_100": None, "last_101": None, "outcome": None, "wait_s": None,
+               "since_clear_s": None}
+        self._cal_scanstop_waits.append(rec)
+        for wi, key in ((0x0022, "100"), (0x0122, "101")):
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._scanstop_refuse(rec, phase, key, t_start)
+                try:
+                    got = bytes(dev.ctrl_transfer(0xC0, 0x04, 0x018E, wi, 2,
+                                                  max(1, math.ceil(remaining * 1000))))
+                except Exception as e:
+                    if time.monotonic() >= deadline:
+                        self._scanstop_refuse(rec, phase, key, t_start, cause=e)
+                    raise
+                rec[f"reads_{key}"] += 1
+                rec[f"last_{key}"] = got.hex()
+                if time.monotonic() > deadline:
+                    self._scanstop_refuse(rec, phase, key, t_start)
+                if self._bit0_clear(got):
+                    break
+                time.sleep(0.004)
+        now = time.monotonic()
+        rec["outcome"] = "clear"
+        rec["wait_s"] = round(now - t_start, 4)
+        rec["since_clear_s"] = round(now - self._scanstop_t_clear, 4)
+        log.debug("calibration stop gate after phase %s: clear after %.4fs "
+                  "(%d/%d reads of 0x100/0x101)", phase, rec["wait_s"],
+                  rec["reads_100"], rec["reads_101"])
+
+    def _scanstop_refuse(self, rec: dict, phase, key: str, t_start: float,
+                         cause: BaseException | None = None) -> None:
+        """Record the stop gate's timeout and raise CalibrationError."""
+        now = time.monotonic()
+        last = rec.get(f"last_{key}")
+        rec["outcome"] = "timeout"
+        rec["wait_s"] = round(now - t_start, 4)
+        rec["since_clear_s"] = round(now - self._scanstop_t_clear, 4)
+        log.warning("calibration stop gate after phase %s: register 0x%s bit 0 not "
+                    "seen clear (last %s) by the deadline", phase, key, last)
+        raise safety.CalibrationError(
+            f"calibration scan-stop gate after phase {phase}: the previous "
+            f"acquisition is still running (register 0x{key} last reply {last}, "
+            f"bit 0 not seen clear within {NONSTRICT_POLL_FLOOR_S}s of the "
+            f"scan-clear). Nothing further was sent. This gate is enforced by default; "
+            f"disable it with `--cal-wait-scanstop off`. "
+            f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
+            session=self.session.snapshot()) from cause
+
     def _run_phase(self, phase: Phase, strict_polls: frozenset[int] = frozenset(),
                    strict_mask: int = LOAD_STATUS_MASK, poll_timeout_scale: float = 1.0,
+                   *, chunk_sink: Callable[[bytes], None] | None = None,
                    **inject) -> list[bytes]:
         """Execute a phase's full op stream (with injections applied),
         returning its collected read buffers.
@@ -1844,8 +1929,14 @@ class Scanner:
         self.session.phase = phase.name
         t0 = time.monotonic()
         try:
-            return self._exec_ops(ops, strict_polls=strict_polls, strict_mask=strict_mask,
-                                  poll_timeout_scale=poll_timeout_scale)
+            if chunk_sink is None:
+                return self._exec_ops(ops, strict_polls=strict_polls,
+                                      strict_mask=strict_mask,
+                                      poll_timeout_scale=poll_timeout_scale)
+            return self._exec_ops(ops, strict_polls=strict_polls,
+                                  strict_mask=strict_mask,
+                                  poll_timeout_scale=poll_timeout_scale,
+                                  chunk_sink=chunk_sink)
         finally:
             dt = time.monotonic() - t0
             self._diag_phase_seconds[phase.name] = self._diag_phase_seconds.get(phase.name, 0.0) + dt
@@ -2213,6 +2304,11 @@ class Scanner:
         # ---- 2: status word, poll until ready ---------------------------
         word = self.io.read_status_word()
         log.info("cold_init: initial status word %#06x", word)
+        # Magazine present at the opening, read where the loader sensor is
+        # still reliable (before any table is written, see
+        # is_magazine_present). Decides below whether a clear loader bit at
+        # the first pre-move read is a displaced cassette to re-seat.
+        magazine_at_start = bool(word & 0x0800)
         self.io.poll_status_word(mask=0xF000, value=0xF000, timeout=COLD_READY_TIMEOUT)
 
         # ---- 3-7: cold register table + end_access + AFE bring-up ------
@@ -2229,7 +2325,7 @@ class Scanner:
         for round_n in range(1, rounds + 1):
             log.info("cold_init: homing round %d/%d", round_n, rounds)
             self.session.phase = f"cold_init:homing-{round_n}"
-            self._cold_homing_round()
+            self._cold_homing_round(reseat_check=(round_n == 1 and magazine_at_start))
             if round_n < rounds:
                 self._cold_write_table_and_afe()
 
@@ -2320,7 +2416,56 @@ class Scanner:
                 observed=self.session.start_reg01,
                 session=self.session.snapshot()) from None
 
-    def _cold_homing_round(self) -> None:
+    def _cold_reseat_traverse(self) -> None:
+        """The vendor's recovery for a cassette that is present but not at
+        the loader sensor: the LOAD flow's traverse (mode 0x1c,
+        holder.FEEDL_CEILING = 71 490 steps, loader speed profile) run
+        BEFORE the app-start jog.
+
+        Source: the 2026-10-31 vendor capture of the stuck-magazine
+        recovery (docs/test-log.md Test 112; docs/load-analysis.md, "Cold
+        start on a displaced cassette"). The vendor read status 0xd055
+        (loader bit 0x08 clear) and ran this move before the jog; it took
+        6.42 s (d155 -> d955 -> d855) against 1.1 s in a normal load. The
+        batch is the capture's own: the six move registers only (mode,
+        0xae/0xaf, the THREE-byte count 0x3d/0x3e/0x3f -- the loader speed
+        profile is already primed by the cold table), the loader slope
+        table to both scanner-RAM addresses, GO. The capture shows no
+        0x09 write around this move and none is added here.
+
+        Completion is STRICT, like every cold-start motor completion: the
+        status word must read the LOAD flow's captured traverse completion
+        (load_completion_target(), compared under LOAD_STATUS_MASK) within
+        COLD_MOVE_TIMEOUT, else the cold start ends with nothing further
+        written and a power cycle is required.
+
+        Implemented offline from the 2026-10-31 vendor capture; NOT
+        hardware-verified."""
+        feedl = holder.FEEDL_CEILING
+        self.io.write_regs([
+            (0x02, 0x1C), (0xAE, 0x00), (0xAF, 0xFF),
+            (0x3D, (feedl >> 16) & 0xFF), (0x3E, (feedl >> 8) & 0xFF), (0x3F, feedl & 0xFF),
+        ])
+        for addr in (0x1000C000, 0x10010000):
+            self.io.buf_write(addr, tables_base.SLOPE_TABLE_LOADER)
+        self.io.write_regs([(0x0F, 0x01)])
+        want = load_completion_target()
+        mask = (LOAD_STATUS_MASK << 8) | 0xFF
+        try:
+            self.io.poll_status_word(mask=mask, value=want & mask,
+                                     timeout=COLD_MOVE_TIMEOUT, strict=True)
+        except safety.StrictPollTimeoutError as e:
+            raise safety.StrictPollTimeoutError(
+                f"cold_init: re-seating traverse did not complete within "
+                f"{COLD_MOVE_TIMEOUT:.0f}s: status word {e.last.hex()}, want "
+                f"{want:04x} under mask {mask:04x} (the vendor's recovery took 6.4 s). "
+                f"The transport state is unknown and the cold start stops here -- no "
+                f"further motor move is started. This is a new observation -- please "
+                f"record it. {safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
+                last=e.last, want=e.want, observed=self.session.start_reg01,
+                session=self.session.snapshot()) from None
+
+    def _cold_homing_round(self, reseat_check: bool = False) -> None:
         """One of cold_init()'s three homing rounds: pre-move sensor/
         int-ack prep, move 1 (feed 6690, minimal regs), a resync
         interstitial + move 2 (feed 6690, full speed-profile rewrite),
@@ -2338,7 +2483,22 @@ class Scanner:
         # ---- pre-move setup -----------------------------------------
         val32 = self.io.read_reg(0x32)
         self.io.write_regs([(0x32, val32 & ~0x02 & 0xFF)])
-        self.io.read_status_word()
+        w = self.io.read_status_word()
+        if reseat_check:
+            # The vendor's recovery (Test 112 capture): this very read
+            # (0xd055, loader bit clear) with a magazine present at the
+            # opening is followed by the load traverse, then the jog. The
+            # check reuses the existing read, so a cold start that does not
+            # re-seat is byte-identical on the wire to before.
+            if w & 0x0800:
+                log.info("cold_init: loader sensor set (status %#06x) -- no re-seating", w)
+            else:
+                log.info("cold_init: loader sensor clear (status %#06x) with a magazine "
+                         "present -- re-seating traverse before the jog (vendor "
+                         "recovery, Test 112; NOT hardware-verified)", w)
+                self.session.phase = "cold_init:reseat"
+                self._cold_reseat_traverse()
+                self.session.phase = "cold_init:homing-1"
         self.io.write_regs([(0x36, 0xFC)])
         self.io.write_regs([(0x33, 0x8E)])
         val32 = self.io.read_reg(0x32)
@@ -3283,34 +3443,14 @@ class Scanner:
             gain_r=bytes([gain_r]), gain_g=bytes([gain_g]), gain_b=bytes([gain_b]),
         )
 
-    def _scan_plain(self, frame: int,
-                    overscan_mm: float = holder.OVERSCAN_MM) -> tuple[bytes, int]:
-        # No homing move here. The vendor flow has none (protocol-notes.md
-        # pass 14): positioning below is an absolute mode-0x18 feed that
-        # works from wherever the previous frame left the carriage. The
-        # home() call that used to sit here executed mode 0x30 -- the
-        # scan pass -- with the previous frame's line count still in
-        # regs 0x25-0x27, i.e. a full-length engine run before the
-        # calibration reads (frame 2+ of a batch calibrated dark,
-        # 2026-09-01).
-
-        # ---- per-scan diagnostics: reset recording state (see diag.py) --
-        self._diag_phase_seconds = {}
-        self._diag_poll_timeouts = 0
-        self._diag_cr_mismatches = 0
-        self._diag_poll_timeout_details = []
-        self._diag_poll_settle = []
-        self._diag_poll_settle_max_s = 0.0
-        self._cal_acquisitions = []
-        self._cal_scanstop_waits = []
-        self._cal_bufempty_waits = []
-        self._scanstop_go_phase = None
-        self._scanstop_armed = None
-        self._diag_warmup = None
-        self._diag_park_waits = None
-        started_utc = datetime.now(timezone.utc).isoformat()
-        t_start = time.monotonic()
-
+    def _plain_calibration(self) -> "_PlainCal":
+        """The plain-3600 calibration block of _scan_plain (fresh
+        measurement, or this session's cache), extracted UNCHANGED so
+        the plain whole-strip sweep (_sweep_plain) runs the identical op
+        stream. The per-scan diagnostics reset and the start timestamps
+        stay with the callers. Fills ``self._cal_cache`` on a fresh
+        calibration exactly as before; the callers clear it again if a
+        later phase raises."""
         # ---- calibration: fresh measurement, or this session's cache ----
         # See docs/protocol-notes.md pass 14 + addendum 3, and the
         # _cal_cache comment in __init__. The cache key is (dpi, dual);
@@ -3357,6 +3497,8 @@ class Scanner:
                     f"(--cal-readback-guard fail). {safety.NO_RECOVERY_ATTEMPTED} "
                     f"{safety.POWER_CYCLE_INSTRUCTION}",
                     session=self.session.snapshot())
+
+            white_blocked_diag = None
             log.info("calibration: reusing cached codes (gain R=%#04x G=%#04x B=%#04x, "
                      "offset R=%#06x G=%#06x B=%#06x)", gain_r, gain_g, gain_b,
                      off_r, off_g, off_b)
@@ -3426,7 +3568,11 @@ class Scanner:
             _t0 = time.monotonic()
             verify_raw = self._exec_ops(verify_phase.ops[:verify_phase.split_at])[0]
             verify_meas = np.frombuffer(verify_raw, dtype="<u2").reshape(128, 3762, 3)
-            white_guarded, white_dips = calibrate.guard_white_dips(verify_meas)
+            from . import white_reference
+            white_unblocked, white_blocks = white_reference.guard(
+                self._white_reference, white_reference.kind_key("plain", 3600, verify_meas.shape[1]),
+                verify_meas)
+            white_guarded, white_dips = calibrate.guard_white_dips(white_unblocked)
             if white_dips:
                 log.info("white measurement: %d narrow dip(s) guarded before the gain table: %s",
                          len(white_dips), [d.as_dict() for d in white_dips])
@@ -3459,6 +3605,8 @@ class Scanner:
             white_dips_diag = [d.as_dict() for d in white_dips]
             integ = self._cal_integrity_diag(dark_b_substituted, dark_b_fallback)
 
+            white_blocked_diag = [b.as_dict() for b in white_blocks]
+
             # Cache immediately on success -- see __init__'s _cal_cache
             # comment and (d) in the design: a LATER failure (position/
             # scan/park below) must not leave this trusted by the next
@@ -3481,6 +3629,56 @@ class Scanner:
                 # calibration for (it can be cached in log mode).
                 "cal_fail_reasons": self._cal_integrity_fail_reasons(),
             }
+
+        return _PlainCal(
+            calibration=calibration, cal_data=cal_data,
+            gain_codes=(gain_r, gain_g, gain_b),
+            offset_codes=(off_r, off_g, off_b),
+            dark_a_mean=dark_a_mean, dark_b_mean=dark_b_mean,
+            dark_b_substituted=dark_b_substituted, dark_b_fallback=dark_b_fallback,
+            integrity=integ, warmup=warmup,
+            shading_stats=shading_stats, shading2_stats=shading2_stats,
+            white_dips_diag=white_dips_diag,
+            white_blocked_diag=white_blocked_diag)
+
+    def _scan_plain(self, frame: int,
+                    overscan_mm: float = holder.OVERSCAN_MM) -> tuple[bytes, int]:
+        # No homing move here. The vendor flow has none (protocol-notes.md
+        # pass 14): positioning below is an absolute mode-0x18 feed that
+        # works from wherever the previous frame left the carriage. The
+        # home() call that used to sit here executed mode 0x30 -- the
+        # scan pass -- with the previous frame's line count still in
+        # regs 0x25-0x27, i.e. a full-length engine run before the
+        # calibration reads (frame 2+ of a batch calibrated dark,
+        # 2026-09-01).
+
+        # ---- per-scan diagnostics: reset recording state (see diag.py) --
+        self._diag_phase_seconds = {}
+        self._diag_poll_timeouts = 0
+        self._diag_cr_mismatches = 0
+        self._cal_acquisitions = []
+        self._cal_bufempty_waits = []
+        self._cal_scanstop_waits = []
+        self._scanstop_go_phase = None
+        self._scanstop_armed = None
+        self._diag_poll_timeout_details = []
+        self._diag_poll_settle = []
+        self._diag_poll_settle_max_s = 0.0
+        self._diag_warmup = None
+        self._diag_park_waits = None
+        started_utc = datetime.now(timezone.utc).isoformat()
+        t_start = time.monotonic()
+
+        cal = self._plain_calibration()
+        dark_b_fallback, integ = cal.dark_b_fallback, cal.integrity
+        calibration, cal_data = cal.calibration, cal.cal_data
+        gain_r, gain_g, gain_b = cal.gain_codes
+        off_r, off_g, off_b = cal.offset_codes
+        dark_a_mean, dark_b_mean = cal.dark_a_mean, cal.dark_b_mean
+        dark_b_substituted, warmup = cal.dark_b_substituted, cal.warmup
+        shading_stats, shading2_stats = cal.shading_stats, cal.shading2_stats
+        white_dips_diag = cal.white_dips_diag
+        white_blocked_diag = cal.white_blocked_diag
 
         try:
             # ---- geometry: overscan sizes FEEDL and the line/chunk count -
@@ -3580,6 +3778,7 @@ class Scanner:
             "shading": shading_stats,
             "shading2": shading2_stats,
             "white_dips": white_dips_diag,
+            "white_blocked": white_blocked_diag,
             "feedl": feedl,
             "travel_margin_steps": travel_margin_steps,
             "phase_seconds": dict(self._diag_phase_seconds),
@@ -3601,72 +3800,15 @@ class Scanner:
 
     # ----------------------------------------------------------- scan (IR)
 
-    def _scan_dual(self, t, frame: int = 1, lines: int | None = None,
-                   overscan_mm: float | None = None,
-                   slide: bool = False) -> tuple[bytes, int, dict]:
-        """Dual-light (alternating IR/visible line) counterpart of scan(),
-        driven by the phases of table module `t` -- tables_ir (3600 dpi,
-        trace 04) or a tables_dpi<N> module (the 2026-09-02 captures);
-        all compiled by tools/gen_tables.py's compile_dual() to one
-        interface.
-
-        Every calibration buffer in this mode is at the RAW sensor
-        readout width (t.IMAGE_WIDTH: 5184 at 3600 dpi, not the windowed
-        3762 the plain scan uses) and covers ALTERNATING lines -- even
-        index = IR pass, odd index = visible pass (see ../cal-data/ir/
-        ir-analysis.md and image.split_ir(), which applies the same
-        convention to the final image). Measurements that feed a per-
-        channel computation (gain, shading) are de-interleaved into
-        their halves BEFORE computing. The shading table is uploaded to
-        TWO scanner-RAM addresses with a CROSS-CONNECTION: address A
-        (0x10014000) is computed from the ODD (visible) measurement
-        lines but applied by the scanner hardware to ODD (visible)
-        scan lines; address B (0x10034000) from EVEN (IR) measurement
-        lines, applied to EVEN (IR) scan lines. The vendor uploads
-        were analysed as "A from even, B from odd" (pass 18), which
-        correctly identified the SOURCE data but incorrectly assumed
-        same-source application; empirical testing (2026-09-03) proved
-        the scanner applies A→odd and B→even, matching the pre-pass-18
-        code that produced working images. See calibrate.SHADING2_
-        TARGET_A/_B for the per-address white-uniformity targets.
-        AFE gain/offset (regs 2-7) and FEEDL/line-count injections
-        are the same single-register mechanism as the plain scan.
-
-        The line count is programmed as whole image chunks: `lines`
-        (alternating lines, default t.DEFAULT_LINES) rounded up to
-        t.LINES_PER_CHUNK, and that many chunks are read.
-        """
-        # No homing move -- see scan().
+    def _calibrate_dual(self, t) -> "_DualCal":
+        """The dual-light calibration block (dark pair, white/gain,
+        gain-check pair, shading measure, upload, verify), extracted
+        UNCHANGED from _scan_dual so the whole-strip sweep
+        (docs/whole-strip-sweep-design.md section 4) runs the identical
+        op stream. The per-scan diagnostics reset and the start timestamps
+        stay with the callers."""
         W = t.IMAGE_WIDTH
         dpi = t.DPI
-
-        # Dual is never cached (docs/protocol-notes.md pass 14 addendum 3:
-        # no vendor capture of a dual-light skip-calibration exists, and
-        # its own CAL_SHADING_VERIFY preamble differs from plain's --
-        # reported, not guessed; see tables.CAL_REWRITE's module comment).
-        # It ALWAYS runs a full calibration below, which uploads its own
-        # shading table to scanner RAM -- overwriting whatever the plain
-        # path's cache (if any) left there. Clear it unconditionally so a
-        # later plain scan in this session never trusts a shading table
-        # that is no longer the one it was cached against.
-        self._cal_cache = None
-
-        # ---- per-scan diagnostics: reset recording state (see diag.py) --
-        self._diag_phase_seconds = {}
-        self._diag_poll_timeouts = 0
-        self._diag_cr_mismatches = 0
-        self._diag_poll_timeout_details = []
-        self._diag_poll_settle = []
-        self._diag_poll_settle_max_s = 0.0
-        self._cal_acquisitions = []
-        self._cal_scanstop_waits = []
-        self._cal_bufempty_waits = []
-        self._scanstop_go_phase = None
-        self._scanstop_armed = None
-        self._diag_warmup = None
-        self._diag_park_waits = None
-        started_utc = datetime.now(timezone.utc).isoformat()
-        t_start = time.monotonic()
 
         # ---- dark pair (offset bracket, gain=0) ------------------------
         # Both reads feed offset_codes() (per-channel means, same as the
@@ -3753,8 +3895,13 @@ class Scanner:
         # table B (IR lines) uses TARGET_B — matching the vendor's
         # per-address targets, with the line subsets swapped to the
         # empirically correct assignment.
-        white_a, dips_a = calibrate.guard_white_dips(verify_meas[1::2])
-        white_b, dips_b = calibrate.guard_white_dips(verify_meas[0::2])
+        from . import white_reference
+        vis_unblocked, blocks_a = white_reference.guard(
+            self._white_reference, white_reference.kind_key("dual-vis", dpi, W), verify_meas[1::2])
+        ir_unblocked, blocks_b = white_reference.guard(
+            self._white_reference, white_reference.kind_key("dual-ir", dpi, W), verify_meas[0::2])
+        white_a, dips_a = calibrate.guard_white_dips(vis_unblocked)
+        white_b, dips_b = calibrate.guard_white_dips(ir_unblocked)
         if dips_a or dips_b:
             log.info("white measurement: narrow dip(s) guarded before the gain tables: A %s B %s",
                      [d.as_dict() for d in dips_a], [d.as_dict() for d in dips_b])
@@ -3770,6 +3917,94 @@ class Scanner:
             self._diag_phase_seconds.get("cal_shading_verify", 0.0) + (time.monotonic() - _t0)
         )
         self._cal_integrity_refuse("after the shading verify")
+
+        return _DualCal(
+            dark_a=dark_a, dark_b=dark_b, dark_b_substituted=dark_b_substituted,
+            dark_b_fallback=dark_b_fallback,
+            integrity=self._cal_integrity_diag(dark_b_substituted, dark_b_fallback),
+            gain_codes=(gain_r, gain_g, gain_b), offset_codes=(off_r, off_g, off_b),
+            shading_meas=shading_meas, verify_meas=verify_meas,
+            shading_a=shading_a, shading_b=shading_b,
+            shading2_a=shading2_a, shading2_b=shading2_b,
+            dips_a=dips_a, dips_b=dips_b, blocks_a=blocks_a, blocks_b=blocks_b)
+
+    def _scan_dual(self, t, frame: int = 1, lines: int | None = None,
+                   overscan_mm: float | None = None,
+                   slide: bool = False) -> tuple[bytes, int, dict]:
+        """Dual-light (alternating IR/visible line) counterpart of scan(),
+        driven by the phases of table module `t` -- tables_ir (3600 dpi,
+        trace 04) or a tables_dpi<N> module (the 2026-09-02 captures);
+        all compiled by tools/gen_tables.py's compile_dual() to one
+        interface.
+
+        Every calibration buffer in this mode is at the RAW sensor
+        readout width (t.IMAGE_WIDTH: 5184 at 3600 dpi, not the windowed
+        3762 the plain scan uses) and covers ALTERNATING lines -- even
+        index = IR pass, odd index = visible pass (see ../cal-data/ir/
+        ir-analysis.md and image.split_ir(), which applies the same
+        convention to the final image). Measurements that feed a per-
+        channel computation (gain, shading) are de-interleaved into
+        their halves BEFORE computing. The shading table is uploaded to
+        TWO scanner-RAM addresses with a CROSS-CONNECTION: address A
+        (0x10014000) is computed from the ODD (visible) measurement
+        lines but applied by the scanner hardware to ODD (visible)
+        scan lines; address B (0x10034000) from EVEN (IR) measurement
+        lines, applied to EVEN (IR) scan lines. The vendor uploads
+        were analysed as "A from even, B from odd" (pass 18), which
+        correctly identified the SOURCE data but incorrectly assumed
+        same-source application; empirical testing (2026-09-03) proved
+        the scanner applies A→odd and B→even, matching the pre-pass-18
+        code that produced working images. See calibrate.SHADING2_
+        TARGET_A/_B for the per-address white-uniformity targets.
+        AFE gain/offset (regs 2-7) and FEEDL/line-count injections
+        are the same single-register mechanism as the plain scan.
+
+        The line count is programmed as whole image chunks: `lines`
+        (alternating lines, default t.DEFAULT_LINES) rounded up to
+        t.LINES_PER_CHUNK, and that many chunks are read.
+        """
+        # No homing move -- see scan().
+        W = t.IMAGE_WIDTH
+        dpi = t.DPI
+
+        # Dual is never cached (docs/protocol-notes.md pass 14 addendum 3:
+        # no vendor capture of a dual-light skip-calibration exists, and
+        # its own CAL_SHADING_VERIFY preamble differs from plain's --
+        # reported, not guessed; see tables.CAL_REWRITE's module comment).
+        # It ALWAYS runs a full calibration below, which uploads its own
+        # shading table to scanner RAM -- overwriting whatever the plain
+        # path's cache (if any) left there. Clear it unconditionally so a
+        # later plain scan in this session never trusts a shading table
+        # that is no longer the one it was cached against.
+        self._cal_cache = None
+
+        # ---- per-scan diagnostics: reset recording state (see diag.py) --
+        self._diag_phase_seconds = {}
+        self._diag_poll_timeouts = 0
+        self._diag_cr_mismatches = 0
+        self._cal_acquisitions = []
+        self._cal_bufempty_waits = []
+        self._cal_scanstop_waits = []
+        self._scanstop_go_phase = None
+        self._scanstop_armed = None
+        self._diag_poll_timeout_details = []
+        self._diag_poll_settle = []
+        self._diag_poll_settle_max_s = 0.0
+        self._diag_warmup = None
+        self._diag_park_waits = None
+        started_utc = datetime.now(timezone.utc).isoformat()
+        t_start = time.monotonic()
+
+        cal = self._calibrate_dual(t)
+        dark_b_fallback, integ = cal.dark_b_fallback, cal.integrity
+        dark_a, dark_b, dark_b_substituted = cal.dark_a, cal.dark_b, cal.dark_b_substituted
+        gain_r, gain_g, gain_b = cal.gain_codes
+        off_r, off_g, off_b = cal.offset_codes
+        shading_meas, verify_meas = cal.shading_meas, cal.verify_meas
+        shading_a, shading_b = cal.shading_a, cal.shading_b
+        shading2_a, shading2_b = cal.shading2_a, cal.shading2_b
+        dips_a, dips_b = cal.dips_a, cal.dips_b
+        blocks_a, blocks_b = cal.blocks_a, cal.blocks_b
 
         # ---- position: relative feed from current carriage position ------
         # POSITION uses mode 0x18 (feed) which advances FEEDL steps from
@@ -3866,7 +4101,6 @@ class Scanner:
         # ---- park ---------------------------------------------------------
         self._park(t, ir=True)
 
-        integ = self._cal_integrity_diag(dark_b_substituted, dark_b_fallback)
         warmup = self._diag_warmup or {}
         self.last_cal_data = {
             "white_line": self._cal_white_line(),
@@ -3916,6 +4150,7 @@ class Scanner:
             "shading": {"a": _shading_stats(shading_a), "b": _shading_stats(shading_b)},
             "shading2": {"a": _shading_stats(shading2_a), "b": _shading_stats(shading2_b)},
             "white_dips": {"a": [d.as_dict() for d in dips_a], "b": [d.as_dict() for d in dips_b]},
+            "white_blocked": {"a": [b.as_dict() for b in blocks_a], "b": [b.as_dict() for b in blocks_b]},
             "feedl": feedl,
             "travel_margin_steps": travel_margin_steps,
             "phase_seconds": dict(self._diag_phase_seconds),
@@ -3938,3 +4173,400 @@ class Scanner:
         self._warn_cal_integrity(frame, integ)
 
         return image, W, {"width": W, "alternating": True, "dpi": dpi}
+
+    # ------------------------------------------------- whole-strip sweep
+
+    def sweep(
+        self, first: int, last: int, *, dpi: int = 3600,
+        overscan_mm: float | None = None, sink: Callable[[bytes], None],
+        ir: bool = True,
+    ) -> tuple[int, dict]:
+        """Whole-strip sweep over apertures ``first``..``last``: ONE
+        calibration, ONE positioning move to aperture ``first``'s leading
+        edge, ONE scan pass over every aperture, ONE park
+        (docs/whole-strip-sweep-design.md).
+
+        ``ir=True`` (default): ``dpi`` selects that resolution's dual
+        table (IR on). ``ir=False`` (the plain 3600 profile, ``_sweep_plain``)
+        is REFUSED: withdrawn after Test 112, see below. Same preconditions
+        as scan(): initialize() first, loaded this session,
+        a valid park_mode. Image data goes ONLY to ``sink`` (called once
+        per image chunk, in order); nothing is returned but
+        (width, meta) -- the sweep never holds more than one chunk.
+
+        NOT hardware-verified: dual 3600's long pass is a new data point
+        (design doc section 2); the plain sweep is implemented offline
+        only.
+        """
+        self.session.write_allowed_or_final()
+        if not ir:
+            # WITHDRAWN after Test 112 (2026-10-31, docs/test-log.md): the
+            # plain engine's long pass started ~19 mm from where the
+            # geometry assumed, the magazine ended displaced against the
+            # slot's front edge and the park stalled (power cut by the
+            # operator). _sweep_plain stays in the tree for the record;
+            # it is not reachable until the mechanism is understood and a
+            # new hardware plan exists.
+            raise Of135iError(
+                "the plain (--no-ir) whole-strip sweep is withdrawn after Test 112 "
+                "(2026-10-31): black-and-white film keeps the per-frame cycle. "
+                f"{safety.NO_COMMANDS_SENT}")
+        t = dual_tables(dpi) if ir else tables
+        from . import sweep as _sweep_mod
+        if last - first + 1 > _sweep_mod.SWEEP_MAX_APERTURES_VERIFIED:
+            raise Of135iError(
+                f"sweep over {last - first + 1} apertures ({first}-{last}) is refused: no "
+                f"sweep longer than {_sweep_mod.SWEEP_MAX_APERTURES_VERIFIED} apertures has "
+                f"run on hardware (owner's decision after Test 112, 2026-10-31). "
+                f"{safety.NO_COMMANDS_SENT}")
+        if self.park_mode not in ("verbatim", "semantic"):
+            raise ValueError(f"unknown park_mode {self.park_mode!r} (want 'verbatim' or 'semantic')")
+        if self.session.cold_init_done and not self._loaded_this_session:
+            raise OperationNotAllowedError(
+                "sweep() after a cold start requires the magazine load flow first "
+                f"(see scan()). {safety.NO_COMMANDS_SENT}", session=self.session.snapshot())
+        if not self._prepared_for_scan:
+            raise OperationNotAllowedError(
+                "sweep() requires initialize() first in this session. "
+                f"{safety.NO_COMMANDS_SENT}", session=self.session.snapshot())
+        # Validate the whole window BEFORE the operation: a bad range is a
+        # plain error, not a hardware-session failure.
+        self._sweep_geometry(t, first, last,
+                             overscan_mm if overscan_mm is not None else holder.OVERSCAN_MM)
+        with self._operation("sweep"):
+            self._prepared_for_scan = False
+            if self._cal_capture is not None:
+                self._cal_capture.set_frame(first)
+            ov = overscan_mm if overscan_mm is not None else holder.OVERSCAN_MM
+            if not ir:
+                return self._sweep_plain(first, last, overscan_mm=ov, sink=sink)
+            return self._sweep_dual(
+                t, first=first, last=last, overscan_mm=ov, sink=sink)
+
+    @staticmethod
+    def _sweep_geometry(t, first: int, last: int, overscan_mm: float):
+        """holder.dual_sweep_geometry for table module ``t`` (or
+        holder.plain_sweep_geometry for the plain-3600 module ``tables``)."""
+        if t is tables:
+            return holder.plain_sweep_geometry(
+                first, last,
+                chunk_lines=tables.IMAGE_CHUNK_LINES,
+                colour_crop_lines=image_mod.align_shift(3600),
+                default_lines=tables.DEFAULT_LINES,
+                overscan_mm=overscan_mm,
+            )
+        return holder.dual_sweep_geometry(
+            first, last,
+            dpi=t.DPI,
+            lines_per_chunk=t.LINES_PER_CHUNK,
+            colour_crop_lines=image_mod.align_shift(t.DPI),
+            default_wire_lines=t.DEFAULT_LINES,
+            overscan_mm=overscan_mm,
+        )
+
+    def _sweep_plain(self, first: int, last: int, *, overscan_mm: float,
+                     sink: Callable[[bytes], None]) -> tuple[int, dict]:
+        """Plain-3600 whole-strip sweep (black-and-white film): this
+        session's calibration (fresh, or the cached codes, exactly as
+        _scan_plain), POSITION once, SCAN the whole window into ``sink``,
+        PARK once. Modelled on _scan_plain and _sweep_dual; the only new
+        thing is the geometry (holder.plain_sweep_geometry).
+
+        Implemented offline; NOT hardware-verified. A long plain-3600
+        pass is a new data point for the engine (see
+        holder.plain_sweep_geometry's anchoring gate).
+        """
+        W = tables.IMAGE_WIDTH
+        self._diag_phase_seconds = {}
+        self._diag_poll_timeouts = 0
+        self._diag_cr_mismatches = 0
+        self._cal_acquisitions = []
+        self._cal_bufempty_waits = []
+        self._cal_scanstop_waits = []
+        self._scanstop_go_phase = None
+        self._scanstop_armed = None
+        self._diag_poll_timeout_details = []
+        self._diag_poll_settle = []
+        self._diag_poll_settle_max_s = 0.0
+        self._diag_warmup = None
+        self._diag_park_waits = None
+        started_utc = datetime.now(timezone.utc).isoformat()
+        t_start = time.monotonic()
+
+        cal = self._plain_calibration()
+        dark_b_fallback, integ = cal.dark_b_fallback, cal.integrity
+        gain_r, gain_g, gain_b = cal.gain_codes
+        off_r, off_g, off_b = cal.offset_codes
+        warmup = cal.warmup
+        counted = {"chunks": 0, "bytes": 0, "extra": 0}
+
+        try:
+            geom, _ = self._sweep_geometry(tables, first, last, overscan_mm)
+            feedl = holder.check_feedl(geom.feedl)
+            n_chunks = geom.chunks
+            n_lines = tables.scan_lines_for_chunks(n_chunks)
+            log.info("sweep apertures %d-%d (3600 dpi plain): FEEDL=%d chunks=%d lines=%d "
+                     "end=%d margins lead=%.3f trail=%.3f mm",
+                     first, last, feedl, n_chunks, n_lines,
+                     round(geom.end_hwdpi), geom.leading_margin_mm, geom.trailing_margin_mm)
+
+            # PARK budget from the furthest position the pass reaches.
+            self._park_scale = position_timeout_scale(tables, round(geom.end_hwdpi))
+            self._run_phase(
+                tables.POSITION,
+                strict_polls=self._strict_status_polls(tables.POSITION),
+                strict_mask=self._position_status_mask(),
+                poll_timeout_scale=position_timeout_scale(tables, feedl),
+                feedl_hi=bytes([(feedl >> 16) & 0xFF]),
+                feedl_mid=bytes([(feedl >> 8) & 0xFF]),
+                feedl_lo=bytes([feedl & 0xFF]),
+            )
+
+            vis_per_chunk = tables.IMAGE_CHUNK_LINES     # plain: no /2
+            upcoming = sorted((edges[0], k) for k, edges in geom.predicted_edges.items())
+
+            def counting_sink(buf: bytes) -> None:
+                # Only the n_chunks image chunks reach the sink; the
+                # trailing drain buffer is swallowed (as _scan_plain's
+                # buffers[:n_chunks]).
+                if counted["chunks"] >= n_chunks:
+                    counted["extra"] += 1
+                    return
+                sink(buf)
+                counted["chunks"] += 1
+                counted["bytes"] += len(buf)
+                vis_line = counted["chunks"] * vis_per_chunk
+                while upcoming and vis_line >= upcoming[0][0]:
+                    _, k = upcoming.pop(0)
+                    log.info("scanning frame %d @ 3600 dpi (sweep pass, aperture %d of %d-%d, %d%%)",
+                             k, k, first, last, round(100 * counted["chunks"] / n_chunks))
+
+            self._run_phase(
+                tables.scan_phase(n_chunks),
+                lines_hi=bytes([(n_lines >> 8) & 0xFF]),
+                lines_lo=bytes([n_lines & 0xFF]),
+                chunk_sink=counting_sink,
+            )
+
+            self._park(tables, ir=False)
+        except Exception:
+            # As _scan_plain: never leave a cache a failed pass didn't earn.
+            self._cal_cache = None
+            raise
+
+        self.last_cal_data = cal.cal_data
+        self.last_diag = {
+            "dpi": 3600,
+            "frame": None,
+            "dual": False,
+            "lines": n_lines,
+            "width": W,
+            "raw_bytes": counted["bytes"],
+            "chunk_count": n_chunks,
+            "overscan_mm": overscan_mm,
+            "calibration": cal.calibration,
+            "dark_b_fallback": dark_b_fallback,
+            **integ,
+            "cal_scanstop_waits": list(self._cal_scanstop_waits),
+            "cal_bufempty_waits": list(self._cal_bufempty_waits),
+            "dark_a_mean": cal.dark_a_mean,
+            "dark_b_mean": cal.dark_b_mean,
+            "dark_b_substituted": cal.dark_b_substituted,
+            "white_mean": warmup.get("white_mean"),
+            "white_max": warmup.get("white_max"),
+            "gain_codes": [gain_r, gain_g, gain_b],
+            "warmup_attempts": warmup.get("attempts"),
+            "warmup_gain_history": warmup.get("gain_history"),
+            "warmup_exhausted": warmup.get("exhausted"),
+            "warmup_peak_history": warmup.get("peak_history"),
+            "warmup_measurement_times_s": warmup.get("measurement_times_s"),
+            "offset_codes": [off_r, off_g, off_b],
+            "shading": cal.shading_stats,
+            "shading2": cal.shading2_stats,
+            "white_dips": cal.white_dips_diag,
+            "white_blocked": cal.white_blocked_diag,
+            "feedl": feedl,
+            "sweep": {
+                "first": first, "last": last, "feedl": feedl,
+                "end_hwdpi": geom.end_hwdpi, "wire_lines": n_lines,
+                "chunk_count": n_chunks, "raw_bytes": counted["bytes"],
+                "extra_buffers": counted["extra"], "overscan_mm": overscan_mm,
+            },
+            "phase_seconds": dict(self._diag_phase_seconds),
+            "total_seconds": time.monotonic() - t_start,
+            "poll_timeouts": self._diag_poll_timeouts,
+            "cr_mismatches": self._diag_cr_mismatches,
+            "poll_timeout_details": list(self._diag_poll_timeout_details),
+            "poll_settle": list(self._diag_poll_settle),
+            "poll_settle_max_s": round(self._diag_poll_settle_max_s, 4),
+            "park_mode": self.park_mode,
+            "park_waits": dict(self._diag_park_waits) if self._diag_park_waits is not None else None,
+            "started_utc": started_utc,
+            "finished_utc": datetime.now(timezone.utc).isoformat(),
+            "session": self.session.snapshot(),
+        }
+        return W, {"width": W, "alternating": False, "dpi": 3600,
+                   "geometry": geom, "wire_lines": n_lines}
+
+    def _sweep_dual(self, t, *, first: int, last: int, overscan_mm: float,
+                    sink: Callable[[bytes], None]) -> tuple[int, dict]:
+        """Calibrate once, POSITION once, SCAN the whole strip into
+        ``sink``, PARK once (design doc section 4). The calibration and
+        the POSITION stream are those of _scan_dual; the only differences
+        are the geometry (holder.dual_sweep_geometry) and the park budget
+        (taken from the furthest position reached)."""
+        W = t.IMAGE_WIDTH
+        dpi = t.DPI
+        self._cal_cache = None      # dual never caches (see _scan_dual)
+
+        self._diag_phase_seconds = {}
+        self._diag_poll_timeouts = 0
+        self._diag_cr_mismatches = 0
+        self._cal_acquisitions = []
+        self._cal_bufempty_waits = []
+        self._cal_scanstop_waits = []
+        self._scanstop_go_phase = None
+        self._scanstop_armed = None
+        self._diag_poll_timeout_details = []
+        self._diag_poll_settle = []
+        self._diag_poll_settle_max_s = 0.0
+        self._diag_warmup = None
+        self._diag_park_waits = None
+        started_utc = datetime.now(timezone.utc).isoformat()
+        t_start = time.monotonic()
+
+        cal = self._calibrate_dual(t)
+        dark_b_fallback, integ = cal.dark_b_fallback, cal.integrity
+        gain_r, gain_g, gain_b = cal.gain_codes
+        off_r, off_g, off_b = cal.offset_codes
+
+        geom, wire_lines = self._sweep_geometry(t, first, last, overscan_mm)
+        feedl = holder.check_feedl(geom.feedl)
+        log.info("sweep apertures %d-%d (%d dpi dual): FEEDL=%d chunks=%d wire_lines=%d "
+                 "end=%d margins lead=%.3f trail=%.3f mm",
+                 first, last, dpi, feedl, geom.chunks, wire_lines,
+                 round(geom.end_hwdpi), geom.leading_margin_mm, geom.trailing_margin_mm)
+        # The semantic PARK's waits are stretched by _park_scale. After a
+        # sweep the carriage returns from aperture `last`'s far edge, not
+        # from the FEEDL (which is the START), so the budget comes from
+        # the furthest position the pass reaches (design doc section 4).
+        self._park_scale = position_timeout_scale(t, round(geom.end_hwdpi))
+        self._run_phase(
+            t.POSITION,
+            strict_polls=self._strict_status_polls(t.POSITION),
+            strict_mask=self._position_status_mask(),
+            poll_timeout_scale=position_timeout_scale(t, feedl),
+            feedl_hi=bytes([(feedl >> 16) & 0xFF]),
+            feedl_mid=bytes([(feedl >> 8) & 0xFF]),
+            feedl_lo=bytes([feedl & 0xFF]),
+        )
+
+        n_chunks = geom.chunks
+        n_lines = wire_lines
+        if n_lines > 0xFFFFFF:
+            raise Of135iError(f"line count {n_lines} does not fit the 24-bit register")
+        counted = {"chunks": 0, "bytes": 0, "extra": 0}
+        # Progress for a frontend during the long pass: one "scanning
+        # frame N" line when the pass reaches each aperture's predicted
+        # leading edge (the same wording the per-frame path logs before
+        # its pass, so a frontend's progress banner keyed on it keeps
+        # working; docs/whole-strip-sweep-design.md section 6).
+        vis_per_chunk = t.LINES_PER_CHUNK / 2
+        upcoming = sorted((edges[0], k) for k, edges in geom.predicted_edges.items())
+
+        def counting_sink(buf: bytes) -> None:
+            # tables_ir may issue a descriptor beyond the n_chunks image
+            # chunks; only the image chunks reach the sink (as _scan_dual's
+            # buffers[:n_chunks] does).
+            if counted["chunks"] >= n_chunks:
+                counted["extra"] += 1
+                return
+            sink(buf)
+            counted["chunks"] += 1
+            counted["bytes"] += len(buf)
+            vis_line = counted["chunks"] * vis_per_chunk
+            while upcoming and vis_line >= upcoming[0][0]:
+                _, k = upcoming.pop(0)
+                log.info("scanning frame %d @ %d dpi (sweep pass, aperture %d of %d-%d, %d%%)",
+                         k, dpi, k, first, last, round(100 * counted["chunks"] / n_chunks))
+
+        self._run_phase(
+            t.scan_phase(n_chunks),
+            lines_top=bytes([(n_lines >> 16) & 0xFF]),
+            lines_hi=bytes([(n_lines >> 8) & 0xFF]),
+            lines_lo=bytes([n_lines & 0xFF]),
+            chunk_sink=counting_sink,
+        )
+
+        self._park(t, ir=True)
+
+        warmup = self._diag_warmup or {}
+        self.last_cal_data = {
+            "white_line": self._cal_white_line(),
+            "dark_a": np.asarray(cal.dark_a, dtype=np.uint16),
+            "dark_b": np.asarray(cal.dark_b, dtype=np.uint16),
+            "shading_meas": np.asarray(cal.shading_meas, dtype=np.uint16),
+            "verify_meas": np.asarray(cal.verify_meas, dtype=np.uint16),
+            "shading_table_a": np.frombuffer(cal.shading_a, dtype=np.uint8),
+            "shading_table_b": np.frombuffer(cal.shading_b, dtype=np.uint8),
+            "shading_table2_a": np.frombuffer(cal.shading2_a, dtype=np.uint8),
+            "shading_table2_b": np.frombuffer(cal.shading2_b, dtype=np.uint8),
+            "gain_codes": np.array([gain_r, gain_g, gain_b], dtype=np.uint16),
+            "offset_codes": np.array([off_r, off_g, off_b], dtype=np.uint16),
+            "dpi": np.int64(dpi),
+            "dual": np.bool_(True),
+        }
+        self.last_diag = {
+            "dpi": dpi,
+            "frame": None,
+            "dual": True,
+            "lines": n_lines,
+            "width": W,
+            "raw_bytes": counted["bytes"],
+            "chunk_count": n_chunks,
+            "overscan_mm": overscan_mm,
+            "calibration": "fresh",
+            "dark_b_fallback": dark_b_fallback,
+            **integ,
+            "cal_scanstop_waits": list(self._cal_scanstop_waits),
+            "cal_bufempty_waits": list(self._cal_bufempty_waits),
+            "dark_a_mean": [float(x) for x in cal.dark_a.astype(np.float64).mean(axis=0)],
+            "dark_b_mean": [float(x) for x in cal.dark_b.astype(np.float64).mean(axis=0)],
+            "dark_b_substituted": cal.dark_b_substituted,
+            "white_mean": warmup.get("white_mean"),
+            "white_max": warmup.get("white_max"),
+            "gain_codes": [gain_r, gain_g, gain_b],
+            "warmup_attempts": warmup.get("attempts"),
+            "warmup_gain_history": warmup.get("gain_history"),
+            "warmup_exhausted": warmup.get("exhausted"),
+            "warmup_peak_history": warmup.get("peak_history"),
+            "warmup_measurement_times_s": warmup.get("measurement_times_s"),
+            "offset_codes": [off_r, off_g, off_b],
+            "shading": {"a": _shading_stats(cal.shading_a), "b": _shading_stats(cal.shading_b)},
+            "shading2": {"a": _shading_stats(cal.shading2_a), "b": _shading_stats(cal.shading2_b)},
+            "white_dips": {"a": [d.as_dict() for d in cal.dips_a],
+                           "b": [d.as_dict() for d in cal.dips_b]},
+            "white_blocked": {"a": [b.as_dict() for b in cal.blocks_a],
+                              "b": [b.as_dict() for b in cal.blocks_b]},
+            "feedl": feedl,
+            "sweep": {
+                "first": first, "last": last, "feedl": feedl,
+                "end_hwdpi": geom.end_hwdpi, "wire_lines": n_lines,
+                "chunk_count": n_chunks, "raw_bytes": counted["bytes"],
+                "extra_buffers": counted["extra"], "overscan_mm": overscan_mm,
+            },
+            "phase_seconds": dict(self._diag_phase_seconds),
+            "total_seconds": time.monotonic() - t_start,
+            "poll_timeouts": self._diag_poll_timeouts,
+            "cr_mismatches": self._diag_cr_mismatches,
+            "poll_timeout_details": list(self._diag_poll_timeout_details),
+            "poll_settle": list(self._diag_poll_settle),
+            "poll_settle_max_s": round(self._diag_poll_settle_max_s, 4),
+            "park_mode": self.park_mode,
+            "park_waits": dict(self._diag_park_waits) if self._diag_park_waits is not None else None,
+            "started_utc": started_utc,
+            "finished_utc": datetime.now(timezone.utc).isoformat(),
+            "session": self.session.snapshot(),
+        }
+        return W, {"width": W, "alternating": True, "dpi": dpi,
+                   "geometry": geom, "wire_lines": n_lines}

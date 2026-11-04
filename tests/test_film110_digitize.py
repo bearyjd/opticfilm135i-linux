@@ -183,7 +183,8 @@ def test_run_a_infers_placement_numbers_and_advises():
         assert adv["missing"] == [2] and adv["free_end"] == [4], adv
         assert adv["images"] == [2, 4] and adv["other_placement"] == "B", adv
         assert "image 2" in adv["suggest"] and "image 4" in adv["suggest"], adv["suggest"]
-        assert "towards aperture" in adv["suggest"] and adv["suggest"].startswith("Next pass:"), adv["suggest"]
+        assert adv["suggest"].startswith("Next pass: move "), adv["suggest"]
+        assert adv["next"]["direction"].startswith("towards aperture"), adv["next"]
         nxt = adv["next"]
         assert nxt and set(nxt) >= {"shift_mm", "direction", "images", "rescues", "targets",
                                     "remaining", "another_pass_after"}, nxt
@@ -1676,8 +1677,8 @@ def test_report_fields_text_and_the_joint_suggestion():
         assert nxt["direction"] in ("towards aperture 6", "towards aperture 1")
         assert nxt["rescues"] and 2 in nxt["rescues"]
         assert all(set(t) in ({"number", "aperture"}, {"number", "aperture", "end_on", "border_mm", "border_side"}) for t in nxt["targets"])
-        assert rec["advice"]["suggest"].startswith("Next pass: slide the strip ")
-        assert "(about " in rec["advice"]["suggest"] and "mm)" in rec["advice"]["suggest"]
+        assert rec["advice"]["suggest"].startswith("Next pass: move image 2 ")
+        assert " mm" not in rec["advice"]["suggest"] and "slide" not in rec["advice"]["suggest"]
         assert rec["advice"]["not_done"], rec["advice"]
     print("test_report_fields_text_and_the_joint_suggestion OK")
 
@@ -1822,8 +1823,138 @@ def test_free_end_images_record_the_measured_gap_to_the_strip_end():
     print("test_free_end_images_record_the_measured_gap_to_the_strip_end OK")
 
 
+def test_whole_image_off_the_placement_phase_is_written_unnumbered():
+    """Test 107: a whole image that pass 1's protocol cannot number (off
+    the inferred placement's phase by more than the tolerance) is still a
+    scanned, complete photograph -- written UNNUMBERED as p1-a3-1.tiff,
+    shown in the pass report and the problems, exit 5, the record ok; the
+    numbered images of the pass are written as usual."""
+    lead, ilen = FILM_110.perforation_lead_mm, FILM_110.image_mm[0]
+    col0 = 2.0 + FILM_110.image_lateral_offset_mm
+    col1 = col0 + FILM_110.image_mm[1]
+    strip = _strip_apertures("B")
+    local = 9.0                      # B's phase in aperture 3 lies near 17 mm
+    holes = [(local - lead - 1.5, local - lead)]
+    strip[3], _p, _lo, _hi = _build_fixture(
+        DPI, holes_mm=holes, images_mm=[(local, local + ilen, col0, col1)], seed=33)
+    with tempfile.TemporaryDirectory() as d:
+        rc, rec, scans, out, err = _run(d, strip)
+        assert rc == 5, (rc, err[-400:])
+        assert rec["status"] == "ok", rec["status"]
+        assert "p1-a3-1.tiff" in _names(d) and "p1-a3-1-ir.tiff" in _names(d), _names(d)
+        un = [e for e in rec["images"] if e["number"] is None]
+        assert len(un) == 1 and un[0]["aperture"] == 3 and un[0]["identified"] is False, un
+        assert un[0]["main"].endswith("p1-a3-1.tiff"), un[0]
+        assert any("UNNUMBERED" in p for p in rec["problems"]), rec["problems"]
+        rows = [r for r in rec["pass_report"] if r.get("number") is None]
+        assert rows and rows[0]["outcome"] == "delivered_unnumbered", rec["pass_report"]
+        assert any(e["number"] and e["main"] for e in rec["images"]), rec["images"]
+        assert "written UNNUMBERED" in err, err[-400:]
+    print("test_whole_image_off_the_placement_phase_is_written_unnumbered OK")
+
+
+def test_110_default_frames_is_all_six_apertures_and_stops_at_empty():
+    # A short strip (4 images, apertures 1-3 hold film) with NO --frames:
+    # the 110 default is 1-6 but the stop-at-empty rule ends the run after
+    # the first empty aperture that follows film; 5 and 6 are never scanned.
+    with tempfile.TemporaryDirectory() as d:
+        ap = _holder_apertures(_strip1("A", n=4))
+        rc, rec, scans, out, err = _run(d, ap, frames=None, placement="A")
+        assert rc in (0, 5), (rc, err)
+        assert scans[-1] == "eject" and 5 not in scans and 6 not in scans, scans
+        assert scans[:3] == [1, 2, 3], scans
+        assert rec["stop_reason"], rec
+
+
+def _long_strip_run(d, placement, n=8, roll=1):
+    ap = _holder_apertures(_strip1(placement, n=n))
+    return _run(d, ap, frames=None, placement=placement, roll=roll)
+
+
+def test_long_110_strip_reaches_apertures_5_and_6_in_both_placements():
+    # An 8-image strip lies over apertures 1-6 (the free strip end falls in
+    # the aperture after the last image). Default --frames must scan all
+    # six; both placements together number all eight images and leave
+    # nothing missing.
+    for first in ("A", "B"):
+        second = "B" if first == "A" else "A"
+        with tempfile.TemporaryDirectory() as d:
+            rc, rec, scans, out, err = _long_strip_run(d, first)
+            assert scans == [1, 2, 3, 4, 5, 6, "eject"], (first, scans, err)
+            nums = set(_by_number(rec))
+            assert nums <= set(range(1, 9)) and len(nums) >= 4, (first, nums)
+            rc2, rec2, scans2, out2, err2 = _long_strip_run(d, second, roll=1)
+            assert scans2 == [1, 2, 3, 4, 5, 6, "eject"], (second, scans2, err2)
+            nums2 = set(_by_number(rec2))
+            assert nums2 == set(range(1, 9)), (first, second, nums2, rec2["advice"])
+            assert rec2["advice"]["missing"] == [], rec2["advice"]
+            assert rc2 == 0, (rc2, err2)
+            names = _names(d)
+            for n in range(1, 9):
+                assert f"image{n}.tiff" in names, (n, names)
+
+
+def test_pass_one_between_the_phases_is_numbered_from_its_first_whole_image():
+    """Test 110: three strips in one evening were seated ~4.5 mm before
+    placement A with the front end out of view; pass 1 refused to number
+    and every whole image went out unnumbered, leaving the next pass no
+    reference. Now the strip is numbered from its first whole image
+    (placement "free", provisional numbers), and a pass 2 slid by a film
+    pitch recognises it and agrees."""
+    with _content():
+        first = film110.placement_phase_mm("A") + 6.4       # midway between A and B
+        with tempfile.TemporaryDirectory() as d:
+            rc, rec, scans, out, err = _run(d, _holder_apertures(_starts_for(first), None))
+            assert rc == 0, (rc, err[-400:])
+            assert rec["placement"] == "free", rec["placement"]
+            assert not any("between the two placements" in p for p in rec["problems"]
+                           if "whole" in p), rec["problems"]
+            nums = sorted(e["number"] for e in rec["images"] if e["whole"])
+            assert nums and None not in nums, rec["images"]
+            assert all(e["main"] for e in rec["images"] if e["whole"]), rec["images"]
+            by1 = {e["number"]: e["position_mm"] for e in rec["images"]}
+            rc, rec2, *_ = _run(d, _holder_apertures(_starts_for(first + 10.6), None))
+            assert rc == 0 and rec2["numbering"] == "content", (rc, rec2["numbering"])
+            for e in rec2["images"]:
+                if e["number"] in by1 and by1[e["number"]] is not None:
+                    assert abs(e["position_mm"] - by1[e["number"]] - 10.6) < 1.0, (e, by1)
+    print("test_pass_one_between_the_phases_is_numbered_from_its_first_whole_image OK")
+
+
+def test_black_and_white_passes_are_compared_in_density():
+    """Test 110: the content check compares two passes in log intensity
+    exactly when neither was scanned with IR (black-and-white); colour
+    (always IR) keeps the linear comparison."""
+    seen = []
+    orig_dec = film110.decide_orientation
+    orig_cmd = cli._cmd_digitize
+
+    def dec(*a, **k):
+        seen.append(k.get("log"))
+        return orig_dec(*a, **k)
+    try:
+        film110.decide_orientation = dec
+        for ir in (False, True):
+            def cmd(args, ir=ir):
+                args.ir = ir
+                return orig_cmd(args)
+            cli._cmd_digitize = cmd
+            seen.clear()
+            with _content(), tempfile.TemporaryDirectory() as d:
+                _run(d, _holder_apertures(_starts_for(3.5), None))
+                rc, rec, *_ = _run(d, _holder_apertures(_starts_for(3.5 + 10.6), None))
+                assert rc == 0 and rec["numbering"] == "content", (ir, rc)
+            assert seen == [not ir], (ir, seen)
+    finally:
+        film110.decide_orientation = orig_dec
+        cli._cmd_digitize = orig_cmd
+    print("test_black_and_white_passes_are_compared_in_density OK")
+
+
 def main() -> int:
     tests = [
+        test_pass_one_between_the_phases_is_numbered_from_its_first_whole_image,
+        test_black_and_white_passes_are_compared_in_density,
         test_slot_constants_and_anchored_numbering,
         test_two_strips_run_a_makes_two_rolls,
         test_second_run_fills_both_rolls,
@@ -1867,9 +1998,12 @@ def main() -> int:
         test_report_fields_text_and_the_joint_suggestion,
         test_blank_frame_position_consumes_a_number_and_makes_no_file,
         test_front_end_first_seen_in_a_later_pass_renumbers_the_roll,
+        test_whole_image_off_the_placement_phase_is_written_unnumbered,
         test_impossible_free_end_rescue_says_why_in_geometry,
         test_near_whole_copy_is_delivered_and_a_deeper_cut_is_split,
         test_free_end_images_record_the_measured_gap_to_the_strip_end,
+        test_110_default_frames_is_all_six_apertures_and_stops_at_empty,
+        test_long_110_strip_reaches_apertures_5_and_6_in_both_placements,
     ]
     for t in tests:
         t()

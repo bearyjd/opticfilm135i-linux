@@ -7429,3 +7429,619 @@ driver correction must never cost the operator a new pass; (3) *the edge
 numbers printed on the film are the photograph's identity* — read them.
 The application's full report: negativ-digitalisering
 docs/prov/110-serie-2026-10-21-rapport.md.
+
+**Test 105 — a strip with no photographs (2026-10-23, terminal, master
+fd50ab9 + phase 1).** One strip, `digitize --film 110 --frames 1-6`, laid
+against aperture 1. Mechanically normal; the scan stopped at the first empty
+aperture (aperture 5). What the strip holds (seen by eye on the frames): the
+frame positions with edge numbers 22, 23 and 24 unexposed (clear orange base
+only), then the cassette's backing-paper window with the printed "925" and
+the black paper tape with its punched hole. Film in apertures 1–4 and
+aperture 5 empty agrees with the strip lying against aperture 1 and with the
+convention "aperture 1 = the end that enters first" (not yet confirmed
+otherwise). Fault: an unexposed frame position was delivered as
+`image4.tiff` — a scratch and some dust in the printed-border gap made the
+gap read short, the image window reached into the dark border, and the
+clear film then looked "varying" like a picture; aperture 1 came close to
+the same. Fixed offline (phase 2, PR #30): gap detection robust to
+scratches and dust, and clear film between two gaps is a **blank** frame
+position, never an image (docs/film-110.md §15.5, §15.7). Re-run from the
+stored frames: blanks, no product. A/B on 98 stored apertures (143 hole
+frames): identical except two other unexposed frames now blank. Data:
+private area, t105-20261023.
+
+**Test 106 — the roll-6 strip, three passes (2026-10-23, terminal, master
+fd50ab9 + phase 1; rebuilt offline on phase 2).** One strip (edge numbers
+9–12), three passes, re-seated by hand between passes.
+
+- *Pass 1* (placement A, numbering by the protocol): images 1, 2 and 4 left
+  missing; the strip lay against the end wall at aperture 1 and image 1
+  began 0.1 mm under it — rejected as not whole.
+- *Pass 2* (placement B, recognised by content): image 1 whole but with the
+  strip end free (film start 13.7 mm, image 1 at 16.99 mm, gap 3.3 mm).
+- *Pass 3*: the recognition could not decide — the strip holds near-duplicate
+  consecutive shots, the true slide (+22.4 mm, four sightings at 0.91–0.96)
+  beat the one-pitch-off rival (0.84) by 0.12 against the 0.15 margin — and
+  the pass ended **failed with nothing written**, although image 1 lay whole
+  and supported in the frames. Christian's objection: the bookkeeping
+  stopped a photograph.
+
+Fixes (phase 2, PR #30, docs/film-110.md §15.6, §15.8, §15.9): a
+**near-whole** copy (one edge at most 0.5 mm under the plastic, the other
+confirmed) is delivered and ranked above a whole copy with a free end; the
+recognition also accepts a cluster on evidence (sum of the distinct
+sightings' best correlations, 3.75 against 1.65); and a pass whose
+numbering cannot be established writes its whole images **unnumbered**
+(exit 5) instead of nothing. Rebuilt from the three stored passes
+(`--from-frames`, on a copy): all four photographs whole and supported,
+`done`. Data: private area, t106-20261023 (the products there predate the
+rebuild).
+
+**Test 107 — first live 110 pass after b4e073b (2026-10-26, through the
+application; fix offline the same evening).** One strip, pass 1 at
+placement B (inferred): photograph 2 whole in aperture 2 (delivered),
+photograph 3 under bar 2 (correctly not delivered), photograph 4 whole and
+free in aperture 3 — **not delivered, no file**: "image at 9.1 mm is not at
+placement B's phase (off by -7.7 mm) … no 110 product written". Two faults.
+(a) The detector put the window 8 mm off, on the printed border plus half
+of photograph 4 (the phase rule was right: photograph 4 starts at ~17 mm).
+This strip's unexposed edge rim reads 0.85–0.95 × air (earlier strips
+~0.1): rim noise reached air level in the hole zone on most lines (false
+1.5 mm "holes", 0.01–0.05 of the zone at air) and the real hole sat inside
+one 4.7–5.0 mm air run, too long, rejected. Measured as the fraction of
+the zone at air, the real holes are 2.3 mm long, as on every earlier
+strip. In aperture 3 the printed-border gap (8.0 mm) was also extended
+into a dense white fence at the picture's edge (0.145–0.16 against
+0.122) to 10 mm and dropped. (b) Three numbering paths dropped a whole
+image without a file and without exit 5. Fixed: hole = air across the
+zone; an over-long gap extension is undone; a whole image the numbering
+cannot place is written unnumbered (exit 5). Old vs new detector on 123
+distinct stored real 110 frames: 119 identical or within 0.2 mm, three
+corrected (the two Test 107 apertures and Testigen roll 3 pass 4 aperture
+2 — the same film, the same misplacement, eye-checked), one split image's
+start moved 0.4 mm. Rebuilding the roll from its stored frames (a copy,
+not the staging tree) numbers pass 1 as photographs 2 and 4 whole, and
+recognises pass 2 by content. Data: the application's staging tree
+(_inkorg/2026-10-26/roll-001), analysis copy in the private area
+(harness-tmp/t107-20261026). Also reported by the application, not
+analysed here: in pass 1 the IR channel was clipped (84–100 % at 65535)
+and visible R clipped in the clear base; pass 2 and roll 2 normal.
+
+**Test 108 — production 110 series, a thin photograph read as a blank
+(2026-10-28, through the application, analysed offline).** Rolls of colour
+110 scanned through the application on master (v0.2.6). The application
+reported a whole photograph in a pass-3 aperture that no record delivered;
+the record listed that frame position as a **blank**. The picture is an
+underexposed, low-contrast photograph: its interior reads 0.85+ of the clear
+base, and along transport (the per-line median over the band) it varies by
+only 4.8 % (std/mean) -- under `IMAGE_VARIATION_FRAC` 0.10, so it passed as
+clear film; ACROSS the picture its pixels vary 19 %. The same photograph was
+a "blank" in all three passes of the roll. Fix (offline): a window that is
+flat along transport is a blank only if it is also flat across
+(`film110.BLANK_TEXTURE_MAX` 0.06: robust spread of 0.25 mm block means about
+a fitted plane, over the picture's own columns, blocks touching air dropped).
+Measured on the stored frames: 10 real blank windows 0.014–0.031 (including a
+leader with its punched hole and edge print, and a graded fog), 84 real whole
+images 0.126 and up, the photograph 0.150–0.163. Old vs new detector over
+142 stored 110 apertures: 138 identical; 4 changed, all corrections -- the
+photograph found in its three passes (rows 244–2634 in the pass-3 aperture,
+where the application had cut it out by hand at 253–2624) and the tail of a
+real photograph at the top of another roll's aperture, previously read as
+clear film. No real blank was lost. Also reported, not changed: in a pass
+whose strip front end lay out of view and whose seating fell between the two
+placement phases (A −4.3 mm, B +8.5 mm), numbering refused as designed and
+the two whole images were written unnumbered (exit 5).
+
+**Test 109 — first black-and-white 110 strip (2026-10-28, through the
+application, branch film110-six-bw 88eea19, `--no-ir`, plain 3600).** A
+four-image black-and-white strip, two passes. Pass 1 delivered image 1
+only; pass 2 delivered nothing and was recorded failed on aperture 4. Three
+causes, all fixed offline on the stored frames:
+(1) **dense pictures read as the rail.** The film band is the run of
+columns that are neither air nor plastic, and plastic was any column whose
+MEDIAN is under 0.05 x air. These dense negatives read 0.03–0.08 x air in
+the column median against a rail of 0.01–0.02 → "no 110 film band (4.5 mm)".
+A dark run with something else on both sides (not reaching the frame's
+side, as a rail does) is now plastic only if at least 40 % of its columns
+also stay under 0.05 at their 95th percentile (`PLASTIC_UPPER_*`): measured
+0.63–0.94 on colour rails, 0.0–0.13 on this dense film, which is lifted by
+its printed gaps (0.09) and rim. (2) **the clear base read as air to the
+edge tracker.** The black-and-white base and the clear zone round each
+hole read 0.77–0.79 x air in green; `EDGE_TRANSITION_FRAC` 0.6 took them as
+air, so on the hole lines the tracked edge jumped 2 mm inward past the
+hole → "no perforation found". When no hole is found at 0.6 the search is
+repeated at 0.9 (`EDGE_TRANSITION_LIGHT_FRAC`); colour (base ~0.17) never
+reaches the retry. Old vs new detector over all 135 stored 110 apertures:
+131 identical (every colour aperture), the 4 changes this strip's.
+(3) **a strip tip vetoed the side bands.** Aperture 4 held only the fogged
+strip end over part of its leading edge; the side-band coverage (new on
+this branch) found the opening in all 17 bands but the leading edges spread
+0.59 mm (bare bands 0.71–0.84 mm, bands under the tip 1.07–1.30) → refused.
+Film can only hide light: only the bands seeing the LONGEST opening (within
+0.3 mm) must agree; a whole opening seen shifted keeps its length and is
+still refused. Offline `--from-frames` rebuild of the two stored passes
+with the fixes: 4 of 4 frame positions delivered (pass 1 images 1 and 3,
+pass 2 images 2 and 4), roll done; the four products are four distinct
+whole photographs (working check, not the operator's acceptance). One
+aperture stays unlocatable in a single pass: the strip's last picture whose
+hole lies at the end of the previous aperture and which is followed by
+fogged film instead of a printed gap (pass 1 aperture 3) -- the advice does
+not call the roll done, and the next pass delivers it.
+
+**Test 110 — the rest of the evening's black-and-white 110 (2026-10-28,
+through the application on 8213158, three strips, analysed offline on the
+stored frames).** Detection held (side-band coverage on most apertures);
+three numbering/locating gaps lost or unnumbered photographs, all fixed:
+(1) **a strip's last picture** whose hole lies at the end of the previous
+aperture and which is followed by fogged film (no hole, no dark printed gap
+in view) was never located (one strip: a whole photograph in the frame, not
+delivered). `detect` now reports the image a hole predicts past the
+aperture's end (`ApertureFind.beyond`); the caller carries it to the next
+aperture, where it is tried like a frame-locator candidate (same
+plausibility and edge refinement, `located_by` "previous aperture's
+hole"). Rebuild of that strip: 4 of 4. (2) **pass 1 seated between the
+two placements' phases** (three strips today, A off by −4.3 to −4.9 mm,
+front end out of view) refused to number: every whole image unnumbered,
+and the next pass had no reference to recognise against. Now the strip is
+numbered from its first WHOLE image on A's grid of numbers (placement
+"free", numbers provisional until the front end is seen; a split or a
+hole's ghost anchors nothing). Rebuild of one such strip: both photographs
+numbered, the pass-2 recognition agrees. (3) **recognition between passes**
+failed on dense black-and-white: the true slide (22 mm) paired the same
+photographs at correlation 0.24–0.49 against the 0.5 needed (linear
+thumbnails; the pictures sit near black), and two near-duplicate shots
+correlated 0.86 at a wrong shift. Passes that both ran without IR are now
+compared in log intensity (colour always has IR and keeps the linear
+check); the strip is recognised at 22.25 mm and its missing photograph
+delivered numbered.
+
+**Test 110, hardware confirmation (2026-10-28, same evening, the
+application on 6fef9a8).** The strip whose last picture had been lost
+(roll 5) was rebuilt offline from its stored passes: 4 of 4 delivered, the
+last picture located by the previous aperture's hole. The last strip of the
+evening (roll 6, bent, with a crease through picture 2) was scanned live on
+the fixed code: three passes, pass 1 located the last picture by the
+previous aperture's hole, passes 2 and 3 were recognised by content
+without IR (log intensity), roll done with 4 of 4 delivered. All the
+operator's 110 strips are now digitised.
+
+**Test 111 — whole-strip sweep, first hardware run and A/B against the
+per-frame cycle (2026-10-30, `digitize --sweep`, dual 3600 with IR, a
+four-frame colour strip the owner had scanned per frame earlier the same
+day).** Outcome: the sweep ran end to end (one calibration, one POSITION,
+one 161 s pass over apertures 1–4, one PARK, eject), 1 334 734 848 bytes
+streamed to `sweep.raw` (2682 chunks, FEEDL 6538, end 44091 motor units,
+wire 42912 lines); white line 23189/31755/26364 at the first measurement,
+no poll timeout, park wait B 10.2 s (budget scale 6.5, never approached).
+Device phases: position 1.80 s, calibration 6.03 s, scan 161.44 s, park
+10.28 s, total 179.6 s. The same strip's per-frame run (four frames,
+`--frames 1-4 --dpi 3600 --no-clean`, load excluded) had taken 277 s in
+the workflow's manifest; the sweep's offline cut of the four frames took
+11.9 s (`--from-sweep`, no dust removal), so the strip costs about 192 s
+against 277 s, 85 s (31 %) less, with three carriage returns and three
+calibrations fewer. **Products:** all four apertures verified by their IR
+edges (margins 0.67–0.76 mm, strip offset +0.07 mm from the mean mapping,
+every window `located_by` edges); aperture lengths 35.93–36.05 mm against
+35.92–35.99 mm per frame (within 0.06 mm); the per-frame and sweep crops
+of each aperture correlate 0.997–0.999 on 8x-downsampled luminance, best
+line shift 16–24 lines (0.11–0.17 mm, both crops register on their own
+edge finds). Side-by-side positives of the four apertures were made for
+the owner's eye check (outside the repo); my own look: whole pictures,
+same crop, same colour, no banding. **Owner's eye check the same evening:
+PASSED** — "in principle identical", differing only in dust and single
+artefacts (neither pass was dust-cleaned, and dust lands differently per
+pass). The sweep's products are accepted as production images for dual
+3600 with IR; the other profiles remain unrun.
+
+Three failures on the way, all read before continuing: (1) the first two
+sweep attempts and no per-frame control: the white line read ~0.2 % of
+normal (peaks 18/67/50 with the lamp's spectrum, `LampWarmupError` after
+58 s, no motor command sent). The first attempt was preceded by a
+`load --next-strip` that the workflow's own process, holding the scanner
+lock for its whole run, had refused — the magazine was inserted but not
+loaded; the second followed a full load. A per-frame control (`digitize
+--frames 1-1` on the same code tree) then verified frame 1 with a healthy
+white line, and the sweep succeeded on the next load with the strip
+untouched; between the failing and the passing runs the owner had taken
+the magazine out to look at the holder. The offline mock harness shows the
+sweep's command stream identical to the frame path's up to POSITION. The
+two dark runs are therefore recorded as a seating/handling event, not
+understood in detail; the sweep code is not implicated. (2) One
+`load --next-strip` after the control's eject failed to engage (fc55):
+power cycle and full load, the documented recipe. (3) The first successful
+sweep's post-processing was **unresolved** (`no lit run of at least 25 mm`)
+while the per-frame coverage on a window of the same bytes verified: the
+window finder's IR profile averaged the three IR channels without the
+colour-line stagger, turning every aperture edge into a 24-line ramp the
+edge finder does not see. Fixed offline (`sweep.ir_profile` registers the
+channels as `image.split_ir` does; regression test with a staggered
+synthetic sweep, whose naive profile is asserted to fail), rebuilt with
+`--from-sweep`, 4 of 4 verified — nothing was lost, the raw was kept as
+designed. Also seen: a lock refusal prints the generic "Power-cycle before
+the next strip" line although nothing was sent (to fix).
+
+**Test 111, production confirmation (2026-10-30, same evening, through the
+application on v0.2.8 and a8aec22).** The workflow switched its colour-135
+command to `digitize --sweep` (same flags otherwise: `--frames 1-4 --dpi
+3600 --no-clean --assume-loaded`, load as a separate step). Every
+production strip counts as test data from here on (owner's decision
+2026-10-30); the series is recorded per evening, transport data only.
+
+Evening 1: seven strips (colour 135, four frames each, two projects), all
+exit 0, 4 of 4 apertures verified on every strip, every window located by
+its edges, `sweep.raw` removed after each roll, `fN.cal.npz` hard-linked
+four times, the workflow's own per-strip record written as before. Device
+phases identical to the tenth of a second on all seven and to the A/B run:
+calibration 6.0–6.1 s, position 1.8 s, scan 161.4 s, park 10.3 s, 179.5–
+179.6 s on the device. Wall clock per strip (finished − started, load
+excluded) 200–203 s; the rest is the offline cut and the file writes.
+Strip offsets from the mean mapping +0.03 … +0.13 mm (A/B: +0.07 mm). The
+progress lines of a8aec22 drove the workflow's banner from the second
+strip on. The operator reports the machine audibly quieter: the
+frame-to-frame moves were the loudest part of the per-frame run, and a
+strip now has one positioning and one park.
+
+One incident, not the driver's: two instances of the workflow ran at the
+same time and the older one's button listener took the scanner lock
+between strips, so the newer one's `load --next-strip` was refused with
+exit 1 ("another of135i process holds the scanner lock … nothing was
+sent"). The refusal was correct and nothing reached the scanner, but the
+workflow read exit 1 as a hardware failure and the operator power-cycled
+unnecessarily. Noted for the driver: the lock refusal should say in
+plain words that no power cycle is needed, and the exit code should let
+a caller tell "busy" from "failed" (open item).
+
+**Test 111, production confirmation, session 2 (2026-10-31, Saturday
+morning, through the application on v0.2.9 = 8983fe6).** Ten strips, one
+project, 11:37–12:53 CET: three colour-135 strips through `digitize
+--sweep` and seven black-and-white 135 strips through the per-frame cycle
+(`--no-ir`, plain 3600 — the sweep refuses the plain path by design). All
+at 3600 dpi, `--no-clean --assume-loaded`. Two full loads (the first
+strip and the switch to black-and-white), every other strip through
+`load --next-strip`, which gripped every time. No power cycle, no
+double-jog, no abnormal sound reported. Source: the application's
+manifest and logs read by the application session, transport data only.
+
+Colour sweeps (device phases identical to the tenth of a second to
+evening 1 and the A/B run: calibration 6.0 s, position 1.8 s, scan
+161.4 s, park 10.3 s, 179.6 s on the device for apertures 1–4):
+
+- Strip 7, `--frames 1-4`: exit 0, 4/4, margins 0.67–0.76 mm, wall clock
+  199 s.
+- Strip 8, `--frames 1-2`: exit 0, 2/2, margins 0.75 mm, device 95.2 s
+  (scan 81.4 s, park 6.0 s), wall clock 109 s — the first production sweep
+  shorter than four apertures.
+- Strip 9, `--frames 1-4`: exit 4, 3/4 verified of which aperture 4
+  empty. The film ended inside aperture 3: "no aperture found in profile"
+  in both IR and visible, the window cut "located by pitch", no main
+  negative written for it, `sweep.raw` kept for `--from-sweep`. Correct
+  refusal; this is the first exit-4 case in the sweep series (wanted for
+  the SANE-sweep memo).
+
+Black-and-white, per frame, `--frames 1-6`, seven strips, phases
+identical within 0.1 s across all seven: frame 1 calibration fresh 3.7 s,
+park 3.8 s, position 1.8 s, scan 21.4 s, 30.9 s total; frames 2–6
+calibration cached (rewrite 0.3 s), scan ~20.2 s, park 6.0/8.1/10.3/
+12.4/14.6 s and position 3.8/5.9/8.1/10.2/12.4 s — +2.1 s per aperture
+in each direction because every frame parks and repositions from home —
+totals 30.3/34.6/38.8/43.1/47.5 s. Device time for a six-frame strip
+≈225 s, wall clock 252–253 s.
+
+- Strips 10–14: exit 0, 6/6 each (coverage source "visible").
+- Strip 15: exit 4. Aperture 1 = the roll's leader (fully blackened),
+  "no aperture found" — correct refusal; aperture 5 empty, then
+  "stopping: empty aperture at frame 5 after film; skipping frame(s) 6".
+  Three pictures verified. Wall clock 200 s.
+- Strip 16: exit 4, 5/6. Aperture 3 "no aperture found in profile"
+  (source visible) on a real picture: a dense sky against the holder's
+  leading edge, so the edge was lost in visible light — exactly the case
+  the IR side channel exists for on colour. The trailing edge measured
+  (margin 0.876 mm, in line with its siblings). The application rebuilt
+  the frame offline from the `.overscan` file: trailing edge + the
+  siblings' median length 35.92 mm gives a leading margin of 0.679 mm.
+  Driver untouched.
+
+Also seen, all sessions: 95 lines "WARNING poll wv=0x018e wi=0x0122 timed
+out after 0.3s -- continuing" (a few wv=0x008e wi=0x3222), two or three
+per frame or sweep, never a consequence; every `.diag.json` has
+`poll_timeouts=0` and `warmup_attempts=1`, `cr_mismatches` 22–32 per
+frame. These are the best-effort settle polls (device.py), not motor
+completions. Exit 3 ("busy") fired twice, both on the application's own
+status call right after "load done" while the load flow in the same
+process still held the lock (11:37:30, 11:59:09); nothing was sent to the
+scanner and `digitize` started 1 s and 33 s later with reg 0x01 = 0x22.
+The application did not show the power-cycle advice (appcommit 7a4d2dc
+behaves as designed); the collision is the application's to fix. The
+sweep's strip offset against the mean mapping was not printed by the
+driver this session; margins are recorded instead.
+
+Open items from this session: (1) a black-and-white sweep needs a
+visible-light window detector that survives dense content against an
+aperture edge — strip 16 is the first measured case and the per-frame
+products of strips 10–16 are the A side of its future A/B; (2) the
+per-frame plain path could recover a single lost edge from the measured
+opposite edge plus the siblings' length the way the application did,
+content-based, never positions alone — a design question, not started.
+
+**Test 111, production confirmation, session 2 continued (2026-10-31
+afternoon, 13:00–14:30, same project, v0.2.9).** Nine more
+black-and-white 135 strips (Kodak T-MAX 100), per frame, `--no-ir
+--frames 1-4`, 3600 dpi, `--no-clean --assume-loaded`. A four-frame
+black-and-white strip took 153–154 s wall clock every time, with the same
+per-frame phase profile as strips 10–16 above.
+
+- Strips 17, 20, 24, 25: exit 0, 4/4.
+- Strip 18: exit 4, 2/4 — apertures 1–2 "no aperture found" = the roll's
+  start (unexposed or blackened). Correct refusal.
+- Strip 19: exit 4, 3/4, 153 s — aperture 1 "no aperture found" on a real
+  picture: bright sky and white foam hid BOTH edges in visible light.
+- Strip 21: exit 0, 4/4, 153 s — the strip lay crooked in the holder; the
+  windows verified anyway, several products contain black gap and a piece
+  of the neighbouring frame. The coverage check measures the aperture
+  edges, not the film's straightness.
+- Strips 22 and 23: the same crooked strip rescanned, exit 4 with 2/4 and
+  1/4 (apertures 1,3 then 1,3,4 "no aperture found").
+
+Incidents: 81 more best-effort poll-timeout warnings, no consequence.
+At 13:33:28 the load failed (rc 1) after two feed attempts; the
+application showed the power-cycle advice, the operator power-cycled,
+reg 0x01 read 0x00 (cold) afterwards; the application's button listener
+lost the USB device (Errno 19) and had it back at 13:33:37; the 13:34
+load went through. No abnormal sound reported. Exit 3 twice more
+(13:20:04, 13:34:11), same pattern as the morning: the application's own
+status call right after "load done" against its own lock; nothing sent.
+
+Operator-forwarded experience for the driver (recorded, not acted on):
+on `--no-ir` the visible-light edge finder loses the window when the
+picture content is as dense or as bright as the holder edge — seven
+apertures over the day (16:3, 19:1, 22:1, 22:3, 23:1, 23:3, 23:4; the
+last five on the crooked strip). All were rebuilt in the production
+workflow without touching the driver, in this order: (a) half-level
+crossing of the visible profile; (b) the one edge found plus the
+siblings' median length, accepted only when that edge's margin lies
+within 0.3 mm of the siblings'; (c) the same aperture on eight other
+strips — aperture 1 lay at lead 68–112 and trail 5193–5222 wire lines at
+3600 dpi (lines = 5367), a spread of about 0.3 mm, i.e. the positioning
+looks deterministic. The application session suggests the driver fall
+back to (b), or to a nominal FEEDL-derived position flagged in diag as
+"positioned, not measured", when the visible search fails. Design
+question for the black-and-white work: (b) is content-based and fits the
+rule; a position-only fallback must stay honestly flagged and never
+count as verified coverage. Also forwarded: per-frame black-and-white
+grows by ~2.1 s per aperture in park and position because each frame
+parks and repositions from home; and the post-load status collision is
+the application's, harmless.
+
+Day total 2026-10-31: 19 strips (3 colour sweeps, 16 black-and-white per
+frame), one project, one power cycle (load rc 1), no abnormal sound.
+
+## 2026-10-31 — Test 112: the plain-3600 whole-strip sweep, first hardware run — INCIDENT: the pass started 19 mm late, the magazine ended displaced, the park stalled, power cut by the operator. The plain sweep is withdrawn.
+
+**Setup.** v0.2.9 + PR #42 (master 981fa50, the plain sweep implemented
+offline the same day, `docs/bw-sweep-study.md`). A black-and-white 135
+strip from the morning's production (six pictures, the first four clear,
+already digitized per frame, so its per-frame products are the A side).
+Preconditions met: application closed, scanner power-cycled, `status`
+0x00 → full load through `tools/load_magazine.py` (one earlier attempt
+had been started through a stdin-less shell and aborted at the Enter
+prompt after the jog; power cycle, then a clean load; reg 0x01 = 0x22,
+magazine present). Command, the application's black-and-white flags plus
+the sweep:
+
+    digitize --sweep --no-ir --frames 1-4 --dpi 3600 --no-clean --assume-loaded --keep-sweep
+
+Geometry commanded (`holder.plain_sweep_geometry`, centre convention):
+FEEDL 22662, 933 chunks, 21467 programmed lines, planned acquisition
+start 1227, planned end 44097; the anchoring gate had accepted the range
+(fixed-start hypothesis end 60395 < 71490).
+
+**What happened (operator + log + raw).** Calibration fresh (gain
+0x2d/0x1f/0x26), POSITION completed in 3.06 s, the four "scanning frame
+N" progress lines came at 1/26/51/76 %, the scan pass completed:
+`sweep.raw` is 484 372 548 bytes = exactly 21 459 lines × 3762 px, every
+chunk written. The PARK then began and the operator heard the transport
+jam ("a hell of a noise") and cut the power at once; the session failed
+in operation park with USB Errno 19, 95 s after start, no `sweep.json`
+written (the finder never ran). The operator's observation afterwards:
+the magazine had been pushed against the front edge of the slot and
+caught inside the front entry, so the return could not bring it home.
+Three poll-settle warnings before the pass (the usual best-effort
+polls), none during it.
+
+**The raw says where the pass really started.** Visible red profile,
+600-dpi bins, edge finder: edges at 18.0 (fall), 19.8 (rise), 55.8, 57.7,
+93.6, 95.4, 131.4, 133.3 mm from the first line; three complete lit runs
+of 36.01 / 35.89 / 35.97 mm (holder apertures), a partial run at the
+start (0–18.0 mm) and one at the end (133.3 mm to the end). Predicted
+leading edges were 0.8 / 38.7 / 76.6 / 114.7 mm. Every measured edge is
+18.9–19.3 mm EARLIER in the file than predicted, with the holder pitch
+intact (37.9 / 37.7 mm between leads), so the acquisition started
+≈ 18.9 mm (≈ 5 360 motor units) later along the film than the geometry
+assumed — at ≈ 6 590 instead of 1 227 — and ran its full 42 918 units
+from there (end ≈ 49 500). That matches neither hypothesis the gate was
+built on (centre: start 1 227; fixed start: start 17 525). The finder,
+run offline on the file, is unresolved: "two plausible runs claim
+aperture 3". The data is in `/mnt/NVME2/bw-svep-test112/roll-001/`
+(kept) and the profile in the private analysis area.
+
+**Reading, labelled as hypothesis.** The only motion in this pass the
+unit had never made is the back-up before acquisition: from FEEDL 22662
+to the planned start, 57 mm at the scan engine's reverse cadence, against
+18 mm in every per-frame plain scan. The film ended 19 mm from where the
+back-up should have left it and the magazine ended displaced forward
+against the slot; the operator's reading is that the magazine was driven
+past something at the front entry and caught on the way back. Whether
+the carriage stopped 19 mm short, or reached its target while shoving
+the magazine (and the film with it) 19 mm forward, cannot be told from
+one file; both put the fault in the long back-up. The per-frame plain
+path, which backs up 18 mm from a FEEDL 5 137 units past the window
+start, is unaffected and ran 16 black-and-white strips the same day.
+
+**Recovery (the vendor's, captured).** Our own recovery path failed:
+after the power cycle `tools/load_magazine.py` ran `cold_init`, whose
+homing round is the vendor's app-start jog (feed 6690, feed 6690, eject
+3090); move 2 did not complete within 30 s (status word 0xf055, loader
+bit 0x08 clear) and the driver stopped fail-closed, as designed. The
+magazine could not be pulled out by hand. With usbmon recording on the
+host (`captures/20261031-recovery-stuck-magazine.pcap`, 4 770 packets,
+0 dropped; compiled in the private analysis area), the scanner was given
+to the Windows VM and the vendor application started. Its app start read
+the status word **0xd055** (bit 0x08 clear: the loader sensor not seeing
+the cassette), and before the jog it ran the LOAD flow's traverse — mode
+0x1c, 71 490 steps — which took **6.42 s** (status d155 → d955 → d855)
+against 1.1 s in every captured load; then the ordinary jog (feed 6690
+1.60 s, feed 6690 1.62 s, eject 3090 0.88 s, all to 0xf855) and the idle
+heartbeat. The magazine came out by hand afterwards. For comparison the
+2026-09-07 capture of the vendor opening on a merely latched magazine
+(status 0xd855) shows the jog run directly, no traverse first. So the
+vendor's "fix" is conditional: when the loader bit is clear at start, the
+load traverse re-seats the cassette before the jog. Our `cold_init` has
+no such step. **Owner's decision 2026-10-31: the driver gets this
+recovery** (traverse before the jog when the status word's bit 0x08 is
+clear at cold start) — a motor-sequence change, so: implemented offline
+from the capture, then its own hardware test on his go.
+
+**State after.** Scanner power-cycled without the magazine: reg 0x01 =
+0x00, 0x31 = 0xfe, 0x32 = 0xc2, magazine not detected — identical to the
+day's first cold start. The owner inspected the magazine: no visible
+damage. **Post-incident check (same evening, 19:22–19:26, through the
+application):** a colour-135 strip, normal load (cold_init homing 3/3,
+jog 0xf855, load 0xdc55), `digitize --sweep` dual 3600 over apertures
+1–4: exit 0, 4 of 4 verified by edges (source IR), margins 0.75/0.74–0.75
+mm (aperture 4 trailing 0.59), FEEDL 6538, 2 682 chunks, 1.33 GB, phases
+in the usual band (calibration ~10 s, ~40 s per aperture of scan, park +
+eject by 19:26:01), the usual two best-effort poll warnings, no error.
+The transport is healthy after the incident.
+
+**Consequences.**
+1. The plain-3600 sweep is **withdrawn**: `digitize --sweep --no-ir`
+   exits 2 before any hardware step and `Scanner.sweep(ir=False)` raises,
+   both naming this test; the code path stays in the tree for the record.
+   `PLAIN_SWEEP_LONG_ANCHORING_VERIFIED` stays False. The dual sweep is
+   untouched (10 production strips + the A/B, unchanged motion).
+2. Black-and-white film keeps the per-frame cycle. A black-and-white sweep
+   through the dual engine would avoid the long back-up (the dual engine
+   anchors at FEEDL − K, 18 mm, by construction) but reads two wire lines
+   per position and so saves no time against plain per frame (dual 1–4
+   180 s on the device against plain per-frame 153 s wall clock); not
+   pursued.
+3. The study's finder result (`docs/bw-sweep-study.md`) stands: the
+   problem is the plain engine's long pass, not the window finder.
+4. Open: what the plain engine does on a back-up longer than the default
+   window (one data point: 16 077 units for a commanded 21 455). Any new
+   experiment needs its own plan with the magazine's seating as the
+   stop criterion, and is not scheduled.
+5. Lesson recorded: the gate reasoned about the furthest FORWARD position
+   only; the new motion was the backward one, and nothing in the plan
+   named the magazine's seating as a thing the back-up could disturb.
+
+
+## 2026-11-02 — Test 114: the calibration stop gate (`--cal-wait-scanstop enforce`) A/B on hardware — harmless here (waits ≤ 8 ms against the 0.3 s budget), but the residual dark_b did not occur, so the gate's effect could not be shown
+
+Hardware, owner's unit and host, branch `claude/busy-bohr-jkyio2` (commit
+8e97437, the port of bearyjd's gate as opt-in; docs/cal-scanstop-gate.md).
+Driven from a Remote Control session with the owner approving each
+scanner command; the owner listened for anything abnormal (nothing).
+Film strip in the holder, four frames. Nothing committed from the run;
+the `.diag.json`/image output is in the owner's local `test114/`
+(excluded from git).
+
+**Setup.** The scanner was not on the USB bus when the session began and
+appeared during it (whether it was power-cycled or just switched on is
+not recorded). `doctor` then read reg 0x01 = 0x00, status word `0x4055`,
+no magazine. The owner's first `load` was refused by the read-only
+magazine check (nothing sent). On the second attempt reg 0x01 was 0x00
+and reg 0x101 0x48 (magazine present), and `load` ran the cold start
+first. `doctor` afterwards read reg 0x01 = 0x22, status word `dc55`,
+magazine present. Two observations from the cold start and load, before
+any scan:
+
+- **The cold start's `poll_status_word` gave up at `0x4855`** (1.5 s,
+  non-raising, then the cold start continued normally). The line is in
+  the owner's terminal output of the `load`, pasted into the session; it
+  is not in any log under `test114/`. This is the first time that
+  signature is seen on this unit; it is exactly the reporter's
+  cold-start symptom in issue #35, which docs/cal-scanstop-gate.md had
+  listed as "never seen here". It is therefore not a Steam Deck
+  peculiarity and not evidence about the dark_b failure. A reading of
+  it, from one observation: the cold scanner without a magazine read
+  `0x4055`, and `0x4855` differs only by the loader-sensor bit 0x08, so
+  `0x4855` looks like the ordinary cold status word with a magazine
+  present (state class 4), while the poll waits for class F.
+- The cold start's re-seating step (PR #44) logged "no re-seating" with
+  the magazine seated: the normal-load check that step was waiting for.
+
+**Runs**, all `--dpi 3600 --recalibrate` (a fresh calibration on every
+frame, so each frame has its own dark_b; the cache would otherwise hide
+frames 2–4), interleaved off/on/on/off, then two gated frame-1 runs:
+
+| run | gate | frames | exit | dark_b_substituted | cr_mismatches (f1/f2/f3/f4) | gate waits | max `wait_s` | max `since_clear_s` | duration |
+|---|---|---|---|---|---|---|---|---|---|
+| a | off | 1–4 | 0 | none | 15/27/24/29 | – | – | – | 2:43 |
+| b | enforce | 1–4 | 0 | none | 13/28/25/27 | 28, all `clear` | 0.008 s | 0.042 s | 2:43 |
+| c | enforce | 1–4 | 0 | none | 11/27/25/27 | 28, all `clear` | 0.008 s | 0.041 s | 2:43 |
+| d | off | 1–4 | 0 | none | 13/26/24/27 | – | – | – | 2:43 |
+| e | enforce | 1, 600 dpi dual | 0 | none | 41 | 7, all `clear` | 0.008 s | 0.030 s | 0:20 |
+| f | enforce | 1, IR 3600 | 0 | none | 22 | 7, all `clear` | 0.008 s | 0.184 s | 1:19 |
+
+**What the gate saw.** Every one of the 70 waits ended at the first
+read of each register: reg 0x100 always `f055`, reg 0x101 `dc55` or
+`d855`, i.e. both bits already clear when the gate read them, 20–42 ms
+after the SCAN-clear on this host (`since_clear_s`). The ~8 ms of
+`wait_s` is two control reads. The IR run's two shading phases had
+`since_clear_s` of 0.148 and 0.184 s: host time between phases, not
+engine time, and not counted against the budget (it runs from the
+gate's start). The gate changed nothing outside calibration: across
+a–d the prep poll warnings, the run time and the register values were
+identical with and without it, and `cr_mismatches` did NOT drop. (A
+likely reason, inferred, not shown by the data: the gate's reads are
+separate from the table's single post-clear `cr`s, which still mismatch
+when the host is ahead of the capture's dynamic bits.)
+
+**What the test could not show.** Test 32's residual dark_b on frames
+2–4 did not occur in any of the 18 frames, gate off included, so there
+was nothing for the gate to remove. Whether the mechanism (re-arming
+while the engine still runs) is the cause of issue #35 is still open;
+on this host the next acquisition is re-armed tens of milliseconds
+after the clear and the engine has always stopped by then, consistent
+with the fork's claim that the failing re-arms came 5.7–11.9 ms after
+the clear on a faster host. The decisive run is the reporter's, on the
+Steam Deck, with `enforce` and the diag attached.
+
+**The reporter's prep-phase poll timeouts are ours too.** In every run
+the `prep` phase's non-strict status polls timed out at the 0.3 s
+floor. Before frame 1 they read `d855`/`dc55`; in runs a–e the capture
+has `e855`/`ec55` there (exactly the reporter's values), in the IR run
+f the IR table's capture has `f855`/`fc55`. Before frames 2–4 they read
+`f855`/`fc55`. In runs a–d only, once before frame 1, the reg 0x32 poll
+(wv=0x008e, wi=0x3222) also timed out reading `1f55` where the capture
+has `8d55` (reg 0x32 also read 0x1f at the load). The status-word values are the
+known post-park state classes (docs/park-completion-analysis.md) and
+never reach the per-frame diag (`poll_timeouts` 0 there, since the diag
+counters are reset at scan start, after `initialize()`'s prep). So the
+reporter's `d855`/`dc55` do not single out their unit or host and do
+not explain their failure.
+
+**Status after the test.** The gate stays **opt-in** (default `off`)
+until the reporter has run `enforce` on the Deck; that was the
+recommendation from the run, not yet a recorded owner decision. Safety-wise it
+is cleared for this unit: ≤ 8 ms against 0.3 s is a ~37× margin and it
+never waited more than one read. The "frame 1 is always healthy"
+docstring of `_healthy_dark_b` stays until the Deck run says otherwise.
+docs/cal-scanstop-gate.md updated: 0x4855 and the prep `d855`/`dc55`
+moved from "never seen here" to "seen here too, benign".
+
+Fact check (2026-11-02): the session that drove the runs compared this
+entry with the raw logs and diags in `test114/` and confirmed the table,
+the 70 waits and the IR timings; the corrections it found (start-up
+sequence, the 0x4855 source, the reg 0x32 poll only in a–d, the IR
+run's expected prep values, run b's 0.042 s) are applied above. It
+agreed with the three conclusions: harmless here and unproven for #35;
+opt-in until the Deck run (a recommendation, not an owner decision);
+0x4855 and `d855`/`dc55` do not explain the Deck failure, though they
+cannot be fully ruled out as contributing on the Deck.
+
+Side note from the run: `tests/test_cal_wait_scanstop.py` as first
+written needed pytest, which the owner's venv does not have and
+`tools/release_check.py` does not use (it runs `python tests/<suite>.py`);
+fixed in the follow-up commit so the suite runs both ways.

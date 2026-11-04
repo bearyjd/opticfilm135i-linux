@@ -45,14 +45,18 @@ REPO = Path(__file__).resolve().parent.parent
 
 # (suite, group). Order is the run order.
 SUITES = (
-    ("test_safety", "core"), ("test_calibrate", "core"), ("test_hwblock", "core"),
+    ("test_safety", "core"), ("test_cold_reseat", "core"), ("test_calibrate", "core"), ("test_hwblock", "core"),
     ("test_park", "core"), ("test_offline", "core"), ("test_diag", "core"),
     ("test_dpi", "core"), ("test_ir", "core"), ("test_image_probe", "core"),
     ("test_aperture_crop", "core"), ("test_overscan", "core"),
     ("test_dual_overscan", "core"), ("test_slides", "core"),
-    ("test_calibration_cache", "core"),
-    ("test_film110", "core"), ("test_film110_digitize", "core"), ("test_film110_report", "core"), ("test_vendor_isolation", "core"), ("test_watch_events", "core"), ("test_buttons", "core"),
-    ("test_release_check", "core"), ("test_poll", "core"),
+    ("test_sweep", "core"), ("test_calibration_cache", "core"),
+    ("test_film110", "core"), ("test_film110_digitize", "core"),
+    ("test_film110_report", "core"), ("test_film110_sideband", "core"),
+    ("test_vendor_isolation", "core"), ("test_watch_events", "core"),
+    ("test_buttons", "core"), ("test_release_check", "core"),
+    ("test_poll", "core"), ("test_white_blockage", "core"),
+    ("test_cal_wait_scanstop", "core"),
     ("test_sane_mark", "compiler"), ("test_sane_ops", "compiler"),
     ("test_sane_geometry", "compiler"), ("test_sane_install", "compiler"),
     ("test_sane_open_params", "backend"), ("test_sane_calibration_cache", "backend"),
@@ -103,7 +107,7 @@ def classify(returncode: int, output: str) -> tuple[str, int, int]:
 
 def run_suite(name: str) -> tuple[str, int, int, str]:
     """Run tests/<name>.py and return (status, passed, skipped, output)."""
-    proc = subprocess.run([sys.executable, str(REPO / "tests" / f"{name}.py")],
+    proc = subprocess.run([sys.executable, str(REPO / "tests" / "run_suite.py"), name],
                           capture_output=True, text=True, cwd=REPO)
     out = proc.stdout + proc.stderr
     status, passed, skipped = classify(proc.returncode, out)

@@ -2,7 +2,7 @@
 
 ![License: GPL-2.0-or-later or MIT (driver), CC BY 4.0 (docs)](https://img.shields.io/badge/License-GPL--2.0--or--later%20%7C%20MIT%20%7C%20CC--BY--4.0-blue.svg)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
-![Release: v0.2.5](https://img.shields.io/badge/Release-v0.2.5-blue.svg)
+![Release: v0.2.7](https://img.shields.io/badge/Release-v0.2.7-blue.svg)
 ![Status: CLI driver complete, SANE backend working locally](https://img.shields.io/badge/Status-CLI%20driver%20complete%2C%20SANE%20backend%20working%20locally-green.svg)
 
 **Unofficial, community-built Linux driver for the Plustek OpticFilm 135i**
@@ -14,15 +14,21 @@ batch feeding that officially supports only Windows and macOS.
 Yes, on the developer's test scanner. This is an experimental native Linux
 driver for the OpticFilm 135i (USB `07b3:1436`, GL126), **under active
 development**. On that unit it scans without Windows, a virtual machine, or the
-manufacturer's driver. It has so far been developed and hardware-tested by one
-person on a **single scanner unit** in a limited Linux environment, so
-compatibility with other OpticFilm 135i units and other Linux setups is **not
-yet broadly verified** — additional hardware testing is welcome, and results on
-other units are not yet known.
+manufacturer's driver. It was developed and hardware-tested by one person on a
+**single scanner unit** in a limited Linux environment. As of November 2026 it
+has also scanned on **two other units** reported by users (one on a Steam
+Deck, one through a fork), but on both of them calibration fails
+intermittently at a step the developer's unit has never failed
+([issue #35](https://github.com/cgillinger/opticfilm135i-linux/issues/35));
+a fix contributed by one of those users is on master as an opt-in flag until
+it has been confirmed on their hardware. So compatibility with other
+OpticFilm 135i units and other Linux setups is **not yet verified** —
+additional hardware testing is welcome (see
+[Acknowledgements](#acknowledgements)).
 
 The project has two parts, at different stages:
 
-- **Python / pyusb command-line driver — released (v0.2.5), working on the
+- **Python / pyusb command-line driver — released (v0.2.7), working on the
   test unit.** Scans to raw 16-bit TIFF/PNM at all five resolutions
   (600 / 1200 / 2400 / 3600 / 7200 dpi), with an infrared dust/scratch channel,
   whole-strip batch scanning, and a resumable bulk-digitisation workflow.
@@ -173,8 +179,8 @@ installed from this repository's build.
 
 ## Development status
 
-**Status: v0.2.5 released (2026-10-20, the CLI driver and the SANE
-backend; [release notes](docs/release-notes-v0.2.5.md)).** The standalone Python/pyusb
+**Status: v0.2.7 released (2026-10-28, the CLI driver; the SANE backend is
+unchanged since v0.2.3; [release notes](docs/release-notes-v0.2.7.md)).** The standalone Python/pyusb
 command-line driver reached its defined milestone — magazine loading,
 single-frame and whole-strip batch scanning, all five resolutions, IR and dust
 removal, and eject — with scan, calibration, IR and dust removal
@@ -196,14 +202,24 @@ with IR-first coverage, empty-aperture detection, calibration export and
 a guard against dust in the calibration light path; v0.2.5 (the same
 evening) stops the driver waiting a full second for calibration status
 words the scanner never gives, about 9 s per strip, verified on ten
-production strips (Test 100). "Complete" here means that functional milestone is met **within
+production strips (Test 100); v0.2.6 (2026-10-26) completes the 110
+workflow — free passes until the roll is done, recognition by picture
+content, a pass report in the holder's language with one next placement,
+rebuilding a roll from its stored frames, and whole photographs never
+discarded — and fills a calibration white measurement blocked by film;
+v0.2.7 (2026-10-28) scans 110 over all six apertures by default and adds
+black-and-white 110 (dense pictures, no IR), proven on five black-and-white
+strips the same evening, with three numbering gaps closed that had left
+photographs unnumbered or undelivered.
+"Complete" here means that functional milestone is met **within
 its frozen scope on the one test unit** — it is **not** broad field testing or
 proof of compatibility with other scanners or Linux systems. The **SANE
 backend is a separate effort with its own status** — working locally, submitted
 upstream 2026-09-29 and not merged (see Project status above and
 [docs/ROADMAP.md](docs/ROADMAP.md)); do not read the CLI driver's hardware
 verification as the backend's. This is early software,
-verified on the single unit that exists, and these are the rough edges you
+verified on the developer's unit and run on two others with a known
+calibration failure (issue #35), and these are the rough edges you
 should know about:
 
 - **Eject depends on how the magazine was loaded.** Load with
@@ -211,7 +227,11 @@ should know about:
   `--eject` works, before or after scanning. Ejecting from other
   transport states (e.g. after the older `--full` load flow) stalled
   the mechanism with the magazine stuck part-way; recovery was a power
-  cycle plus an initialization with the vendor software.
+  cycle plus an initialization with the vendor software. If the
+  magazine is stuck after a power cycle (jog fails with the loader bit
+  clear), `of135i load` now re-seats the cassette with the vendor's
+  traverse first -- offline from a vendor capture, **not yet
+  hardware-verified** (docs/hardware-safety.md).
 - **Film strip holder: all six frames hardware-verified for transport,
   scan and PARK; the full six-frame colour production workflow is
   accepted (Test 58/N3).** The holder's six apertures have been
@@ -253,8 +273,11 @@ should know about:
   and writes one cropped product per whole image, numbered by position
   on the strip so the same photograph has the same number in both
   placements; `--placement` is optional, since the data says which
-  placement the strip is in (it is inferred from the first image, and an
-  image midway between the two is refused until you give it).
+  placement the strip is in (it is inferred from the first image; a strip
+  seated midway between the two is numbered from its first whole image,
+  provisionally until its front end is seen). Black-and-white 110 is
+  scanned without IR (`--no-ir`) and was proven on five strips
+  (Tests 109–110); `digitize --film 110` scans apertures 1–6 by default.
   `digitize --film 110` runs the two placements as two runs into one roll
   directory and writes one `image<N>.tiff` per photograph (implemented
   offline, hardware check pending); the 600 dpi survey prints which images are whole and which
@@ -435,8 +458,9 @@ docs/replay-analysis.md); it is off by default and not hardware-verified.
 `of135i digitize` runs one strip end to end — load, scan the strip's
 frames, eject — into a resumable staging tree, and records each strip in
 an append-only manifest. `--frames` says how long the strip is; it
-defaults to `1-4`, so a four-frame strip is never scanned as six. Use
-`--frames 1-6` for a full-length strip. Run it once per strip; the roll number advances
+defaults to `1-4` for 135 (so a four-frame strip is never scanned as six;
+use `--frames 1-6` for a full-length strip) and to `1-6` for `--film 110`,
+where the stop-at-empty rule ends a short strip early. Run it once per strip; the roll number advances
 from the manifest **and** the roll directories already on disk (per
 `--prefix`), so you can stop and pick up where you left off.
 
@@ -447,6 +471,27 @@ from the manifest **and** the roll directories already on disk (per
 #    (+ -ir.tiff + .diag.json) and appends ~/scans/boxA/manifest.jsonl.
 # Insert the next strip and run the same command again (roll-002, ...).
 ```
+
+**Whole-strip sweep (`--sweep`).** For the dual-light profiles (the
+default 3600 dpi with IR, and 600/1200/2400/7200) `digitize --sweep` scans
+the whole strip in a single pass — one calibration, one positioning move,
+one park — into `sweep.raw` in the roll directory, and cuts the frames from
+it in software; every frame goes through the same writer and the same
+aperture coverage check as the per-frame cycle. `--frames` must be a
+contiguous range of **at most four apertures** (no longer sweep has run on
+hardware; longer ranges are refused until a dedicated test, owner's decision
+after Test 112). `sweep.raw` (1.3–2 GB) is deleted after a fully
+successful roll unless `--keep-sweep`, and is always kept (with a note on
+stderr) when anything fails or does not verify; `--sweep --from-sweep
+--roll N` rebuilds a roll offline from it. **Hardware-run once** (Test 111,
+2026-10-30: dual 3600 with IR, one four-frame strip, 4 of 4 apertures
+verified, eye-accepted, about 31 % faster than the per-frame cycle); the other profiles
+are not yet run. Plain 3600 (`--no-ir`, black-and-white film) is **not**
+available as a sweep: its first hardware run (Test 112, 2026-10-31) ended
+with the magazine displaced and the park stalled, and the path is
+withdrawn — `digitize --sweep --no-ir` is refused and black-and-white film
+keeps the per-frame cycle. See `docs/whole-strip-sweep-design.md` and
+`docs/test-log.md`.
 
 The main `fN.tiff` is always the **raw negative** (calibrated,
 channel-aligned, and — with IR, unless `--no-clean` — dust-cleaned; not an
@@ -537,8 +582,22 @@ pixels are single-channel and are left to the gain table. The guarded
 dips are listed in the sidecar's `white_dips`; `tools/cal_dips.py
 <stem>.cal.npz` lists them for exported data together with the
 per-column factor that corrects a frame scanned before the guard
-existed. (Python driver only; the SANE backend computes its tables in
-C++ without this guard.) Console output is also protected: a closed
+existed. A **blocked** white measurement is filled before that
+(`calibrate.guard_white_blockage`): the white reference is measured in
+front of aperture 1, and a 110 strip whose front end lies a little into
+the holder's end blocks it over the film band's columns (Test 107: 2–3 %
+of the clear level over ~16 mm), so visible R and IR clipped in every
+frame of the pass. A wide region bounded by steep steps is filled from the
+newest clean profile of the same kind, scaled by the measurement itself on
+the clear columns either side (within 1 % of the true level on real data;
+without a reference, linear interpolation, within ~4–8 %). Every
+calibration without a blockage keeps that profile current in the state
+directory (`$OF135I_STATE_DIR`, else `$XDG_STATE_HOME/of135i`, else
+`~/.local/state/of135i`); `tools/white_reference_seed.py <stem>.cal.npz`
+seeds it from exported data. The filled ranges are listed in the sidecar's
+`white_blocked`. Where the strip lies is never the operator's problem.
+(Python driver only; the SANE backend computes its tables in C++ without
+these guards.) Console output is also protected: a closed
 stdout/stderr pipe can no longer abort a scan.
 
 ### What the driver knows about the magazine
@@ -594,7 +653,8 @@ Every error message ends with the next safe action. The rules behind them:
   ends and does not come back by itself; a power cycle wakes it.
 
 Exit codes: `0` success, `1` refused or failed (details on stderr),
-`2` usage error, `130` interrupted (Ctrl-C).
+`2` usage error, `3` scanner busy (another of135i process holds the lock;
+nothing was sent, no power cycle needed), `130` interrupted (Ctrl-C).
 
 ### Release check
 
@@ -673,10 +733,31 @@ interoperability constants and our own code.
 ## Status & disclaimer
 
 Working prototype, developed and tested against a single OpticFilm 135i
-unit. This project is not affiliated with, endorsed by, or supported by
-Plustek Inc. Use at your own risk. Plustek and OpticFilm are trademarks
-of their respective owner; they are used here only to identify the
-hardware this software interoperates with.
+unit, with first reports from two more (issue #35). This project is not
+affiliated with, endorsed by, or supported by Plustek Inc. Use at your own
+risk. Plustek and OpticFilm are trademarks of their respective owner; they
+are used here only to identify the hardware this software interoperates
+with.
+
+## Acknowledgements
+
+Everything up to October 2026 was built and verified on one scanner. Two
+users have since run the driver on their own units and reported back
+(issue #35):
+
+- **[Krustenviech](https://github.com/Krustenviech)** ran it on a Steam
+  Deck, the second unit it has scanned on, and reported the calibration
+  failure with the logs and register dumps needed to work on it.
+- **[bearyjd](https://github.com/bearyjd)** saw the same failure on a
+  third unit, proposed a cause (the host re-arms the next calibration
+  acquisition before the scanner's engine has stopped), wrote the
+  calibration stop gate (`--cal-wait-scanstop`) with its offline tests in
+  a fork, and ran an A/B on their unit. The code on master is a port of
+  that work, with bearyjd as co-author. Whether it fixes the failure is
+  still to be confirmed on their hardware.
+
+If you got the driver working, or failing, on another unit, an issue
+saying so is genuinely useful.
 
 ## License
 

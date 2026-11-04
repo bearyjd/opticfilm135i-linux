@@ -651,3 +651,217 @@ def slide_dual_geometry(
             f"lines). Nothing was sent to the scanner.")
     check_feedl(slide_travel_end(geom.feedl, wire, dpi), SLIDE)
     return geom, wire
+
+
+@dataclass(frozen=True)
+class SweepGeometry:
+    """The scan window of a whole-strip sweep (docs/whole-strip-sweep-
+    design.md section 3): ``OverscanGeometry``'s fields for the whole
+    window, plus the apertures it covers.
+
+    ``frame`` is ``first``; ``delivered_lines`` is in VISIBLE lines after
+    the colour-line crop would be taken off (as for a single frame).
+    ``start_hwdpi`` is the motor position of raw line 0 (FEEDL minus the
+    dual anchoring constant K). ``predicted_edges[k]`` is aperture k's
+    (leading, trailing) edge in VISIBLE line coordinates of the raw sweep
+    buffer (wire line // 2), on the mean mapping and the commanded start.
+    """
+
+    first: int
+    last: int
+    feedl: int
+    wire_lines: int
+    chunks: int
+    delivered_lines: int
+    leading_margin_mm: float
+    trailing_margin_mm: float
+    end_hwdpi: float
+    start_hwdpi: float
+    lines_per_mm: float
+    predicted_edges: dict
+
+
+def dual_sweep_geometry(
+    first: int,
+    last: int,
+    *,
+    dpi: int,
+    lines_per_chunk: int,
+    colour_crop_lines: int,
+    default_wire_lines: int,
+    fiducial: FiducialModel | None = None,
+    overscan_mm: float = OVERSCAN_MM,
+    holder: Holder = DEFAULT,
+) -> tuple[SweepGeometry, int]:
+    """One scan window from ``overscan_mm`` before aperture ``first``'s
+    leading edge to ``overscan_mm`` after aperture ``last``'s trailing
+    edge, for a dual-light profile (design doc section 3).
+
+    Positioning is anchored exactly as ``dual_overscan_geometry`` anchors
+    frame ``first``: the FEEDL IS that function's FEEDL for ``first`` (same
+    overscan), so the sweep starts where frame ``first``'s pass starts
+    today. Only the line count grows: whole chunks, rounded up, carrying
+    the span plus the two colour-crop strips. The furthest position
+    reached is checked against FEEDL_CEILING before anything is returned.
+
+    Returns (geometry, wire_lines), wire_lines = chunks x lines_per_chunk.
+    """
+    check_frame(first, holder)
+    check_frame(last, holder)
+    if first > last:
+        raise ValueError(f"sweep first aperture {first} is after last {last}")
+    if lines_per_chunk % 2:
+        raise ValueError(
+            f"lines_per_chunk {lines_per_chunk} is odd: a dual chunk must "
+            f"hold whole IR/visible line pairs")
+    if 7200 % dpi:
+        raise ValueError(f"dpi {dpi} does not divide the 7200 dpi motor base")
+    fid = fiducial if fiducial is not None else STRIP_FIDUCIAL
+    units_per_vis = 7200 // dpi
+    over = overscan_mm / MM_PER_UNIT
+    want_start = fid.leading_hwdpi(first) - over
+    want_end = fid.trailing_hwdpi(last) + over
+
+    chunk_vis = lines_per_chunk // 2
+    delivered_needed = (want_end - want_start) / units_per_vis
+    chunks = math.ceil((delivered_needed + 2 * colour_crop_lines) / chunk_vis)
+    wire_lines = chunks * lines_per_chunk
+    delivered_lines = chunks * chunk_vis - 2 * colour_crop_lines
+    end_hwdpi = want_start + delivered_lines * units_per_vis
+    check_feedl(round(end_hwdpi), holder)
+
+    # Same FEEDL as the single-frame geometry of `first` (same anchoring).
+    ref, _ = dual_overscan_geometry(
+        first, dpi=dpi, lines_per_chunk=lines_per_chunk,
+        colour_crop_lines=colour_crop_lines,
+        default_wire_lines=default_wire_lines, fiducial=fid,
+        overscan_mm=overscan_mm, holder=holder)
+    feedl = ref.feedl
+    k_units = default_wire_lines * (units_per_vis / 2) / 2
+    start_hwdpi = feedl - k_units
+
+    edges = {}
+    for k in range(first, last + 1):
+        edges[k] = ((fid.leading_hwdpi(k) - start_hwdpi) / units_per_vis,
+                    (fid.trailing_hwdpi(k) - start_hwdpi) / units_per_vis)
+
+    geom = SweepGeometry(
+        first=first, last=last, feedl=feedl, wire_lines=wire_lines,
+        chunks=chunks, delivered_lines=delivered_lines,
+        leading_margin_mm=overscan_mm,
+        trailing_margin_mm=(end_hwdpi - fid.trailing_hwdpi(last)) * MM_PER_UNIT,
+        end_hwdpi=end_hwdpi, start_hwdpi=start_hwdpi,
+        lines_per_mm=dpi / 25.4, predicted_edges=edges)
+    return geom, wire_lines
+
+
+#: Whether the plain-3600 engine's anchoring of a LONG pass has been
+#: shown on hardware. Two hypotheses (docs/whole-strip-sweep-design.md
+#: section 3): (centre) the engine centres the commanded window on
+#: FEEDL -- verified only for one-frame windows (Tests 57-60, window
+#: growth of a few hundred motor units); (fixed start) it anchors the
+#: acquisition START at FEEDL minus a constant K equal to the captured
+#: default window's half-length, as the dual engine does
+#: (dual_overscan_geometry). Until a hardware run has shown which holds
+#: for a long plain pass, plain_sweep_geometry requires BOTH furthest
+#: positions to pass check_feedl. Flip to True ONLY after a hardware
+#: test recorded in docs/test-log.md (the Test 112 plan in
+#: docs/whole-strip-sweep-design.md) has shown the centre convention
+#: for a long plain pass; then only the centre hypothesis is checked.
+PLAIN_SWEEP_LONG_ANCHORING_VERIFIED = False
+
+
+def plain_sweep_geometry(
+    first: int,
+    last: int,
+    *,
+    chunk_lines: int,
+    colour_crop_lines: int,
+    default_lines: int,
+    fiducial: FiducialModel | None = None,
+    overscan_mm: float = OVERSCAN_MM,
+    holder: Holder = DEFAULT,
+) -> tuple[SweepGeometry, int]:
+    """One plain-3600 scan window from ``overscan_mm`` before aperture
+    ``first``'s leading edge to ``overscan_mm`` after aperture ``last``'s
+    trailing edge (docs/whole-strip-sweep-design.md section 3).
+
+    Plain 3600 only: one wire line per visible line, 2 motor units per
+    line. Anchoring is the PLAIN convention, as ``overscan_geometry``
+    uses it: the commanded window is CENTRED on FEEDL (FEEDL =
+    want_start + delivered_lines/2 x 2 units), which Tests 57-60 verified
+    for one-frame windows. Predicted edges are in visible (= wire) lines
+    from ``start_hwdpi`` = want_start.
+
+    Hardware-safety gate: that convention is verified only for windows a
+    few hundred motor units longer than the default. For a long window
+    the engine might instead anchor the START at FEEDL - K with K = the
+    default window's half-length (``default_lines`` x 2 / 2 units), as
+    the dual engine does; the pass would then run to (feedl - K) +
+    delivered_lines x 2. While PLAIN_SWEEP_LONG_ANCHORING_VERIFIED is
+    False BOTH furthest positions must pass check_feedl, else
+    FeedlOutOfRangeError is raised before anything is returned.
+
+    Returns (geometry, wire_lines), wire_lines = chunks x chunk_lines
+    (the image lines; the device programs
+    tables.scan_lines_for_chunks(chunks), which adds the fixed drain).
+
+    Implemented offline; NOT hardware-verified.
+    """
+    from .safety import FeedlOutOfRangeError
+
+    check_frame(first, holder)
+    check_frame(last, holder)
+    if first > last:
+        raise ValueError(f"sweep first aperture {first} is after last {last}")
+    fid = fiducial if fiducial is not None else STRIP_FIDUCIAL
+    units = 2                       # motor units per plain-3600 line
+    over = overscan_mm / MM_PER_UNIT
+    want_start = fid.leading_hwdpi(first) - over
+    want_end = fid.trailing_hwdpi(last) + over
+
+    delivered_needed = (want_end - want_start) / units
+    chunks = math.ceil((delivered_needed + 2 * colour_crop_lines) / chunk_lines)
+    wire_lines = chunks * chunk_lines
+    delivered_lines = wire_lines - 2 * colour_crop_lines
+    # The plain scan phase injects a 16-bit line count only (lines_hi,
+    # lines_lo); no lines_top. Imported lazily: tables is large.
+    from . import tables as _tables
+    if _tables.scan_lines_for_chunks(chunks) > 0xFFFF:
+        raise ValueError(
+            f"{_tables.scan_lines_for_chunks(chunks)} lines do not fit the plain "
+            f"scan phase's 16-bit line count")
+
+    feedl = round(want_start + delivered_lines / 2 * units)
+    end_hwdpi = want_start + delivered_lines * units
+
+    # Gate: the centre hypothesis, and (until verified) the fixed-start one.
+    check_feedl(feedl, holder)
+    check_feedl(round(end_hwdpi), holder)
+    if not PLAIN_SWEEP_LONG_ANCHORING_VERIFIED:
+        k_units = default_lines * units / 2
+        k_end = (feedl - k_units) + delivered_lines * units
+        if round(k_end) > FEEDL_CEILING:
+            raise FeedlOutOfRangeError(
+                f"plain sweep over apertures {first}-{last} is refused until the "
+                f"plain engine's anchoring of a long pass is hardware-verified: "
+                f"under the fixed-start hypothesis the pass would reach "
+                f"{round(k_end)} motor units, past the proven travel of "
+                f"{FEEDL_CEILING}; a range of four apertures (1-4, 2-5) is the longest allowed. "
+                f"Nothing was sent to the scanner.",
+                feedl=round(k_end), ceiling=FEEDL_CEILING)
+
+    start_hwdpi = want_start
+    edges = {}
+    for k in range(first, last + 1):
+        edges[k] = ((fid.leading_hwdpi(k) - start_hwdpi) / units,
+                    (fid.trailing_hwdpi(k) - start_hwdpi) / units)
+
+    geom = SweepGeometry(
+        first=first, last=last, feedl=feedl, wire_lines=wire_lines,
+        chunks=chunks, delivered_lines=delivered_lines,
+        leading_margin_mm=overscan_mm,
+        trailing_margin_mm=(end_hwdpi - fid.trailing_hwdpi(last)) * MM_PER_UNIT,
+        end_hwdpi=end_hwdpi, start_hwdpi=start_hwdpi,
+        lines_per_mm=3600 / 25.4, predicted_edges=edges)
+    return geom, wire_lines

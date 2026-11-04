@@ -244,8 +244,16 @@ survey and the 3600 dpi production frames alike:
    below 0.6 x air, scanning in from the air side) — the free edge of a
    16 mm strip wandered 1–2 mm along one aperture on this strip — and a
    hole is a line whose zone 0.3–3.0 mm inside *that line's* edge reaches
-   air level. Hole runs of 0.8–4 mm (0.3 mm when cut by the aperture
-   boundary) are perforations.
+   air level **across the zone**: within each run of lines where any zone
+   column reaches air, the hole is the stretch where the fraction of zone
+   columns at air is at least half the run's best line, and a run whose
+   best line has less than 0.25 of the zone at air is no hole (Test 107: an
+   unexposed edge rim reading 0.85–0.95 × air put rim noise at air level on
+   almost every line; real holes read 0.55 on earlier strips, up to ~1 on
+   that one, the false runs 0.01–0.05). An edge flush against the rail
+   keeps the plain rule (part of each hole lies under the rail, 0.13–0.16).
+   Hole runs of 0.8–4 mm (0.3 mm when cut by the aperture boundary) are
+   perforations.
 5. Every hole predicts the image after it (hole end + 2.3 mm) and the
    image before it (hole start − 3.4 mm); predictions closer than half a
    pitch are the same image and are merged. A window that is neither
@@ -459,6 +467,28 @@ are kept beside them as evidence.
   an image by the gap before it is removed by the CLI's leader rule only
   when its end edge is not confirmed. Film with no printed border (not
   seen on any 110 strip yet) has no gaps; the holes carry it as before.
+- **Plain path (`--no-ir`, black-and-white): coverage may come from the
+  air beside the strip.** Without IR the aperture edges are measured on
+  the central half of the frame width, which a 16 mm strip mostly fills:
+  dense film touching a crossbar hides the edge, and dense pictures can
+  split the lit run below the minimum aperture length ("no aperture found
+  in profile", exit 4, no product; colour 110 never hit this because the
+  dual path measures on IR first). For `--film 110` the central verdict
+  must also show the holder's opening length (35.92 mm ± 1.0): dense film
+  over the first millimetres of an aperture leaves a lit run of 25 mm or
+  more that passes as an aperture and would crop the film off, so a
+  shorter opening counts as not verified. Only then, `aperture_crop.measure_coverage_side_band` measures
+  again on 1.5 mm column bands across the width (the opening is wider than
+  the strip, so there is bare air on at least one side). A band counts
+  only if it verifies *and* its opening is the holder's: 35.92 mm ± 1.0 mm
+  (a film end or a gap is never accepted however clean its edges); all
+  accepted bands must agree on both edges within 0.3 mm, otherwise the
+  frame is refused (no band is preferred); both edges are always measured,
+  never inferred from the length. The frame's manifest entry then has
+  `coverage_source: "visible-side"` (and the reason names the column
+  range); nothing else in the manifest changes. When neither measurement
+  verifies the result is today's refusal with both reasons
+  (`visible: …; side bands: …`). 135 and every dual path are unchanged.
 - **Edge safety is 0.25 mm of border, n = 1 strip.** After the
   2026-09-20 fix the refined edge lies within 0.06 mm of the measured
   foot on all 16 production edges; the pad is a margin, not a
@@ -475,12 +505,28 @@ are kept beside them as evidence.
   placement A's aperture 1 (image 1 at 3.5 mm) reads as continuing.
   The line is informational only — numbering and products never use it
   (a real continuation is the `leading` split predicted from the hole).
-- **Positive (slide) 110 film and B&W 110** are untested; the detector
-  works on light levels, the IR clean path assumes a dye-image negative
-  as for 135.
+- **Black-and-white 110: n = 1 strip (Test 109).** Run with `--no-ir` (the
+  silver image blocks IR): plain 3600, side-band coverage. Dense pictures
+  read as dark as the rail in a column median, so a dark run between other
+  columns must also be dark at the 95th percentile to count as rail; the
+  clear base reads 0.78 x air, so the hole search retries with an edge
+  threshold of 0.9 x air when 0.6 finds no hole. The printed gaps on this film
+  are LIGHTER than the pictures (0.09 against 0.03), so the frame locator
+  (built for dark printed borders) does not help: pictures are located by
+  their holes; a strip's last picture whose hole lies in the previous
+  aperture (followed by fogged film) is located by that hole's prediction
+  carried over (`ApertureFind.beyond`, `located_by` "previous aperture's
+  hole", Test 110). Passes without IR are recognised in log intensity
+  (the pictures sit near black). **Positive (slide) 110** is untested.
+- **A pass-1 strip between the placement phases** (front end out of view)
+  is numbered from its first whole image: placement "free", the A grid's
+  numbers, provisional until the front end is seen (Test 110: three strips
+  in one evening sat ~4.5 mm before A). Before, every whole image of such a
+  pass was written unnumbered and the next pass had nothing to recognise.
 - **Placement inference is one operator's phases, n = 2 strips.** A strip
-  seated 4–9 mm off both phases (visibly "between" A and B) is refused, not
-  guessed; give `--placement`. A strip seated so far off that it lands near
+  seated 4–9 mm off both phases (visibly "between" A and B) is numbered from
+  its first whole image (placement "free", see below; until Test 110 it was
+  refused and its images written unnumbered). A strip seated so far off that it lands near
   the *other* phase is inferred as that placement — the numbering is then
   consistent with where the strip actually is, which is what matters, but
   the advice "take it in the other placement" refers to the inferred one.
@@ -511,7 +557,9 @@ now `p<k>-f<N>.tiff` per pass instead of `a-`/`b-`.*
 A 110 strip takes two placements (§3), so a roll takes two `digitize`
 runs. Both write into the **same** roll directory; the first run picks the
 roll number as usual, the second names it with `--roll N`. Each run is
-what `digitize` always is — one load, `--frames` (default 1-4), eject —
+what `digitize` always is — one load, `--frames` (default 1-6 for 110, so a strip of up to ~8
+images reaches apertures 5–6; the stop-at-empty rule ends a short strip
+after the first empty aperture that follows film), eject —
 and uses the same pipeline, coverage, film-presence check, overscan files,
 diag and `cal.npz`; the 110 detector then runs on each verified,
 aperture-registered crop (one detector call per aperture, the same
@@ -775,7 +823,8 @@ seating puts the strip end under plastic"), advice not a requirement; the
 old `advice.images` / `other_placement` keys stay one release for the
 application. Exit codes
 (0, 2 refused before hardware, 4 coverage, 5 numbering could not be
-established): **exit 5 means "the whole photographs were written UNNUMBERED,
+established; 3, scanner busy with nothing sent, applies to every hardware
+command): **exit 5 means "the whole photographs were written UNNUMBERED,
 numbering not established", not "nothing was written"** (§15.9).
 
 **Numbering from pass 2: recognise, never guess.** Pass 1 numbers as §5/§12.
@@ -956,20 +1005,23 @@ rescued images, then the largest minimum margin, then the smallest move.
                    "rescues": [2], "targets": [{"number": 2, "aperture": 2}],
                    "remaining": [], "another_pass_after": false}   # or null
 
-    Next pass: slide the strip half an image (about 13 mm) towards aperture 6,
-    so that image 2 (now split by bar 1) lies in the middle of aperture 2.
+    Next pass: move image 2 (now split by bar 1) whole into an aperture. Keep at
+    least one image already scanned in an aperture, so that the pass can
+    recognise the strip.
 
 `advice.suggest` keeps this text for one release; the older keys (`images`,
 `other_placement`, `missing`, `free_end`, `done`) stay for one release.
 
-`shift_mm` is the exact value found on the 0.5 mm grid. The operator places
-by the **visual target**, not by millimetres: the text gives the amount only
-as "about" (quarter images and mm) and always names what to look at — for a
-split image "so that image 2 … lies in the middle of aperture 2", for a
-free-end rescue the plastic the strip's end must rest on ("… and the strip's
-end rests on bar 3", or "… with the strip's end against the end wall at
-aperture 1"; machine-readable as `targets[].end_on`: `"bar N"` / `"end wall
-at aperture N"`). Margins above 5 mm count as equal when two placements are
+`shift_mm` is the exact value found on the 0.5 mm grid. **The operator moves
+the photograph, not the strip by a distance** (Christian, 2026-10-26): the
+text names WHICH image to move and why ("now split by bar 1", "now whole,
+with the strip end free"), never how far or which way; for a free-end rescue
+it names the plastic the strip's end must just reach under ("… with the
+strip's end just under bar 3 (do not push the strip against it)";
+machine-readable as `targets[].end_on`). `shift_mm`, `direction`, `images`
+and `targets[].aperture` stay in the fields as the measured placement that
+would do it. Numbering a later pass needs no particular move (§13: it is
+read from the pictures), only that one image seen before is seen again. Margins above 5 mm count as equal when two placements are
 compared (otherwise a 50 mm move beats a 15 mm one for one more millimetre
 of margin).
 
@@ -1099,7 +1151,10 @@ Testigen roll 5's dark window frame a "gap"). Flat runs are cut at every level
 step (the camera-gate halo that used to mark steps is removed by the filter) and
 a flat run of at least 3 mm is extended outward (at most 2 mm per side) while
 the filtered level stays within `FRAME_LEVEL_TOL` of the run's level, so the
-gap's ends land on the real step. A candidate window's clear-film test
+gap's ends land on the real step; an extension that would make the gap longer
+than 9.5 mm is undone (Test 107: a dense white fence at the picture's edge read
+0.145–0.16 against the border's 0.122 and grew the 8 mm gap to 10 mm, which
+was then dropped). A candidate window's clear-film test
 leaves out the gap lines within 2.5 mm of its ends (only windows that lie on
 film): a hole- or frame-located window that runs a millimetre or two into the
 gap is judged on the clear part and is a **blank** (`ApertureFind.blanks`, never
@@ -1107,6 +1162,13 @@ a product), not an image; a blank may reach 1 mm past the aperture's lines.
 Real-data A/B (98 stored apertures, 143 hole frames): identical except two
 apertures whose "image" was an unexposed frame (Nastatestigen roll 1 p1-f1,
 Testigen roll 2 p1-f1), now blank.
+
+A window that is clear along transport is a blank only if it is also flat
+**across** (Test 108): the per-line median averages a thin, low-contrast
+picture away, so the robust spread of 0.25 mm block means about a fitted
+plane, over the picture's own columns (air blocks -- a leader's punched hole --
+dropped), must stay under `BLANK_TEXTURE_MAX` 0.06. Real blanks measured
+0.014–0.031, real images 0.126 and up.
 
 ### 15.8 Recognising a pass on a strip of near-duplicate shots (Test 106 pass 3)
 
@@ -1157,3 +1219,11 @@ whole, not identified (delivered unnumbered)" (outcome `delivered_unnumbered`).
 * The atomic rebuild (§14) follows the same rule: a pass it cannot recognise is
   written unnumbered into the staged set, the replay goes on with the last good
   reference, the command exits 5 after committing.
+* **Also inside a numbered pass** (Test 107, 2026-10-26): a whole or
+  near-whole image the pass's numbering cannot place — off the placement's
+  phase, between the two phases, off slot 2's grid — is written unnumbered
+  the same way (`unnumbered_reason` in its entry, the reason plus "written
+  UNNUMBERED as p<k>-a<n>-<i>.tiff" in `problems`), the numbered images of the
+  pass are written as usual, the record is `ok` and the run exits 5. Before,
+  these paths wrote nothing and said "no 110 product written". `scan --film
+  110` (no roll directory) still writes no 110 product for them.
