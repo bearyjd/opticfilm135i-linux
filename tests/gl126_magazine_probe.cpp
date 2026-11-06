@@ -120,24 +120,42 @@ bool g_edge_baseline_set = false;
 unsigned g_edge_baseline = 0;
 bool g_edge_write_violation = false;
 
-void set_edge_script(std::initializer_list<int> values)
+void set_edge_script(const std::vector<int>& values)
 {
-    g_edge_script.assign(values);
+    g_edge_script = values;
     g_edge_step = 0;
+}
+
+/* The edge wait's present window, in reads: must equal
+   kEdgePresentReadsNeeded in backend/genesys/gl126.cpp (the candidate
+   longer window; v9 had 5). Every resolving script below is built from
+   it, so "resolves" means exactly that window, and the transfer tests in
+   tests/test_sane_magazine.py assert the same count on the wire, so a
+   mismatch fails there rather than going unnoticed. */
+constexpr int kProbeEdgePresentReads = 25;
+
+/* head, then `presents` present reads (0xF8), then tail. */
+std::vector<int> edge_script(std::initializer_list<int> head, int presents,
+                             std::initializer_list<int> tail = {})
+{
+    std::vector<int> v(head);
+    v.insert(v.end(), static_cast<std::size_t>(presents), 0xF8);
+    v.insert(v.end(), tail);
+    return v;
 }
 
 /* Ejected-kind and Released-retry scenarios below all start the wait with
    the sensor reading present (0xF8, the "resting after eject" case WP-4
    section 10.3 describes) and want it to resolve: clear, clear, present
-   x5. Shared so every "the edge really does resolve" scenario scripts
+   x kProbeEdgePresentReads. Shared so every "the edge really does resolve" scenario scripts
    the identical sequence. */
 void set_edge_script_resolve_from_present()
 {
-    set_edge_script({ 0xF0, 0xF0, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8 });
+    set_edge_script(edge_script({ 0xF0, 0xF0 }, kProbeEdgePresentReads));
 }
 
 /* Review finding A: the same sequence, but the checkpoint fired on the
-   Seen-triggering (5th present) read writes ONE MORE value, `trailing`,
+   Seen-triggering (last present) read writes ONE MORE value, `trailing`,
    which is then what the POST-EDGE presence+class re-read sees (nothing
    else changes the register between the wait returning and that
    re-read). Used to script "the magazine was pulled back out during the
@@ -147,16 +165,16 @@ void set_edge_script_resolve_from_present()
    settle costs no wall time either way). */
 void set_edge_script_resolve_from_present_then(std::uint8_t trailing)
 {
-    set_edge_script({ 0xF0, 0xF0, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, trailing });
+    set_edge_script(edge_script({ 0xF0, 0xF0 }, kProbeEdgePresentReads, { trailing }));
 }
 
 /* The retry case starts the SECOND wait already clear (the first wait's
    own timeout left it there in every scenario below) and needs one more
-   clear read to reach the 2-consecutive threshold before the same five
-   presents. */
+   clear read to reach the 2-consecutive threshold before the same
+   present window. */
 void set_edge_script_resolve_from_clear()
 {
-    set_edge_script({ 0xF0, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8 });
+    set_edge_script(edge_script({ 0xF0 }, kProbeEdgePresentReads));
 }
 
 /* Review finding I: a single-poll clear "glitch" -- present, one clear
@@ -164,14 +182,14 @@ void set_edge_script_resolve_from_clear()
    loose (clear_consec resets before reaching kEdgeClearReadsNeeded, so
    saw_clear stays false through it). This script absorbs exactly one
    such glitch and THEN genuinely clears for 2 consecutive reads before
-   resolving present x5 -- proving the glitch does not block a real
+   resolving present x kProbeEdgePresentReads -- proving the glitch does not block a real
    resolve either. Seed the register present (0xF8) before the press;
    read order this produces: present(seed), clear(glitch), present
    (glitch interrupted, consec reset), clear, clear (the real
-   transition), present x5 (Seen). */
+   transition), present x kProbeEdgePresentReads (Seen). */
 void set_edge_script_debounce_glitch_then_resolve()
 {
-    set_edge_script({ 0xF0, 0xF8, 0xF0, 0xF0, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8 });
+    set_edge_script(edge_script({ 0xF0, 0xF8, 0xF0, 0xF0 }, kProbeEdgePresentReads));
 }
 
 /* The other half: the SAME single glitch, but nothing ever clears for
@@ -181,6 +199,22 @@ void set_edge_script_debounce_glitch_then_resolve()
 void set_edge_script_debounce_single_glitch_then_present()
 {
     set_edge_script({ 0xF0, 0xF8, 0xF8 });
+}
+
+/* The candidate longer window: present for all but the window's last
+   read, then one clear read (a flicker, or a magazine not yet at the
+   stop that slips back off the sensor). With `then_present` false the
+   sensor then stays clear: the wait must keep waiting and time out with
+   no LOAD (v9's 5-read window would already have started LOAD here).
+   With `then_present` true it reads present again for one full window,
+   and only then does LOAD start. */
+void set_edge_script_flicker_in_window(bool then_present)
+{
+    std::vector<int> v = edge_script({ 0xF0, 0xF0 }, kProbeEdgePresentReads - 1, { 0xF0 });
+    if (then_present) {
+        v.insert(v.end(), static_cast<std::size_t>(kProbeEdgePresentReads), 0xF8);
+    }
+    set_edge_script(v);
 }
 
 /* The magazine load's own wire script. The mock answers every IN
@@ -767,7 +801,21 @@ int cmd_scenario(int argc, char** argv)
         seed(dev, 0x3C, 0x00);
         set_edge_script_resolve_from_present();
         call_hook(dev, "release");     // wait resolves -> "open" (fails closed)
+    } else if (scenario == "load-film-edge-flicker-in-window-times-out") {
+        // The candidate longer present window: present for all but its
+        // last read, then clear and staying clear. Must NOT start LOAD
+        // (no "open" either, no write at all): the wait goes back to
+        // waiting for a full window and times out, Released.
+        seed(dev, 0x01, 0x22);
+        seed(dev, 0x101, 0xF0);
+        call_hook(dev, "eject");       // -> Ejected (mark: ejected)
+        seed(dev, 0x101, 0xF8);
+        seed(dev, 0x3B, 0x02);
+        seed(dev, 0x3C, 0x00);
+        set_edge_script_flicker_in_window(false);
+        call_hook(dev, "release");     // flicker resets the window, times out
     } else if (scenario == "load-film-load-completes" ||
+               scenario == "load-film-load-completes-after-flicker" ||
                scenario == "load-film-load-freezes-at-op24" ||
                scenario == "load-film-load-freezes-at-op38") {
         // The ejected flow of load-film-edge-seen-ejected, but with a
@@ -783,7 +831,11 @@ int cmd_scenario(int argc, char** argv)
         // "op38": op 24 completes and reg 0x101 then freezes at 0xfc, so
         // the traverse's completion (want 0xd8) times out with one poll
         // of the same program completed before it.
-        bool completes = scenario == "load-film-load-completes";
+        // "completes-after-flicker": the same successful load, but the
+        // window is interrupted by one clear read and read present for a
+        // whole window again before LOAD starts (XFER lines show it).
+        bool after_flicker = scenario == "load-film-load-completes-after-flicker";
+        bool completes = scenario == "load-film-load-completes" || after_flicker;
         auto* iface = dynamic_cast<TestScannerInterface*>(dev->interface.get());
         seed(dev, 0x01, 0x22);
         seed(dev, 0x101, 0xF0);
@@ -791,7 +843,11 @@ int cmd_scenario(int argc, char** argv)
         seed(dev, 0x101, 0xF8);
         seed(dev, 0x3B, 0x02);
         seed(dev, 0x3C, 0x00);
-        set_edge_script_resolve_from_present();
+        if (after_flicker) {
+            set_edge_script_flicker_in_window(true);
+        } else {
+            set_edge_script_resolve_from_present();
+        }
         if (completes) {
             g_status_replies = { 0xD0, 0xD0, 0xF0, 0xD8, 0xDC, 0xDC };
             g_seed_done_after_load = true;

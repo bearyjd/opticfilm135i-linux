@@ -154,6 +154,15 @@ def _skip(name):
     return "skipped"
 
 
+# The edge wait's present window, in reads: kEdgePresentReadsNeeded in
+# backend/genesys/gl126.cpp (the candidate longer window; v9 had 5) and
+# kProbeEdgePresentReads in tests/gl126_magazine_probe.cpp. The edge
+# scenarios' poll cap is sized for a flicker plus two whole windows; the
+# mock's sleep_ms is a no-op, so the cap costs no wall time.
+EDGE_PRESENT_READS = 25
+EDGE_CAP_MS = 6000
+
+
 def _run(probe, *args, mark_dir=None, poll_cap_ms=5, debug_level=None):
     """Run the probe with an isolated HOME (so no real calibration file is
     read) and an isolated mark path (so a test can never disturb the
@@ -166,7 +175,8 @@ def _run(probe, *args, mark_dir=None, poll_cap_ms=5, debug_level=None):
     only ever shortens a wait (sane/gl126_ops.h RunPolicy, and the WP-5
     magazine edge wait's own equivalent gate in gl126.cpp). A handful of
     edge-wait tests need the wait to actually run its scripted sequence to
-    completion (100 ms/poll, up to ~8 polls) and pass a larger value.
+    completion (100 ms/poll; with the candidate present window of
+    EDGE_PRESENT_READS reads up to ~55 polls) and pass EDGE_CAP_MS.
 
     `debug_level` sets SANE_DEBUG_GENESYS for the run, for a test that
     asserts on the backend's own log (returned as out["log"])."""
@@ -408,7 +418,7 @@ def test_the_edge_resolving_lets_the_ejected_kind_load():
     button itself (magazine_load_film_impl()), checked AFTER the edge wait
     resolves -- the wait's own "Seen" outcome already proves the sensor
     precondition WP-4 section 10.3 used a single read for. Scripted so the
-    wait actually completes (present -> clear -> clear -> present x5,
+    wait actually completes (present -> clear -> clear -> present x EDGE_PRESENT_READS,
     hence the larger poll cap): "open" then reaches the wire and fails
     closed on the mock, and the checkpoint proves not one of the wait's
     own polls wrote anything (EDGEWRITE 0)."""
@@ -416,7 +426,7 @@ def test_the_edge_resolving_lets_the_ejected_kind_load():
     if probe is None:
         return _skip("test_the_edge_resolving_lets_the_ejected_kind_load")
 
-    r = _run(probe, "scenario", "load-film-edge-seen-ejected", poll_cap_ms=2000)
+    r = _run(probe, "scenario", "load-film-edge-seen-ejected", poll_cap_ms=EDGE_CAP_MS)
     assert len(r["statuses"]) == 2, r["statuses"]
     eject, release = r["statuses"]
     assert eject[0] == SANE_STATUS_GOOD, eject
@@ -441,7 +451,7 @@ def test_the_regs_check_after_the_edge_still_refuses_the_base_table_state():
     if probe is None:
         return _skip("test_the_regs_check_after_the_edge_still_refuses_the_base_table_state")
 
-    r = _run(probe, "scenario", "load-film-edge-seen-bad-regs", poll_cap_ms=2000)
+    r = _run(probe, "scenario", "load-film-edge-seen-bad-regs", poll_cap_ms=EDGE_CAP_MS)
     assert len(r["statuses"]) == 2, r["statuses"]
     eject, release = r["statuses"]
     assert eject[0] == SANE_STATUS_GOOD, eject
@@ -1040,7 +1050,7 @@ def test_an_ejected_origin_retry_never_jogs_either_way():
     if probe is None:
         return _skip("test_an_ejected_origin_retry_never_jogs_either_way")
 
-    r = _run(probe, "scenario", "load-film-retry-no-clear-rejogs", poll_cap_ms=2000)
+    r = _run(probe, "scenario", "load-film-retry-no-clear-rejogs", poll_cap_ms=EDGE_CAP_MS)
     assert len(r["statuses"]) == 3, r["statuses"]
     press1, press2 = r["statuses"][1], r["statuses"][2]
     assert press1 == (SANE_STATUS_GOOD, ""), press1
@@ -1048,7 +1058,7 @@ def test_an_ejected_origin_retry_never_jogs_either_way():
     assert "magazine open sequence" in press2[1], press2[1]
     assert r["edgewrite"] == 0, r
 
-    r2 = _run(probe, "scenario", "load-film-retry-with-clear-then-edge", poll_cap_ms=2000)
+    r2 = _run(probe, "scenario", "load-film-retry-with-clear-then-edge", poll_cap_ms=EDGE_CAP_MS)
     assert len(r2["statuses"]) == 3, r2["statuses"]
     press1b, press2b = r2["statuses"][1], r2["statuses"][2]
     assert press1b == (SANE_STATUS_GOOD, ""), press1b
@@ -1148,7 +1158,7 @@ def test_saw_clear_is_debounced():
     if probe is None:
         return _skip("test_saw_clear_is_debounced")
 
-    r = _run(probe, "scenario", "load-film-edge-debounce-glitch-then-resolve", poll_cap_ms=2000)
+    r = _run(probe, "scenario", "load-film-edge-debounce-glitch-then-resolve", poll_cap_ms=EDGE_CAP_MS)
     assert len(r["statuses"]) == 2, r["statuses"]
     eject, release = r["statuses"]
     assert eject[0] == SANE_STATUS_GOOD, eject
@@ -1179,7 +1189,7 @@ def test_the_post_edge_check_catches_a_late_class_or_presence_change():
     if probe is None:
         return _skip("test_the_post_edge_check_catches_a_late_class_or_presence_change")
 
-    r = _run(probe, "scenario", "load-film-edge-seen-then-not-idle", poll_cap_ms=2000)
+    r = _run(probe, "scenario", "load-film-edge-seen-then-not-idle", poll_cap_ms=EDGE_CAP_MS)
     assert len(r["statuses"]) == 2, r["statuses"]
     eject, release = r["statuses"]
     assert eject[0] == SANE_STATUS_GOOD, eject
@@ -1189,7 +1199,7 @@ def test_the_post_edge_check_catches_a_late_class_or_presence_change():
     assert r["edgewrite"] == 0, r
     assert r["mark"].startswith("present failed"), r["mark"]
 
-    r2 = _run(probe, "scenario", "load-film-edge-seen-then-clear", poll_cap_ms=2000)
+    r2 = _run(probe, "scenario", "load-film-edge-seen-then-clear", poll_cap_ms=EDGE_CAP_MS)
     assert len(r2["statuses"]) == 2, r2["statuses"]
     eject2, release2 = r2["statuses"]
     assert eject2[0] == SANE_STATUS_GOOD, eject2
@@ -1212,7 +1222,7 @@ def test_a_killed_process_leaves_a_refusing_mark():
     if probe is None:
         return _skip("test_a_killed_process_leaves_a_refusing_mark")
 
-    r = _run(probe, "scenario", "load-film-killed-mid-wait", poll_cap_ms=2000)
+    r = _run(probe, "scenario", "load-film-killed-mid-wait", poll_cap_ms=EDGE_CAP_MS)
     assert len(r["statuses"]) == 2, r["statuses"]
     eject, release = r["statuses"]
     assert eject[0] == SANE_STATUS_GOOD, eject
@@ -1289,7 +1299,7 @@ def test_an_ejected_origin_retry_keeps_running_open():
     if probe is None:
         return _skip("test_an_ejected_origin_retry_keeps_running_open")
 
-    r = _run(probe, "scenario", "load-film-ejected-origin-retry-keeps-open", poll_cap_ms=2000)
+    r = _run(probe, "scenario", "load-film-ejected-origin-retry-keeps-open", poll_cap_ms=EDGE_CAP_MS)
     assert len(r["statuses"]) == 3, r["statuses"]
     eject, press1, press2 = r["statuses"]
     assert eject[0] == SANE_STATUS_GOOD, eject
@@ -1314,7 +1324,7 @@ def test_a_power_cycle_inside_one_process_resets_loaded():
     if probe is None:
         return _skip("test_a_power_cycle_inside_one_process_resets_loaded")
 
-    r = _run(probe, "scenario", "load-film-loaded-then-cold", poll_cap_ms=2000)
+    r = _run(probe, "scenario", "load-film-loaded-then-cold", poll_cap_ms=EDGE_CAP_MS)
     status, msg = r["statuses"][0]
     assert status == SANE_STATUS_DEVICE_BUSY, r["statuses"]
     assert "magazine cold_init sequence" in msg, msg
@@ -1529,6 +1539,16 @@ DBG_INFO = 4
 # blob hashes in each golden's "#" header. Rerun it to check or renew them:
 #
 #   tests/gen_gl126_load_film_goldens.sh <sane-backends repo> <commit> <scratch dir>
+#
+# Longer-window candidate branch only: the window changes the wire, so
+# these goldens are NOT that script's output. They are the same
+# --write-load-goldens step (write_load_goldens() below) run against the
+# candidate build itself, whose "#" header names it. Each differs from
+# the logging commit's goldens in one line only, the window's present
+# polls ("REPEAT 2 x4" becomes "REPEAT 2 x24", EDGE_PRESENT_READS - 1);
+# with kEdgePresentReadsNeeded and kProbeEdgePresentReads back at 5 the
+# candidate build writes the logging commit's goldens again, line for
+# line.
 LOAD_GOLDENS = {
     "load-film-load-completes": "gl126_load_film_transfers.txt",
     "load-film-load-freezes-at-op24": "gl126_load_film_freeze_op24_transfers.txt",
@@ -1556,7 +1576,7 @@ def _read_golden(name):
 
 
 def _run_load_scenario(probe, scenario, debug_level=None):
-    return _run(probe, "scenario", scenario, poll_cap_ms=2000, debug_level=debug_level)
+    return _run(probe, "scenario", scenario, poll_cap_ms=EDGE_CAP_MS, debug_level=debug_level)
 
 
 def _assert_same_transfers(scenario, xfers):
@@ -1586,7 +1606,7 @@ def test_a_successful_load_puts_the_identical_transfers_on_the_wire():
     if probe is None:
         return _skip("test_a_successful_load_puts_the_identical_transfers_on_the_wire")
 
-    r = _run_load_scenario(probe, "load-film-load-completes")
+    r = _run_load_scenario(probe, "load-film-load-completes", debug_level=DBG_INFO)
     assert len(r["statuses"]) == 2, r["statuses"]
     eject, release = r["statuses"]
     assert eject[0] == SANE_STATUS_GOOD, eject
@@ -1594,8 +1614,111 @@ def test_a_successful_load_puts_the_identical_transfers_on_the_wire():
     assert r["text"].startswith("loaded"), r["text"]
     assert r["mark"].startswith("present loaded"), r["mark"]
     n = _assert_same_transfers("load-film-load-completes", r["xfers"])
+    # The window: the seeded first poll, two clear polls, then exactly
+    # EDGE_PRESENT_READS present polls before the settle (never 5).
+    polls = [x for x in _expand_repeats(r["xfers"][:_settle_index(r["xfers"]) + 1])
+             if x.startswith("REG R 0x0101:")]
+    assert polls == ["REG R 0x0101: f8"] + ["REG R 0x0101: f0"] * 2 + \
+        ["REG R 0x0101: f8"] * EDGE_PRESENT_READS, polls
+    polls = 3 + EDGE_PRESENT_READS
+    for want in (
+        f"gl126: magazine edge wait: 2 clear reads, then {EDGE_PRESENT_READS} present "
+        "reads, 100 ms apart, then a 600 ms settle",
+        f"gl126: magazine edge seen ({polls} polls, ~{polls * 100} ms, last reg 0x101 "
+        "0xf8); settling 600 ms",
+    ):
+        assert want in r["log"], (want, r["log"][-4000:])
     print("test_a_successful_load_puts_the_identical_transfers_on_the_wire OK "
           f"({n} lines, identical)")
+
+
+_SETTLE_SLEEP = "SLEEP 600000 us"
+_POLL_SLEEP = "SLEEP 100000 us"
+
+
+def _settle_index(xfers):
+    return xfers.index(_SETTLE_SLEEP)
+
+
+def _expand_repeats(lines):
+    """Undo the transfer log's pair compression: "REPEAT 2 xN" stands for
+    the two lines before it, N more times."""
+    out = []
+    for line in lines:
+        if line.startswith("REPEAT 2 x"):
+            out.extend(out[-2:] * int(line[len("REPEAT 2 x"):]))
+        else:
+            out.append(line)
+    return out
+
+
+def _with_window(golden, window):
+    """The expanded success golden with the edge wait's present polls
+    replaced by `window` (one reg 0x101 value per poll, each after its
+    100 ms sleep). Everything before the window (reg 0x01, the seeded
+    poll, the two clear polls) and from the 600 ms settle on is kept as
+    it is."""
+    g = _expand_repeats(golden)
+    settle = g.index(_SETTLE_SLEEP)
+    clears = [i for i, x in enumerate(g[:settle]) if x == "REG R 0x0101: f0"]
+    assert len(clears) == 2, g[:settle + 1]
+    head = g[:clears[-1] + 1]
+    present = g[clears[-1] + 1:settle]
+    assert present == [_POLL_SLEEP, "REG R 0x0101: f8"] * EDGE_PRESENT_READS, present
+    body = []
+    for v in window:
+        body += [_POLL_SLEEP, f"REG R 0x0101: {v:02x}"]
+    return head + body + g[settle:]
+
+
+def test_a_flicker_inside_the_present_window_does_not_start_load():
+    """The candidate longer window: the sensor reads present for all but
+    the window's last read, then clear, and stays clear (a magazine that
+    slipped back off the sensor before reaching the stop). No LOAD, no
+    OPEN, no write of any kind: the wait goes back to waiting for a whole
+    window and, the sensor never returning, times out to Released with
+    the "came loose" wording, the same outcome as any other timeout that
+    saw a clear. v9's 5-read window would already have started LOAD."""
+    probe = _build_probe()
+    if probe is None:
+        return _skip("test_a_flicker_inside_the_present_window_does_not_start_load")
+
+    r = _run(probe, "scenario", "load-film-edge-flicker-in-window-times-out",
+             poll_cap_ms=EDGE_CAP_MS, debug_level=DBG_INFO)
+    assert len(r["statuses"]) == 2, r["statuses"]
+    assert r["statuses"][1] == (SANE_STATUS_GOOD, ""), r["statuses"]
+    assert r["edgewrite"] == 0, r
+    assert r["mark"].startswith("present ejected"), r["mark"]
+    assert r["text"].startswith("press Load film, then take out"), r["text"]
+    log = r["log"]
+    assert "magazine edge seen" not in log, log[-4000:]
+    assert "saw a clear read: yes" in log, log[-4000:]
+    print("test_a_flicker_inside_the_present_window_does_not_start_load OK "
+          "(no LOAD, no write, Released)")
+
+
+def test_after_a_flicker_load_waits_for_a_whole_window_again():
+    """The same flicker, then present again: LOAD starts only after a
+    whole new window of present reads, and from there the wire is the
+    success golden's sequence unchanged."""
+    probe = _build_probe()
+    if probe is None:
+        return _skip("test_after_a_flicker_load_waits_for_a_whole_window_again")
+
+    r = _run_load_scenario(probe, "load-film-load-completes-after-flicker")
+    assert len(r["statuses"]) == 2, r["statuses"]
+    assert r["statuses"][1][0] == SANE_STATUS_GOOD, r["statuses"]
+    assert r["mark"].startswith("present loaded"), r["mark"]
+    window = [0xF8] * (EDGE_PRESENT_READS - 1) + [0xF0] + [0xF8] * EDGE_PRESENT_READS
+    want = _with_window(_read_golden(LOAD_GOLDENS["load-film-load-completes"]), window)
+    got = _expand_repeats(r["xfers"])
+    first_diff = next((i for i, (a, b) in enumerate(zip(got, want)) if a != b),
+                      min(len(got), len(want)))
+    assert got == want, (
+        f"{len(got)} transfers, expected {len(want)}; first difference at line "
+        f"{first_diff}: {got[first_diff:first_diff + 3]} vs {want[first_diff:first_diff + 3]}")
+    print("test_after_a_flicker_load_waits_for_a_whole_window_again OK "
+          f"({len(window)} window polls, then the golden sequence)")
 
 
 def _assert_failure_transfers(scenario, xfers):
@@ -1630,7 +1753,8 @@ def test_a_load_frozen_at_op_24_logs_what_it_saw():
     assert "at op 24" in release[1], release[1]
     log = r["log"]
     for want in (
-        "gl126: magazine edge seen (8 polls, ~800 ms, last reg 0x101 0xf8); settling 600 ms",
+        f"gl126: magazine edge seen ({3 + EDGE_PRESENT_READS} polls, "
+        f"~{(3 + EDGE_PRESENT_READS) * 100} ms, last reg 0x101 0xf8); settling 600 ms",
         "gl126: magazine after the settle: reg 0x101 = 0xf8, reg 0x01 = 0x22, "
         "regs 0x3b/0x3c = 0x02/0x00",
         "gl126: magazine load: no poll completed before op 24",
@@ -1736,6 +1860,8 @@ def main() -> int:
         test_dead_options_are_inactive_and_film_group_is_placed_and_ordered,
         test_switching_to_gray_does_not_reopen_hidden_options_on_gl126,
         test_a_successful_load_puts_the_identical_transfers_on_the_wire,
+        test_a_flicker_inside_the_present_window_does_not_start_load,
+        test_after_a_flicker_load_waits_for_a_whole_window_again,
         test_a_load_frozen_at_op_24_logs_what_it_saw,
         test_a_load_frozen_at_op_38_logs_the_polls_completed_before_it,
     ]
