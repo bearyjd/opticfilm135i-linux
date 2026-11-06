@@ -631,3 +631,52 @@ def test_telemetry_adds_exactly_one_warning_and_nothing_else(caplog, dark, fallb
     extra = [m for m in msgs[True] if "calibration integrity" in m]
     assert len(extra) == 1
     assert [m for m in msgs[True] if m not in extra] == msgs[False]
+
+
+# --------------------- prev_running under the (default) enforce stop gate
+
+class _SettlingFake(ScriptedFake):
+    """The first post-clear read of registers 0x100/0x101 in ``settle_phase``
+    still reads running (the trace's own poll); every later one, i.e. the
+    stop gate's, reads stopped."""
+
+    def __init__(self, *a, settle_phase="cal_dark_a", **kw):
+        super().__init__(*a, **kw)
+        self.settle_phase = settle_phase
+        self.seen: dict = {}
+
+    def ctrl_transfer(self, bm, br, wv=0, wi=0, data_or_wLength=None, timeout=None):
+        out = super().ctrl_transfer(bm, br, wv, wi, data_or_wLength, timeout)
+        ph = self._phase()
+        if (bm & 0x80) and wv == 0x018E and wi in (0x0022, 0x0122) \
+                and ph == self.settle_phase and self._stage.get(ph) == "cleared":
+            n = self.seen[wi] = self.seen.get(wi, 0) + 1
+            if n > 1:
+                return bytes([0xF0 if wi == 0x0022 else 0xDC, 0x55])
+        return out
+
+
+def _run_enforce(script):
+    from test_cal_wait_scanstop import sim_time
+    with sim_time(0.001):
+        fake = _SettlingFake(script, dark=DARK_DISTINCT)
+        s = make_scanner(fake, gate="enforce")
+        fake.scanner = s
+        s.dark_fallback = "strict"
+        with scripted_clock(fake):
+            s.initialize()
+            s.scan(frame=1)
+    return s
+
+
+def test_gate_confirmed_stop_is_not_reported_as_still_running():
+    """The gate confirmed the previous acquisition stopped before this
+    one's execute pulse: the trace's earlier 'running' read is superseded,
+    so a fast re-armed read is not stale_suspect."""
+    s = _run_enforce(STALE_DARK_B)
+    a = _acq(s.last_diag, "cal_dark_b")
+    assert a["prev_post"]["data_enabled"] == 1      # the earlier read, kept as telemetry
+    assert a["served_fast"] is True
+    assert a["prev_running"] is False
+    assert a["stale_suspect"] is False
+    assert s._cal_integrity_fail_reasons() == []

@@ -1018,8 +1018,10 @@ def _film110_number_aperture(args: argparse.Namespace, state: Film110State,
                 # A split prediction before the roll's first image (the
                 # leader, on this side after a turn) or off the grid:
                 # nothing a product could be made of anyway, ignored.
+                why = ("before the roll's first image" if n < 1
+                       else f"off the grid by {residual:+.1f} mm")
                 parts.append(note + f"image predicted at {pos_mm:.1f} mm "
-                             f"({'before the roll\'s first image' if n < 1 else f'off the grid by {residual:+.1f} mm'}, "
+                             f"({why}, "
                              f"not whole): nothing to write, ignored")
                 continue
             # The system serves the photographs, not the other way round

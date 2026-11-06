@@ -54,6 +54,8 @@ SUITES = (
     ("test_release_check", "core"), ("test_poll", "core"), ("test_white_blockage", "core"),
     ("test_cal_wait_scanstop", "core"), ("test_cross_unit_check", "core"),
     ("test_cr_mismatch_details", "core"), ("test_trace_recorder", "core"),
+    ("test_py310_syntax", "core"), ("test_cold_homing_rounds", "core"),
+    ("test_diag_readback_regs", "core"), ("test_load_probe", "core"), ("test_replay_harness", "core"),
     ("test_sane_mark", "compiler"), ("test_sane_ops", "compiler"),
     ("test_sane_geometry", "compiler"), ("test_sane_install", "compiler"),
     ("test_sane_open_params", "backend"), ("test_sane_calibration_cache", "backend"),
