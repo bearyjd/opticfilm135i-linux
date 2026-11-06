@@ -81,7 +81,8 @@ for t in test_safety test_cold_reseat test_calibrate test_hwblock \
          test_buttons test_release_check test_poll test_white_blockage \
          test_cal_wait_scanstop test_cross_unit_check \
          test_cr_mismatch_details test_trace_recorder \
-         test_py310_syntax; do
+         test_py310_syntax test_cold_homing_rounds test_diag_readback_regs \
+         test_load_probe test_replay_harness; do
     .venv/bin/python tests/run_suite.py $t || exit 1
 done
 ```
