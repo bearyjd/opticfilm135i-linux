@@ -1698,6 +1698,11 @@ class Scanner:
                     if post is not None:
                         rec["prev_running"] = bool(post.get("data_enabled")
                                                    or post.get("motor_enabled"))
+                    if prev.get("_gate_stopped"):
+                        # The stop gate read both enable bits clear after the
+                        # trace's own post-clear read and before this pulse:
+                        # the engine was stopped when it was re-armed.
+                        rec["prev_running"] = False
                 accs.append(rec)
             elif (0x01, 0x02) in pairs:
                 a = self._cal_open_acquisition()
@@ -1909,6 +1914,9 @@ class Scanner:
         rec["outcome"] = "clear"
         rec["wait_s"] = round(now - t_start, 4)
         rec["since_clear_s"] = round(now - self._scanstop_t_clear, 4)
+        accs = getattr(self, "_cal_acquisitions", None)
+        if accs and accs[-1]["phase"] == phase and "_t_clear" in accs[-1]:
+            accs[-1]["_gate_stopped"] = True    # read by _cal_note_write
         log.debug("calibration stop gate after phase %s: clear after %.4fs "
                   "(%d/%d reads of 0x100/0x101)", phase, rec["wait_s"],
                   rec["reads_100"], rec["reads_101"])
