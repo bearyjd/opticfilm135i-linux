@@ -3042,8 +3042,7 @@ def _digitize_sweep(args: argparse.Namespace) -> int:
         # Eject now: the carriage is parked and the scanner idle; the
         # post-processing below takes minutes and the scanner drops USB
         # after ~5 min of standby.
-        scanner.eject()
-        print("ejected")
+        _report_eject(scanner.eject())
         return 0
 
     try:

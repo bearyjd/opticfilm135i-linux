@@ -31,7 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from of135i import cli, digitize, holder, image, safety, sweep, aperture_crop
-from of135i.device import Scanner, dual_tables, position_timeout_scale
+from of135i.device import (EJECT_COMPLETED, EJECT_SKIPPED_NO_MAGAZINE, Scanner,
+                           dual_tables, position_timeout_scale)
 from of135i.tables import Op
 from of135i import aperture, tables
 from tests.test_dual_overscan import _RecordingDualScanner
@@ -448,6 +449,7 @@ class _SweepFakeScanner:
 
     def eject(self):
         self.events.append("eject")
+        return EJECT_COMPLETED
 
 
 def _args(d, **over):
@@ -548,6 +550,26 @@ def test_e2e_sweep_products_identical_to_per_frame_writer():
             assert "white_dips" in sc and sc["sweep_window"]["aperture"] == k
         assert "sweep.raw kept" in err and str(rdir / "sweep.raw") in err and "GB" in err
     print("test_e2e_sweep_products_identical_to_per_frame_writer OK")
+
+
+def test_sweep_skipped_eject_is_not_reported_as_ejected():
+    """The sweep's eject goes through _report_eject like every other site:
+    a sensor-clear skip (no motor command sent) never prints "ejected"."""
+    raw, g, t = _synthetic_sweep()
+
+    class _SkippedEject(_SweepFakeScanner):
+        def eject(self):
+            self.events.append("eject")
+            return EJECT_SKIPPED_NO_MAGAZINE
+
+    with tempfile.TemporaryDirectory() as d:
+        events = []
+        rc, out, err = _run(_args(d), _SkippedEject(raw, g, t, events))
+        assert rc == 0, (rc, err)
+        assert events[-1] == "eject", events
+        assert "ejected" not in out, out
+        assert "eject NOT run" in err, err
+    print("test_sweep_skipped_eject_is_not_reported_as_ejected OK")
 
 
 def test_clean_roll_removes_sweep_raw_and_says_nothing():
@@ -1162,6 +1184,7 @@ def main():
         test_ir_profile_blockwise_equals_direct,
         test_finder_resolves_a_colour_staggered_ir_sweep,
         test_e2e_sweep_products_identical_to_per_frame_writer,
+        test_sweep_skipped_eject_is_not_reported_as_ejected,
         test_clean_roll_removes_sweep_raw_and_says_nothing,
         test_unresolved_sweep_keeps_everything,
         test_unverified_window_keeps_sweep_raw,
