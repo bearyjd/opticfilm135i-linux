@@ -30,7 +30,10 @@ def _read(rel):
 def test_workflow_runs_no_suite_as_a_bare_script():
     wf = _read(".github/workflows/offline-checks.yml")
     assert not BARE_SCRIPT.findall(wf), "script-run suites must use tests/run_suite.py"
-    assert "python tests/run_suite.py $t" in wf
+    # Script-run suites reach CI through tools/release_check.py (upstream's
+    # single SUITES list), which must start each one via run_suite.py.
+    assert "python tools/release_check.py" in wf
+    assert '"tests" / "run_suite.py"' in _read("tools/release_check.py")
 
 
 def test_documented_script_loops_use_the_runner():

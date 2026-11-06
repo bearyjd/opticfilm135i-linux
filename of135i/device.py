@@ -236,20 +236,29 @@ CAL_READBACK_GUARD_DEFAULT = "log"
 # not a measured device limit. Nothing here sends, delays or decides.
 CAL_SERVED_FAST_S = 0.010
 
-# Calibration stop gate (Scanner.cal_wait_scanstop). Fork production default
-# "enforce" (upstream defaults off; "off" is the explicit escape hatch); it
-# delays the next calibration execute pulse, so it is motor-adjacent. In hardware logs the stale calibration
-# reads (see CAL_SERVED_FAST_S) were re-armed while the previous
-# acquisition still showed data-enable (register 0x100 bit 0) and
-# motor-enable (register 0x101 bit 0) set; vendor-app traffic waits for
-# both to clear first. "enforce": after the SCAN-clear (register 0x01
-# written with bit 0 clear) that closes an execute pulse in a
+# Calibration stop gate (Scanner.cal_wait_scanstop). Default "enforce"
+# (docs/cal-scanstop-gate.md, "Decision"; issue #35). Ported from
+# bearyjd's fork, branch feat/cal-wait-scanstop, commit f462b0b.
+# Motor-adjacent: it delays the next calibration execute pulse by reads
+# only. Evidence: Test 32 showed a residual dark_b (the frame's own
+# dark_a tail, read back 3-4x too fast: no exposure happened); the
+# fork's logs showed the next acquisition re-armed 5.7-11.9 ms after the
+# previous SCAN-clear while register 0x100 bit 0 (data enable) and 0x101
+# bit 0 (motor enable) still read set, and on fast hosts (a Steam Deck,
+# a second unit) this hits frame 1, which _healthy_dark_b cannot
+# substitute. Gated scans completed on three units; the longest wait
+# seen is 29 ms against the 0.3 s budget.
+# "enforce": after the SCAN-clear that closes an execute pulse in a
 # CAL_ACQUISITION_PHASES phase, and before the next OUT transfer of any
-# kind, poll register 0x100 until bit 0 is clear, then register 0x101
-# until bit 0 is clear. Only a 2-byte reply with the 0x55 acknowledge
-# counts. Both waits share ONE deadline, NONSTRICT_POLL_FLOOR_S (no new or
-# longer budget); at that deadline CalibrationError is raised before any
-# further write. "off" (explicit opt-out): no read, sleep or clock call is added.
+# kind (control write or bulk OUT), poll register 0x100 until bit 0 is
+# clear, then register 0x101 until bit 0 is clear. Only a 2-byte reply
+# with the 0x55 acknowledge counts. Both waits share ONE deadline,
+# NONSTRICT_POLL_FLOOR_S less the time the phase's own post-clear 0x100
+# poll already spent (no new or longer budget); at that deadline
+# CalibrationError is raised before any further write (fail closed, power
+# cycle). "off": no read, sleep or clock call is added and the wire is
+# byte-identical to a driver without the gate (tests/test_cal_wait_scanstop.py
+# pins the wire digest).
 CAL_WAIT_SCANSTOP_MODES = ("off", "enforce")
 
 # Calibration buffer-empty gate (Scanner.cal_wait_bufempty). EXPERIMENTAL,
@@ -957,6 +966,7 @@ class Scanner:
         self._diag_phase_seconds: dict[str, float] = {}
         self._diag_poll_timeouts: int = 0
         self._diag_cr_mismatches: int = 0
+        self._diag_cr_mismatch_details: list[dict] = []
         self._diag_poll_timeout_details: list[dict] = []
         self._diag_poll_settle: list[dict] = []
         self._diag_poll_settle_max_s: float = 0.0
@@ -1029,6 +1039,8 @@ class Scanner:
         # clear's host time, the seconds the phase's own post-clear 0x100
         # poll already spent, and the waits recorded for the diag
         # ("cal_scanstop_waits"). The state is only ever set in "enforce".
+        # The mode itself is the class attribute _cal_wait_scanstop
+        # (default "enforce"), so the test pin (tests/_gate_pin.py) applies.
         self._scanstop_go_phase: str | None = None
         self._scanstop_armed: str | None = None
         self._scanstop_t_clear: float = 0.0
@@ -1161,8 +1173,8 @@ class Scanner:
 
     @property
     def cal_wait_scanstop(self) -> str:
-        """"enforce" (default) or "off": see CAL_WAIT_SCANSTOP_MODES.
-        Fork production default; upstream defaults off."""
+        """"enforce" (default) or "off": see CAL_WAIT_SCANSTOP_MODES and
+        docs/cal-scanstop-gate.md."""
         return self._cal_wait_scanstop
 
     @cal_wait_scanstop.setter
@@ -1261,6 +1273,12 @@ class Scanner:
                     self._cal_note_status_read(op.wi, got)
                 if got != op.resp:
                     self._diag_cr_mismatches += 1
+                    if len(self._diag_cr_mismatch_details) < 20:
+                        self._diag_cr_mismatch_details.append({
+                            "phase": self.session.phase, "idx": idx,
+                            "wv": op.wv, "wi": op.wi,
+                            "got": got.hex(), "want": op.resp.hex(),
+                        })
                     log.debug(
                         "cr wv=%#06x wi=%#06x: got %s want %s -- continuing",
                         op.wv, op.wi, got.hex(), op.resp.hex(),
@@ -3371,18 +3389,28 @@ class Scanner:
         this is a proven correction, not a cover-up. A healthy dark_b is
         remembered for later frames. Fails closed (CalibrationError, scan
         FAILED, no motor command) if dark_b is residual and none healthy
-        has been seen this session (frame 1 is empirically always healthy,
-        so this is a defensive branch)."""
+        has been seen this session. Frame 1 has no earlier dark_b to fall
+        back on. On the developer unit the first one has always been healthy,
+        but not everywhere: two other units failed here at the first
+        calibration of a session without the stop gate
+        (docs/cal-scanstop-gate.md), which is why the gate is the
+        default."""
         if not calibrate.dark_is_residual(dark_b):
             self._last_good_dark_b = dark_b
             return dark_b, False
         log.warning("dark_b is residual (Test 32: repeated block, not a "
                     "measurement); substituting this session's healthy dark_b")
         if self._last_good_dark_b is None:
+            hint = ""
+            if self._cal_wait_scanstop == "off":
+                hint = (" --cal-wait-scanstop enforce (the default) waits for "
+                        "the scanner to stop between calibration acquisitions "
+                        "and has prevented this failure on the units that "
+                        "showed it (docs/cal-scanstop-gate.md).")
             raise safety.CalibrationError(
                 "dark_b is residual and no healthy dark_b has been measured "
                 "this session; cannot compute AFE offset. The scan stops "
-                f"here. {safety.NO_RECOVERY_ATTEMPTED} "
+                f"here.{hint} {safety.NO_RECOVERY_ATTEMPTED} "
                 f"{safety.POWER_CYCLE_INSTRUCTION}",
                 session=self.session.snapshot())
         return self._last_good_dark_b, True
@@ -3658,6 +3686,7 @@ class Scanner:
         self._diag_cr_mismatches = 0
         self._cal_acquisitions = []
         self._cal_bufempty_waits = []
+        self._diag_cr_mismatch_details = []
         self._cal_scanstop_waits = []
         self._scanstop_go_phase = None
         self._scanstop_armed = None
@@ -3785,6 +3814,7 @@ class Scanner:
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
             "cr_mismatches": self._diag_cr_mismatches,
+            "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
             "poll_settle": list(self._diag_poll_settle),
             "poll_settle_max_s": round(self._diag_poll_settle_max_s, 4),
@@ -3984,6 +4014,7 @@ class Scanner:
         self._diag_cr_mismatches = 0
         self._cal_acquisitions = []
         self._cal_bufempty_waits = []
+        self._diag_cr_mismatch_details = []
         self._cal_scanstop_waits = []
         self._scanstop_go_phase = None
         self._scanstop_armed = None
@@ -4157,6 +4188,7 @@ class Scanner:
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
             "cr_mismatches": self._diag_cr_mismatches,
+            "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
             "poll_settle": list(self._diag_poll_settle),
             "poll_settle_max_s": round(self._diag_poll_settle_max_s, 4),
@@ -4282,6 +4314,7 @@ class Scanner:
         self._diag_cr_mismatches = 0
         self._cal_acquisitions = []
         self._cal_bufempty_waits = []
+        self._diag_cr_mismatch_details = []
         self._cal_scanstop_waits = []
         self._scanstop_go_phase = None
         self._scanstop_armed = None
@@ -4396,6 +4429,7 @@ class Scanner:
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
             "cr_mismatches": self._diag_cr_mismatches,
+            "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
             "poll_settle": list(self._diag_poll_settle),
             "poll_settle_max_s": round(self._diag_poll_settle_max_s, 4),
@@ -4424,6 +4458,7 @@ class Scanner:
         self._diag_cr_mismatches = 0
         self._cal_acquisitions = []
         self._cal_bufempty_waits = []
+        self._diag_cr_mismatch_details = []
         self._cal_scanstop_waits = []
         self._scanstop_go_phase = None
         self._scanstop_armed = None
@@ -4559,6 +4594,7 @@ class Scanner:
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
             "cr_mismatches": self._diag_cr_mismatches,
+            "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
             "poll_settle": list(self._diag_poll_settle),
             "poll_settle_max_s": round(self._diag_poll_settle_max_s, 4),

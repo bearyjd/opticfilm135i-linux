@@ -2,7 +2,7 @@
 
 ![License: GPL-2.0-or-later or MIT (driver), CC BY 4.0 (docs)](https://img.shields.io/badge/License-GPL--2.0--or--later%20%7C%20MIT%20%7C%20CC--BY--4.0-blue.svg)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
-![Release: v0.2.7](https://img.shields.io/badge/Release-v0.2.7-blue.svg)
+![Release: v0.2.10](https://img.shields.io/badge/Release-v0.2.10-blue.svg)
 ![Status: CLI driver complete, SANE backend working locally](https://img.shields.io/badge/Status-CLI%20driver%20complete%2C%20SANE%20backend%20working%20locally-green.svg)
 
 **Unofficial, community-built Linux driver for the Plustek OpticFilm 135i**
@@ -17,18 +17,19 @@ development**. On that unit it scans without Windows, a virtual machine, or the
 manufacturer's driver. It was developed and hardware-tested by one person on a
 **single scanner unit** in a limited Linux environment. As of November 2026 it
 has also scanned on **two other units** reported by users (one on a Steam
-Deck, one through a fork), but on both of them calibration fails
-intermittently at a step the developer's unit has never failed
+Deck, one through a fork). On both, calibration failed at a step the
+developer's unit has never failed
 ([issue #35](https://github.com/cgillinger/opticfilm135i-linux/issues/35));
-a fix contributed by one of those users is on master as an opt-in flag until
-it has been confirmed on their hardware. So compatibility with other
+a fix contributed by one of those users, the calibration stop gate
+(`--cal-wait-scanstop`), is now the default and both units completed every
+gated scan (docs/cal-scanstop-gate.md). So compatibility with other
 OpticFilm 135i units and other Linux setups is **not yet verified** —
 additional hardware testing is welcome (see
 [Acknowledgements](#acknowledgements)).
 
 The project has two parts, at different stages:
 
-- **Python / pyusb command-line driver — released (v0.2.7), working on the
+- **Python / pyusb command-line driver — released (v0.2.10), working on the
   test unit.** Scans to raw 16-bit TIFF/PNM at all five resolutions
   (600 / 1200 / 2400 / 3600 / 7200 dpi), with an infrared dust/scratch channel,
   whole-strip batch scanning, and a resumable bulk-digitisation workflow.
@@ -179,8 +180,7 @@ installed from this repository's build.
 
 ## Development status
 
-**Status: v0.2.7 released (2026-10-28, the CLI driver; the SANE backend is
-unchanged since v0.2.3; [release notes](docs/release-notes-v0.2.7.md)).** The standalone Python/pyusb
+**Status: v0.2.10 released (2026-11-05; [release notes](docs/release-notes-v0.2.10.md)).** The standalone Python/pyusb
 command-line driver reached its defined milestone — magazine loading,
 single-frame and whole-strip batch scanning, all five resolutions, IR and dust
 removal, and eject — with scan, calibration, IR and dust removal
@@ -210,17 +210,28 @@ discarded — and fills a calibration white measurement blocked by film;
 v0.2.7 (2026-10-28) scans 110 over all six apertures by default and adds
 black-and-white 110 (dense pictures, no IR), proven on five black-and-white
 strips the same evening, with three numbering gaps closed that had left
-photographs unnumbered or undelivered.
+photographs unnumbered or undelivered; v0.2.8 (2026-10-30) adds the
+whole-strip sweep (`digitize --sweep`: one calibration, one pass and one
+park for a colour strip, Test 111); v0.2.9 (the same evening) adds
+progress lines during the sweep and exit code 3 when another of135i
+process holds the scanner; v0.2.10 (2026-11-05) makes the calibration
+stop gate the default, the fix for a calibration failure found on two
+other users' units (issue #35), adds a transfer recorder and a
+cross-unit protocol, removes the two-strip 110 mode, and gives the SANE
+backend the same wait (submission revision v9, prepared, not yet on the
+merge request). Changes on master after v0.2.10 are in
+[CHANGELOG.md](CHANGELOG.md) under "Unreleased".
 "Complete" here means that functional milestone is met **within
-its frozen scope on the one test unit** — it is **not** broad field testing or
+its frozen scope on the developer's unit** — it is **not** broad field testing or
 proof of compatibility with other scanners or Linux systems. The **SANE
 backend is a separate effort with its own status** — working locally, submitted
 upstream 2026-09-29 and not merged (see Project status above and
 [docs/ROADMAP.md](docs/ROADMAP.md)); do not read the CLI driver's hardware
 verification as the backend's. This is early software,
-verified on the developer's unit and run on two others with a known
-calibration failure (issue #35), and these are the rough edges you
-should know about:
+verified on the developer's unit and run on two others where an
+ungated scan failed in calibration (issue #35; the stop gate, now the
+default, fixed it on both), and these are the rough edges you should
+know about:
 
 - **Eject depends on how the magazine was loaded.** Load with
   `tools/load_magazine.py` (the vendor's insert flow) and `eject` /
@@ -279,8 +290,8 @@ should know about:
   scanned without IR (`--no-ir`) and was proven on five strips
   (Tests 109–110); `digitize --film 110` scans apertures 1–6 by default.
   `digitize --film 110` runs the two placements as two runs into one roll
-  directory and writes one `image<N>.tiff` per photograph (implemented
-  offline, hardware check pending); the 600 dpi survey prints which images are whole and which
+  directory and writes one `image<N>.tiff` per photograph
+  (hardware-verified in Test 104); the 600 dpi survey prints which images are whole and which
   need the other placement. Built and checked offline against one
   strip's saved scans (Test 86, 22 apertures, all verdicts right; a
   review then found and fixed a crop that cut up to 0.4 mm of picture,
@@ -305,10 +316,10 @@ should know about:
   frame therefore takes noticeably longer than in the vendor software.
   Slow and correct first. The stream is now classified op by op in
   [`docs/replay-analysis.md`](docs/replay-analysis.md) and the first
-  phase (PARK) has a semantic implementation behind `--park semantic`
-  (real read-modify-write and condition waits instead of captured
-  pacing); it is off by default until it has been A/B-tested on
-  hardware.
+  phase (PARK) has a semantic implementation (real read-modify-write
+  and condition waits instead of captured pacing), the default since
+  2026-09-17: 3.7–3.8 s against the captured 13.6–16.9 s.
+  `--park verbatim` replays the captured stream.
 - **After a power-on, load first.** The driver detects a freshly
   power-cycled scanner (reg 0x01 = 0x00) and runs the vendor's cold-start
   homing sequence automatically inside the magazine load flow — no VM or
@@ -449,9 +460,15 @@ every dust speck appeared three times in the IR image).
 five dual profiles in Test 61, including measured sub-line IR-to-
 visible registration.)
 
-`--park semantic` on `scan` selects an experimental park phase (see
-docs/replay-analysis.md); it is off by default and not hardware-verified.
+`--park {semantic,verbatim}` selects the park phase: `semantic` (the
+default) sends the same motor sequence with real condition waits,
+`verbatim` replays the captured stream byte for byte (see
+docs/replay-analysis.md).
 `--warmup-budget SECONDS` bounds how long a scan waits for the lamp.
+`--cal-wait-scanstop {enforce,off}` (default `enforce`) makes calibration
+wait, by reading two status registers, until the scanner has stopped
+between acquisitions; `off` sends exactly the transfers of a driver
+without it (docs/cal-scanstop-gate.md).
 
 ### Bulk digitisation (a box of film, strip by strip)
 
@@ -509,10 +526,7 @@ nothing is missing; frame files are `p1-f1.tiff`, `p2-f1.tiff`, …, each
 photograph is written once as `image<N>.tiff` by the best copy seen, and
 from the second pass the numbering recognises the earlier images instead
 of trusting the seating (`docs/film-110.md` §11, §13; hardware-verified in
-Test 104, 2026-10-22, slides and a turned strip included). `--strips 2` carries
-two strips of up to four images in one load (strip 1 against the holder's
-left end, strip 2 against its right end) and writes them as two rolls, N
-and N+1 (first hardware pass Test 103, `docs/film-110.md` §12).
+Test 104, 2026-10-22, slides and a turned strip included).
 `digitize --film 110 --roll N --from-frames` rebuilds a roll offline from
 its stored `p<k>-f<N>.tiff` frames (renumbered, photographs rewritten, the
 old `image*.tiff` moved to `superseded-<UTC>/`, no scanner touched) after a
@@ -618,14 +632,24 @@ stdout/stderr pipe can no longer abort a scan.
 .venv/bin/python -m of135i buttons [--duration S]  # read-only: print button presses
 ```
 
-**Exit codes for `watch`:**
+The exit codes of `watch` are also printed by `of135i watch --help`; the
+text below is the same and a test keeps the two identical.
 
-- **0**: stopped while idle (Ctrl+C).
-- **1**: error, refused, or absent (including an unsafe start state);
-  a service manager may retry.
-- **75**: eject failed or was interrupted mid-move. The scanner state
-  is unknown: do not restart; power-cycle it. The watcher will not
-  restart itself; another button press sends no further commands.
+```text
+Exit codes: 0 = Ctrl+C while idle (including during the button poll); 1 =
+error, refusal (an eject refused before any write also exits 1) or absent
+device; 3 = scanner busy (another process holds the lock); 75 = eject
+raised, or Ctrl+C arrived during the eject itself: power-cycle the scanner
+before restarting. 75 is EX_TEMPFAIL ('retry later') but here it means the
+opposite, do NOT restart automatically: set RestartPreventExitStatus=75 for
+systemd. A failed eject previously exited 1, so supervisors and wrappers
+need updating; 130 = Ctrl+C anywhere else (startup, the read-only
+magazine-presence check): nothing was in progress. An eject whose completion
+is not confirmed within 10 s raises EjectIncompleteError (the session is
+failed) and also exits 75. writes_attempted counts for the whole watch
+session, so after one successful eject a later refusal that sends nothing
+also exits 75.
+```
 
 `doctor` is strictly read-only on the wire (USB control reads and
 descriptor queries only — no register writes, no motor commands, no
@@ -651,10 +675,24 @@ Every error message ends with the next safe action. The rules behind them:
   start again with `load`.
 - The scanner leaves the USB bus about five minutes after a session
   ends and does not come back by itself; a power cycle wakes it.
+- `dark_b is residual and no healthy dark_b has been measured this
+  session` (issue #35) means calibration started the next acquisition
+  before the scanner had stopped. The default `--cal-wait-scanstop
+  enforce` waits for that; the message only appears with `off`. If
+  `enforce` itself reports that the previous acquisition is still running
+  after 0.3 s, power-cycle and report it on the issue with the
+  `.diag.json`; `--cal-wait-scanstop off` is the way back
+  (docs/cal-scanstop-gate.md).
 
 Exit codes: `0` success, `1` refused or failed (details on stderr),
 `2` usage error, `3` scanner busy (another of135i process holds the lock;
-nothing was sent, no power cycle needed), `130` interrupted (Ctrl-C).
+nothing was sent, no power cycle needed), `4` the scan ran to the end but
+aperture coverage was not verified for at least one frame (no product for
+that frame; the overscan raw and the sidecar are kept), `5` 110 film only:
+a product was refused or photographs were written unnumbered, `75` watch eject raised or was
+interrupted (power-cycle before restarting; do not auto-restart, see `watch`
+above; a failed watch eject used to exit 1), `130` interrupted (Ctrl-C
+anywhere except idle `watch` (0) and a `watch` eject (75)).
 
 ### Release check
 
@@ -678,6 +716,8 @@ by the warm block.)
 cold-start checks) behind a single human confirmation, recording every
 image, `.diag.json` sidecar, and a `summary.json`/`report.md` report —
 and stops immediately on the first anomaly.
+
+For a report from another unit, run the cross-unit protocol: `python3 tools/cross_unit_check.py --out results/xu-01` (docs/cross-unit-protocol.md).
 
 Troubleshooting: if the device is not found, check that nothing else
 holds it (a virtual machine's USB passthrough, another scanning
@@ -747,14 +787,17 @@ users have since run the driver on their own units and reported back
 
 - **[Krustenviech](https://github.com/Krustenviech)** ran it on a Steam
   Deck, the second unit it has scanned on, and reported the calibration
-  failure with the logs and register dumps needed to work on it.
+  failure with the logs and register dumps needed to work on it. Their
+  later A/B on the Deck (two ungated runs failed in calibration, six gated
+  runs completed) showed that the stop gate removes the failure there, and
+  is the evidence the gate being the default rests on, together with
+  bearyjd's.
 - **[bearyjd](https://github.com/bearyjd)** saw the same failure on a
   third unit, proposed a cause (the host re-arms the next calibration
   acquisition before the scanner's engine has stopped), wrote the
   calibration stop gate (`--cal-wait-scanstop`) with its offline tests in
-  a fork, and ran an A/B on their unit. The code on master is a port of
-  that work, with bearyjd as co-author. Whether it fixes the failure is
-  still to be confirmed on their hardware.
+  a fork, and ran an A/B on their unit (gate off 0 of 3, gate on 3 of 3).
+  The code on master is a port of that work, with bearyjd as co-author.
 
 If you got the driver working, or failing, on another unit, an issue
 saying so is genuinely useful.

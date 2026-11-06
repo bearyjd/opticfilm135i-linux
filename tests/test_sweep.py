@@ -31,7 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from of135i import cli, digitize, holder, image, safety, sweep, aperture_crop
-from of135i.device import Scanner, dual_tables, position_timeout_scale
+from of135i.device import (EJECT_COMPLETED, EJECT_SKIPPED_NO_MAGAZINE, Scanner,
+                           dual_tables, position_timeout_scale)
 from of135i.tables import Op
 from of135i import aperture, tables
 from tests.test_dual_overscan import _RecordingDualScanner
@@ -448,13 +449,14 @@ class _SweepFakeScanner:
 
     def eject(self):
         self.events.append("eject")
+        return EJECT_COMPLETED
 
 
 def _args(d, **over):
     base = dict(out=d, prefix="", roll=1, force=False, assume_loaded=True,
                 dpi=DPI_E2E, positive=True, rotate=0, ir=True, no_clean=True,
                 no_diag=False, no_cal_data=False, park="verbatim",
-                warmup_budget=None, frames="1-4", film="135", strips=1,
+                warmup_budget=None, frames="1-4", film="135",
                 placement=None, sweep=True, keep_sweep=False, from_sweep=False,
                 from_frames=False)
     base.update(over)
@@ -550,6 +552,26 @@ def test_e2e_sweep_products_identical_to_per_frame_writer():
     print("test_e2e_sweep_products_identical_to_per_frame_writer OK")
 
 
+def test_sweep_skipped_eject_is_not_reported_as_ejected():
+    """The sweep's eject goes through _report_eject like every other site:
+    a sensor-clear skip (no motor command sent) never prints "ejected"."""
+    raw, g, t = _synthetic_sweep()
+
+    class _SkippedEject(_SweepFakeScanner):
+        def eject(self):
+            self.events.append("eject")
+            return EJECT_SKIPPED_NO_MAGAZINE
+
+    with tempfile.TemporaryDirectory() as d:
+        events = []
+        rc, out, err = _run(_args(d), _SkippedEject(raw, g, t, events))
+        assert rc == 0, (rc, err)
+        assert events[-1] == "eject", events
+        assert "ejected" not in out, out
+        assert "eject NOT run" in err, err
+    print("test_sweep_skipped_eject_is_not_reported_as_ejected OK")
+
+
 def test_clean_roll_removes_sweep_raw_and_says_nothing():
     raw, g, t = _synthetic_sweep()
     with tempfile.TemporaryDirectory() as d:
@@ -641,7 +663,7 @@ def test_clear_roll_outputs_sweep_files():
 
 def test_cli_validation_exits_2_before_hardware():
     with tempfile.TemporaryDirectory() as d:
-        for over in (dict(film="110"), dict(dpi=3600, ir=False, frames="1-6"), dict(strips=2),
+        for over in (dict(film="110"), dict(dpi=3600, ir=False, frames="1-6"),
                      dict(frames="1,3"), dict(frames="1-9"), dict(from_sweep=True, roll=None),
                      dict(sweep=False, keep_sweep=True), dict(from_frames=True)):
             rc, err = _forbid_hardware(_args(d, **over))
@@ -1162,6 +1184,7 @@ def main():
         test_ir_profile_blockwise_equals_direct,
         test_finder_resolves_a_colour_staggered_ir_sweep,
         test_e2e_sweep_products_identical_to_per_frame_writer,
+        test_sweep_skipped_eject_is_not_reported_as_ejected,
         test_clean_roll_removes_sweep_raw_and_says_nothing,
         test_unresolved_sweep_keeps_everything,
         test_unverified_window_keeps_sweep_raw,

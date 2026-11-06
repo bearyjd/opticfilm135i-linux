@@ -11,7 +11,9 @@ import pytest
 
 from _gate_pin import gate_off
 
-_OWNS_THE_GATE = ("test_cal_wait_scanstop", "test_gate_pin_parity")
+# test_trace_recorder (upstream) pins "off" itself via make_scanner() and
+# checks one run on the library default ("enforce").
+_OWNS_THE_GATE = ("test_cal_wait_scanstop", "test_gate_pin_parity", "test_trace_recorder")
 
 
 @pytest.fixture(autouse=True)

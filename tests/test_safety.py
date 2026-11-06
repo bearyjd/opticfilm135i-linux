@@ -489,8 +489,16 @@ def _find_table(out_log, pairs):
     return None
 
 
-def make_scanner(fake: FakeUsbDevice) -> Scanner:
-    return Scanner(UsbIo(fake))
+def make_scanner(fake: FakeUsbDevice, gate: str | None = "off") -> Scanner:
+    """A Scanner over the fake. The calibration stop gate is set to "off"
+    here: these suites compare the wire with the vendor captures and run
+    under fast_time(), whose clock jumps would fail any gate read, and
+    the captures have no gate reads. The library default is "enforce"
+    (tests/test_cal_wait_scanstop.py pins that); gate=None keeps it."""
+    s = Scanner(UsbIo(fake))
+    if gate is not None:
+        s.cal_wait_scanstop = gate
+    return s
 
 
 def expect(exc_type, fn, *a, **k):
@@ -2049,7 +2057,7 @@ def cli_over(fake: FakeUsbDevice):
     opened = []
 
     def fake_scanner_open():
-        s = Scanner(UsbIo(fake))
+        s = make_scanner(fake)
         opened.append(s)
         return s
 
@@ -2140,12 +2148,15 @@ def test_cli_scan_eject_watch_refuse_unsafe_states_with_zero_writes():
 
 
 def test_cli_scan_normal_path_and_failure_reporting():
+    # --cal-wait-scanstop off throughout: the fake runs under fast_time()
+    # (a clock that jumps past any gate deadline); the gate has its own
+    # suite (tests/test_cal_wait_scanstop.py).
     with tempfile.TemporaryDirectory() as td:
         out = str(Path(td) / "x.tiff")
         # Normal path: idle scanner, one frame, with diag sidecar.
         fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
         with cli_over(fake) as opened:
-            code, so, se = _cli(["scan", "--frame", "1", "-o", out])
+            code, so, se = _cli(["scan", "--frame", "1", "-o", out, "--cal-wait-scanstop", "off"])
         assert code == 0, (code, se)
         assert fake.pulses >= 8 and opened[0].session.state is SessionState.ARMED
         sidecar = Path(diag.sidecar_path(out))
@@ -2157,7 +2168,7 @@ def test_cli_scan_normal_path_and_failure_reporting():
         # No magazine: refused before initialize (zero writes).
         fake = FakeUsbDevice(reg01=0x22, magazine=False, cal_buffers=_cal_buffers())
         with cli_over(fake):
-            code, so, se = _cli(["scan", "--frame", "1", "-o", out, "--no-diag"])
+            code, so, se = _cli(["scan", "--frame", "1", "-o", out, "--cal-wait-scanstop", "off", "--no-diag"])
         assert code == 1 and fake.out_count == 0 and "no magazine" in se
 
         # Failure mid-scan: exit 1, failure record printed, no eject
@@ -2165,7 +2176,7 @@ def test_cli_scan_normal_path_and_failure_reporting():
         fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
         with cli_over(fake) as opened:
             fake.fault = lambda ev: _usb_timeout() if ev["kind"] == "bulk_in" and opened and opened[-1].session.phase == "scan" else None
-            code, so, se = _cli(["scan", "--frames", "1-2", "--eject", "-o", out, "--no-diag"])
+            code, so, se = _cli(["scan", "--frames", "1-2", "--eject", "-o", out, "--cal-wait-scanstop", "off", "--no-diag"])
         assert code == 1, (code, se)
         assert opened[0].session.state is SessionState.FAILED
         assert "failed in phase scan" in se and "No recovery commands" in se, se
@@ -2178,7 +2189,7 @@ def test_cli_scan_normal_path_and_failure_reporting():
         fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
         with cli_over(fake) as opened:
             fake.fault = lambda ev: KeyboardInterrupt() if ev["kind"] == "bulk_in" and opened and opened[-1].session.phase == "scan" else None
-            code, so, se = _cli(["scan", "--frame", "1", "-o", out, "--no-diag"])
+            code, so, se = _cli(["scan", "--frame", "1", "-o", out, "--cal-wait-scanstop", "off", "--no-diag"])
         assert code == 130, (code, se)
         assert opened[0].session.state is SessionState.FAILED
         assert "interrupted" in se and "KeyboardInterrupt" in se
@@ -2187,7 +2198,7 @@ def test_cli_scan_normal_path_and_failure_reporting():
         # A new process on top of it (0x23): refused with zero writes.
         fake.fault = None
         with cli_over(fake):
-            code, so, se = _cli(["scan", "--frame", "1", "-o", out, "--no-diag"])
+            code, so, se = _cli(["scan", "--frame", "1", "-o", out, "--cal-wait-scanstop", "off", "--no-diag"])
         assert code == 1 and fake.out_count == n and "0x23" in se, (code, se)
     print("test_cli_scan_normal_path_and_failure_reporting OK")
 
@@ -2237,7 +2248,7 @@ def test_watch_eject_failure_exit_75():
         code, so, se = _cli(["watch"])
     assert code == 75, (code, se)
     assert cli.EXIT_WATCH_EJECT_FAILED == 75
-    assert "eject failed: the scanner state is unknown; power-cycle it. The watcher will not restart itself (exit 75)." in se, se
+    assert "eject failed or was interrupted; power-cycle the scanner." in se, se
     assert "USBTimeoutError" in se and "ejected" not in so, (so, se)
     assert opened[0].session.state is SessionState.FAILED
     _assert_power_cycle_message(se)
@@ -2256,6 +2267,112 @@ def test_watch_interrupt_during_eject_exit_75():
     _assert_power_cycle_message(se)
 
 
+def test_watch_unejectable_state_refusal_exits_1_not_75():
+    """A SafetyError refusal from eject() (zero writes) keeps the pre-#49
+    behaviour: exit 1 with `refused:`, so a supervisor keeps restarting."""
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.regs[0x3B] = fake.regs[0x3C] = 0xFF
+    fake.button_events.extend([0x48, None])
+    with cli_over(fake):
+        code, so, se = _cli(["watch"])
+    assert code == 1, (code, se)
+    assert "refused" in se and "exit 75" not in se and "power-cycle the scanner. " not in se, se
+    assert fake.out_count == 0 and fake.pulses == 0 and "ejected" not in so
+
+
+def _watch_with_eject_raising(exc_factory, writes_attempted):
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.button_events.extend([0x48, None])
+
+    def eject(self):
+        self.session.writes_attempted = writes_attempted
+        raise exc_factory()
+    with cli_over(fake), patched(Scanner, "eject", eject):
+        return _cli(["watch"])
+
+
+def test_watch_session_failed_refusal_decision_follows_writes_sent():
+    """SessionFailedError (an earlier operation failed): with no write ever
+    attempted nothing reached the hardware -> refusal, exit 1; after any
+    write the hardware state is unknown -> exit 75. Same for the other
+    SafetyErrors (e.g. StrictPollTimeoutError after writes)."""
+    mk = lambda: safety.SessionFailedError("session already failed")
+    code, so, se = _watch_with_eject_raising(mk, 0)
+    assert code == 1 and "refused: session already failed" in se, (code, se)
+    code, so, se = _watch_with_eject_raising(mk, 3)
+    assert code == 75, (code, se)
+    mk = lambda: safety.StrictPollTimeoutError("poll timed out", last=b"\x00", want=b"\x01")
+    code, so, se = _watch_with_eject_raising(mk, 5)
+    assert code == 75, (code, se)
+
+
+def test_watch_eject_failure_text_printed_once():
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.button_events.extend([0x48, None])
+    fake.fault = lambda ev: _usb_timeout() if ev.get("pulse") else None
+    with cli_over(fake):
+        code, so, se = _cli(["watch"])
+    assert code == 75, (code, se)
+    assert se.count("USBTimeoutError") == 1, se
+
+
+def test_watch_unexpected_exception_exits_75_with_traceback():
+    code, so, se = _watch_with_eject_raising(lambda: RuntimeError("boom-bug"), 2)
+    assert code == 75, (code, se)
+    assert "Traceback (most recent call last)" in se and "RuntimeError: boom-bug" in se, se
+    # Expected failure types stay traceback-free.
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.button_events.extend([0x48, None])
+    fake.fault = lambda ev: _usb_timeout() if ev.get("pulse") else None
+    with cli_over(fake):
+        code, so, se = _cli(["watch"])
+    assert "Traceback" not in se, se
+    code, so, se = _watch_with_eject_raising(lambda: KeyboardInterrupt(), 2)
+    assert code == 75 and "Traceback" not in se, se
+
+
+def test_watch_interrupt_during_magazine_presence_check_exits_130():
+    """The presence check is a read-only query outside the eject try: Ctrl+C
+    there is the generic 130 (nothing in progress, no power cycle), not 75."""
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.button_events.extend([0x48, None])
+
+    def present(self):
+        raise KeyboardInterrupt()
+    with cli_over(fake), patched(Scanner, "is_magazine_present", present):
+        code, so, se = _cli(["watch"])
+    assert code == 130 and "interrupted" in se, (code, se)
+    assert fake.out_count == 0 and fake.pulses == 0 and "exit 75" not in se, se
+
+
+def _norm(text):
+    return " ".join(text.split())
+
+
+def test_watch_exit_codes_readme_matches_help_epilog():
+    """One text, two homes: the README block must equal the argparse epilog."""
+    assert "Exit codes:" in cli.WATCH_EXIT_CODES_HELP
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    assert _norm(cli.WATCH_EXIT_CODES_HELP) in _norm(readme), \
+        "README watch exit-code text drifted from cli.WATCH_EXIT_CODES_HELP"
+    watch = cli.build_parser()._subparsers._group_actions[0].choices["watch"]
+    # Compare the attribute, not format_help(): argparse wraps help at $COLUMNS,
+    # which can split hyphenated words and make a text comparison width-dependent.
+    assert watch.epilog == cli.WATCH_EXIT_CODES_HELP
+    # The wording distinguishes the three interrupt outcomes and the break.
+    for needle in ("130", "EX_TEMPFAIL", "previously", "RestartPreventExitStatus=75",
+                   "writes_attempted counts for the whole watch session",
+                   "EjectIncompleteError"):
+        assert needle in cli.WATCH_EXIT_CODES_HELP, needle
+    # The fork's eject fails closed when completion is not confirmed.
+    assert "only warn" not in cli.WATCH_EXIT_CODES_HELP
+
+
 def test_watch_idle_interrupt_exit_0():
     fake = FakeUsbDevice(reg01=0x22)
     fake.regs[0x31] = 0xFE
@@ -2264,14 +2381,6 @@ def test_watch_idle_interrupt_exit_0():
         code, so, se = _cli(["watch"])
     assert code == 0 and "stopped" in so, (code, so, se)
     assert fake.out_count == 0 and "exit 75" not in se, se
-
-
-def test_watch_absent_device_exit_1():
-    with real_open(None) as path:
-        code, so, se = _cli(["watch"])
-        _assert_lock_free(path)
-    assert code == 1 and "not found" in se, (code, se)
-    assert "exit 75" not in se, se
 
 
 def test_watch_unsafe_start_exit_1():
@@ -2305,6 +2414,55 @@ def test_watch_failed_eject_leaves_second_press_unread_and_no_further_writes():
     assert post_failure_events == [], post_failure_events
     assert fake.out_count == failed_at[0] and fake.pulses == 0
     assert opened[0].session.state is SessionState.FAILED
+
+
+def test_watch_failure_before_first_eject_write_exits_75():
+    fake = FakeUsbDevice(reg01=0x22)
+    fake.regs[0x31] = 0xFE
+    fake.button_events.extend([0x48, None, 0x48, None])
+    fake.fault = lambda ev: _usb_error() if ev["kind"] == "ctrl_out" else None
+    with cli_over(fake) as opened:
+        code, so, se = _cli(["watch"])
+    assert code == 75 and fake.out_count == 0 and fake.pulses == 0, (code, se)
+    assert opened[0].session.state is SessionState.FAILED
+    assert list(fake.button_events) == [0x48, None]
+    assert "ejected" not in so
+    _assert_power_cycle_message(se)
+
+
+def test_watch_absent_device_remains_error_and_help_explains_supervisor():
+    def absent():
+        raise cli.Of135iError("scanner not found")
+    with patched(Scanner, "open", staticmethod(absent)):
+        code, so, se = _cli(["watch"])
+    assert code == 1 and "not found" in se, (code, se)
+    assert "exit 75" not in se
+    parser = cli.build_parser()
+    watch = parser._subparsers._group_actions[0].choices["watch"]
+    # The epilog attribute, not format_help(): argparse wraps at $COLUMNS and
+    # would split these phrases on a narrow terminal.
+    help_text = watch.epilog
+    assert "3 = scanner busy" in help_text
+    # The fork's eject raises EjectIncompleteError on an unconfirmed
+    # completion, so that case exits 75 instead of warning.
+    assert "EjectIncompleteError" in help_text and "also exits 75" in help_text
+
+
+def test_watch_success_keeps_eject_write_sequence():
+    direct = FakeUsbDevice(reg01=0x22)
+    with cli_over(direct):
+        code, so, se = _cli(["eject"])
+    assert code == 0, se
+    watched = FakeUsbDevice(reg01=0x22)
+    watched.regs[0x31] = 0xFE
+    watched.button_events.extend([0x48, None, KeyboardInterrupt()])
+    with cli_over(watched):
+        code, so, se = _cli(["watch"])
+    assert code == 0 and "ejected" in so, (code, so, se)
+    assert watched.out_log == direct.out_log
+    assert watched.pulses == direct.pulses == 1
+
+
 
 
 def _eject_stuck_after_go(value=0xF9):
@@ -3036,10 +3194,18 @@ def main() -> int:
         test_cli_eject_and_watch_paths,
         test_watch_eject_failure_exit_75,
         test_watch_interrupt_during_eject_exit_75,
+        test_watch_unejectable_state_refusal_exits_1_not_75,
+        test_watch_session_failed_refusal_decision_follows_writes_sent,
+        test_watch_eject_failure_text_printed_once,
+        test_watch_unexpected_exception_exits_75_with_traceback,
+        test_watch_interrupt_during_magazine_presence_check_exits_130,
+        test_watch_exit_codes_readme_matches_help_epilog,
         test_watch_idle_interrupt_exit_0,
-        test_watch_absent_device_exit_1,
         test_watch_unsafe_start_exit_1,
         test_watch_failed_eject_leaves_second_press_unread_and_no_further_writes,
+        test_watch_failure_before_first_eject_write_exits_75,
+        test_watch_absent_device_remains_error_and_help_explains_supervisor,
+        test_watch_success_keeps_eject_write_sequence,
         test_eject_reports_honest_outcome_and_fails_closed_when_unconfirmed,
         test_cli_load_and_version,
         test_interrupt_overflow_is_named_and_never_fatal,
