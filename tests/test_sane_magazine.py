@@ -154,7 +154,7 @@ def _skip(name):
     return "skipped"
 
 
-def _run(probe, *args, mark_dir=None, poll_cap_ms=5):
+def _run(probe, *args, mark_dir=None, poll_cap_ms=5, debug_level=None):
     """Run the probe with an isolated HOME (so no real calibration file is
     read) and an isolated mark path (so a test can never disturb the
     real one, nor a real session a test).
@@ -166,17 +166,23 @@ def _run(probe, *args, mark_dir=None, poll_cap_ms=5):
     only ever shortens a wait (sane/gl126_ops.h RunPolicy, and the WP-5
     magazine edge wait's own equivalent gate in gl126.cpp). A handful of
     edge-wait tests need the wait to actually run its scripted sequence to
-    completion (100 ms/poll, up to ~8 polls) and pass a larger value."""
+    completion (100 ms/poll, up to ~8 polls) and pass a larger value.
+
+    `debug_level` sets SANE_DEBUG_GENESYS for the run, for a test that
+    asserts on the backend's own log (returned as out["log"])."""
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, HOME=tmp)
         env.pop("SANE_DEBUG_GENESYS", None)
+        if debug_level is not None:
+            env["SANE_DEBUG_GENESYS"] = str(debug_level)
         env["SANE_GL126_MAGAZINE_MARK"] = str(Path(mark_dir or tmp) / "mark")
         env["SANE_GL126_TEST_POLL_CAP_MS"] = str(poll_cap_ms)
         r = subprocess.run([probe, *args], capture_output=True, text=True,
                            env=env, timeout=180)
     assert r.returncode == 0, f"probe exit {r.returncode}: {r.stdout}\n{r.stderr}"
     out = {"statuses": [], "optstatuses": [], "options": {}, "text": None,
-           "mark": None, "progress": None, "key": None, "start": None}
+           "mark": None, "progress": None, "key": None, "start": None,
+           "log": r.stderr, "xfers": []}
     for line in r.stdout.splitlines():
         if line.startswith("OPT "):
             parts = line.split()
@@ -218,6 +224,8 @@ def _run(probe, *args, mark_dir=None, poll_cap_ms=5):
             out.setdefault("resolution_values", []).append(int(line[len("RESVALUE "):].strip()))
         elif line.startswith("MAGVALUE "):
             out.setdefault("magazine_values", []).append(line[len("MAGVALUE "):].strip())
+        elif line.startswith("XFER "):
+            out["xfers"].append(line[len("XFER "):])
         elif line.startswith("EDGEWRITE "):
             out["edgewrite"] = int(line[len("EDGEWRITE "):].strip())
     return out
@@ -1500,6 +1508,189 @@ def test_switching_to_gray_does_not_reopen_hidden_options_on_gl126():
           "GL124: color-filter still re-enabled on Gray, unchanged)")
 
 
+# ------------------------------------- the load's diagnostics on failure
+
+# DBG_info in backend/genesys/error.h: the level every magazine line logs at.
+DBG_INFO = 4
+
+# The transfer sequences of three "Load film" presses from an eject, as the
+# probe's XFER lines print them (backend/genesys/test_usb_device.h: every
+# control and bulk transfer with every byte, the test interface's register
+# and buffer calls, and its sleeps):
+#
+#   load-film-load-completes        every poll matches on its first read
+#   load-film-load-freezes-at-op24  reg 0x101 reads 0xfc from LOAD op 24 on
+#   load-film-load-freezes-at-op38  the same from op 38 on
+#
+# Provenance: tests/gen_gl126_load_film_goldens.sh writes them from a build
+# of sane-backends 18bea9b32 plus ONLY the test hooks (test_usb_device.*,
+# test_scanner_interface.*) taken from the commit under test, with
+# gl126.cpp and gl126_ops.* left at 18bea9b32, and records the hook files'
+# blob hashes in each golden's "#" header. Rerun it to check or renew them:
+#
+#   tests/gen_gl126_load_film_goldens.sh <sane-backends repo> <commit> <scratch dir>
+LOAD_GOLDENS = {
+    "load-film-load-completes": "gl126_load_film_transfers.txt",
+    "load-film-load-freezes-at-op24": "gl126_load_film_freeze_op24_transfers.txt",
+    "load-film-load-freezes-at-op38": "gl126_load_film_freeze_op38_transfers.txt",
+}
+
+# A frozen poll spins for its real-time budget (the test interface skips
+# the sleeps), so how many times its read+sleep pair repeats depends on the
+# host. Only that one count is masked before comparing.
+_FROZEN_READ = "CTRL IN req=0x04 val=0x018e idx=0x0122 len=2: fc 00"
+
+
+def _normalized_xfers(xfers):
+    out = []
+    for line in xfers:
+        if line.startswith("REPEAT 2 x") and _FROZEN_READ in out[-2:]:
+            line = "REPEAT 2 x<host-dependent>"
+        out.append(line)
+    return out
+
+
+def _read_golden(name):
+    path = REPO / "tests" / "golden" / name
+    return [line for line in path.read_text().splitlines() if not line.startswith("#")]
+
+
+def _run_load_scenario(probe, scenario, debug_level=None):
+    return _run(probe, "scenario", scenario, poll_cap_ms=2000, debug_level=debug_level)
+
+
+def _assert_same_transfers(scenario, xfers):
+    golden = _read_golden(LOAD_GOLDENS[scenario])
+    got = _normalized_xfers(xfers)
+    assert len(golden) > 0
+    first_diff = next((i for i, (a, b) in enumerate(zip(got, golden)) if a != b),
+                      min(len(got), len(golden)))
+    assert got == golden, (
+        f"{scenario}: {len(got)} transfer lines, golden has {len(golden)}; first "
+        f"difference at line {first_diff}: got "
+        f"{got[first_diff] if first_diff < len(got) else '<end>'!r}, golden "
+        f"{golden[first_diff] if first_diff < len(golden) else '<end>'!r}")
+    return len(golden)
+
+
+def test_a_successful_load_puts_the_identical_transfers_on_the_wire():
+    """A regression lock, not a live before/after run: the transfer
+    sequence of a load whose every poll matches on its first read must
+    equal, line for line and byte for byte, the golden that
+    tests/gen_gl126_load_film_goldens.sh recorded from a build WITHOUT the
+    load's failure diagnostics (LOAD_GOLDENS above has the recipe). So the
+    diagnostics added no transfer, sleep or register access, and any later
+    change that does fails here until the golden is deliberately
+    regenerated."""
+    probe = _build_probe()
+    if probe is None:
+        return _skip("test_a_successful_load_puts_the_identical_transfers_on_the_wire")
+
+    r = _run_load_scenario(probe, "load-film-load-completes")
+    assert len(r["statuses"]) == 2, r["statuses"]
+    eject, release = r["statuses"]
+    assert eject[0] == SANE_STATUS_GOOD, eject
+    assert release[0] == SANE_STATUS_GOOD, release
+    assert r["text"].startswith("loaded"), r["text"]
+    assert r["mark"].startswith("present loaded"), r["mark"]
+    n = _assert_same_transfers("load-film-load-completes", r["xfers"])
+    print("test_a_successful_load_puts_the_identical_transfers_on_the_wire OK "
+          f"({n} lines, identical)")
+
+
+def _assert_failure_transfers(scenario, xfers):
+    """The failed load's transfers equal its golden, and up to the first
+    frozen read they are the successful load's own: the failure path,
+    the catch blocks and their logging included, adds nothing after the
+    poll that timed out."""
+    n = _assert_same_transfers(scenario, xfers)
+    ok = _read_golden(LOAD_GOLDENS["load-film-load-completes"])
+    k = xfers.index(_FROZEN_READ)
+    assert xfers[:k] == ok[:k], scenario
+    return n
+
+
+def test_a_load_frozen_at_op_24_logs_what_it_saw():
+    """bearyjd's unit, 2026-11-05: after the edge and the settle, LOAD's
+    first motor completion (op 24, mask 0xfb want 0xf0) read 0xfc first
+    and last and timed out, and the log could not say why: polls were
+    logged only on success, and nothing logged the status at the edge,
+    after the settle, or what LOAD read before op 24. The failure now
+    logs all of it, and still puts the same transfers on the wire as the
+    build without the diagnostics."""
+    probe = _build_probe()
+    if probe is None:
+        return _skip("test_a_load_frozen_at_op_24_logs_what_it_saw")
+
+    r = _run_load_scenario(probe, "load-film-load-freezes-at-op24", debug_level=DBG_INFO)
+    assert len(r["statuses"]) == 2, r["statuses"]
+    eject, release = r["statuses"]
+    assert eject[0] == SANE_STATUS_GOOD, eject
+    assert release[0] == SANE_STATUS_DEVICE_BUSY, release
+    assert "at op 24" in release[1], release[1]
+    log = r["log"]
+    for want in (
+        "gl126: magazine edge seen (8 polls, ~800 ms, last reg 0x101 0xf8); settling 600 ms",
+        "gl126: magazine after the settle: reg 0x101 = 0xf8, reg 0x01 = 0x22, "
+        "regs 0x3b/0x3c = 0x02/0x00",
+        "gl126: magazine load: no poll completed before op 24",
+        "gl126: magazine load op 24 poll timed out: first 0xfc last 0xfc",
+        "gl126: magazine load: last status words read by Read ops (not polls) before op 24: "
+        "reg 0x100 = 0x00 (op 3), reg 0x101 = 0xd0 (op 4)",
+        "gl126: magazine load op 0 read reg 0x32: 0x05",
+    ):
+        assert want in log, (want, log[-4000:])
+    n = _assert_failure_transfers("load-film-load-freezes-at-op24", r["xfers"])
+    print(f"test_a_load_frozen_at_op_24_logs_what_it_saw OK ({n} transfer lines, identical)")
+
+
+def test_a_load_frozen_at_op_38_logs_the_polls_completed_before_it():
+    """The same, one motor move later: op 24 completes, then reg 0x101
+    freezes at 0xfc and the traverse's completion (op 38) times out. The
+    failure lists op 24's completed poll, which the success-only logging
+    dropped along with the rest of the run."""
+    probe = _build_probe()
+    if probe is None:
+        return _skip("test_a_load_frozen_at_op_38_logs_the_polls_completed_before_it")
+
+    r = _run_load_scenario(probe, "load-film-load-freezes-at-op38", debug_level=DBG_INFO)
+    assert len(r["statuses"]) == 2, r["statuses"]
+    release = r["statuses"][1]
+    assert release[0] == SANE_STATUS_DEVICE_BUSY, release
+    assert "at op 38" in release[1], release[1]
+    log = r["log"]
+    for want in (
+        "gl126: magazine load op 24 poll (completed before op 38): first 0xf0 last 0xf0, "
+        "1 polls",
+        "gl126: magazine load op 38 poll timed out: first 0xfc last 0xfc",
+        "gl126: magazine load: last status words read by Read ops (not polls) before op 38: "
+        "reg 0x100 = 0x00 (op 3), reg 0x101 = 0xd0 (op 4)",
+    ):
+        assert want in log, (want, log[-4000:])
+    assert "no poll completed before" not in log, log[-4000:]
+    n = _assert_failure_transfers("load-film-load-freezes-at-op38", r["xfers"])
+    print("test_a_load_frozen_at_op_38_logs_the_polls_completed_before_it OK "
+          f"({n} transfer lines, identical)")
+
+
+def write_load_goldens(provenance):
+    """tests/gen_gl126_load_film_goldens.sh's last step: run the three
+    scenarios against the build SANE_BACKENDS_DIR names and write their
+    normalized transfer lines, under the `provenance` header, to the
+    goldens. Not a test."""
+    probe = _build_probe()
+    if probe is None:
+        raise SystemExit(f"cannot build the probe: {_skip_reason}")
+    header = "".join(f"# {line}\n" for line in provenance.splitlines())
+    for scenario, name in LOAD_GOLDENS.items():
+        r = _run_load_scenario(probe, scenario)
+        lines = _normalized_xfers(r["xfers"])
+        assert lines, scenario
+        (REPO / "tests" / "golden" / name).write_text(
+            header + f"# scenario: {scenario}\n" + "".join(f"{x}\n" for x in lines))
+        print(f"wrote tests/golden/{name} ({len(lines)} lines)")
+
+
 def main() -> int:
     tests = [
         test_magazine_options_exist_only_for_gl126,
@@ -1544,6 +1735,9 @@ def main() -> int:
         test_check_status_reports_loaded_despite_a_busy_class,
         test_dead_options_are_inactive_and_film_group_is_placed_and_ordered,
         test_switching_to_gray_does_not_reopen_hidden_options_on_gl126,
+        test_a_successful_load_puts_the_identical_transfers_on_the_wire,
+        test_a_load_frozen_at_op_24_logs_what_it_saw,
+        test_a_load_frozen_at_op_38_logs_the_polls_completed_before_it,
     ]
     passed = 0
     skipped = 0
@@ -1560,4 +1754,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--write-load-goldens":
+        write_load_goldens(sys.argv[2])
+        sys.exit(0)
     sys.exit(main())

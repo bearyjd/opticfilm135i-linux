@@ -183,9 +183,48 @@ void set_edge_script_debounce_single_glitch_then_present()
     set_edge_script({ 0xF0, 0xF8, 0xF8 });
 }
 
+/* The magazine load's own wire script. The mock answers every IN
+   control transfer with zeroes, which stops every op program at its first
+   ack read; the "load-film-load-*" scenarios need LOAD to run its polls,
+   so they install this reply hook on the mock (test_usb_device.h): every
+   ack read answers 0x55, every reg 0x32 read 0x05 (what LOAD's
+   best-effort reg 0x32 poll waits for), and the reg 0x101 status reads
+   (wValue 0x018e wIndex 0x0122) answer g_status_replies in read order,
+   holding the last value once it is exhausted. In the ejected flow
+   those reads are, in order: OPEN's device-open status poll (class
+   0xd0), LOAD op 4's status read, LOAD op 24's engaging-feed completion
+   poll (mask 0xfb want 0xf0), op 38's traverse completion (want 0xd8),
+   and ops 51 and 70's status reads. A script whose every poll matches on
+   its first read makes the transfer sequence deterministic. */
+std::vector<int> g_status_replies;
+std::size_t g_status_step = 0;
+bool g_seed_done_after_load = false;
+
+void load_wire_reply(int request, int value, int index, int length, std::uint8_t* data)
+{
+    if (request == 0x0c && value == 0x008e && index == 0x0020 && length == 1) {
+        data[0] = 0x55;
+    } else if (request == 0x04 && value == 0x008e && index == 0x3222 && length >= 1) {
+        data[0] = 0x05;
+    } else if (request == 0x04 && value == 0x018e && index == 0x0122 && length >= 1 &&
+               !g_status_replies.empty())
+    {
+        std::size_t idx = std::min(g_status_step, g_status_replies.size() - 1);
+        data[0] = static_cast<std::uint8_t>(g_status_replies[idx]);
+        if (g_status_step + 1 < g_status_replies.size()) {
+            ++g_status_step;
+        }
+    }
+}
+
 void checkpoint_callback(const Genesys_Device&, TestScannerInterface& iface,
                          const std::string& name)
 {
+    if (g_seed_done_after_load && name == "gl126_magazine_after_load") {
+        // The load's own final check reads reg 0x101 through the
+        // register cache: the vendor capture's completion 0xdc.
+        iface.seed_register(0x101, 0xDC);
+    }
     if (!g_throw_at.empty() && name == g_throw_at) {
         throw SaneException(SANE_STATUS_IO_ERROR,
                             "injected: invalid read, scanner unplugged?");
@@ -728,6 +767,46 @@ int cmd_scenario(int argc, char** argv)
         seed(dev, 0x3C, 0x00);
         set_edge_script_resolve_from_present();
         call_hook(dev, "release");     // wait resolves -> "open" (fails closed)
+    } else if (scenario == "load-film-load-completes" ||
+               scenario == "load-film-load-freezes-at-op24" ||
+               scenario == "load-film-load-freezes-at-op38") {
+        // The ejected flow of load-film-edge-seen-ejected, but with a
+        // wire that answers (load_wire_reply()), so OPEN and LOAD run to
+        // their polls. "completes": every poll matches on its first read
+        // and the load succeeds. In all three the whole transfer sequence
+        // from the press on, sleeps included, is printed (XFER lines) for
+        // a byte-for-byte comparison with the goldens tests/
+        // gen_gl126_load_film_goldens.sh records from the build without
+        // the load's failure diagnostics. "freezes": reg
+        // 0x101 reads 0xfc from op 24 on (bearyjd's unit, 2026-11-05),
+        // so op 24's completion poll (mask 0xfb want 0xf0) times out.
+        // "op38": op 24 completes and reg 0x101 then freezes at 0xfc, so
+        // the traverse's completion (want 0xd8) times out with one poll
+        // of the same program completed before it.
+        bool completes = scenario == "load-film-load-completes";
+        auto* iface = dynamic_cast<TestScannerInterface*>(dev->interface.get());
+        seed(dev, 0x01, 0x22);
+        seed(dev, 0x101, 0xF0);
+        call_hook(dev, "eject");       // -> Ejected (mark: ejected)
+        seed(dev, 0x101, 0xF8);
+        seed(dev, 0x3B, 0x02);
+        seed(dev, 0x3C, 0x00);
+        set_edge_script_resolve_from_present();
+        if (completes) {
+            g_status_replies = { 0xD0, 0xD0, 0xF0, 0xD8, 0xDC, 0xDC };
+            g_seed_done_after_load = true;
+        } else if (scenario == "load-film-load-freezes-at-op24") {
+            g_status_replies = { 0xD0, 0xD0, 0xFC };
+        } else {
+            g_status_replies = { 0xD0, 0xD0, 0xF0, 0xFC };
+        }
+        iface->test_usb_device().set_control_in_reply(load_wire_reply);
+        iface->test_usb_device().set_record_transfers(true);
+        call_hook(dev, "release");     // wait resolves -> "open" -> "load"
+        for (const std::string& line : iface->test_usb_device().transfer_log()) {
+            std::printf("XFER %s\n", line.c_str());
+        }
+        iface->test_usb_device().set_record_transfers(false);
     } else if (scenario == "load-film-edge-seen-bad-regs") {
         // The WP-5 replacement for the old "load-after-eject-base-table":
         // the one 0x3b/0x3c state the Ejected kind still refuses -- Test
