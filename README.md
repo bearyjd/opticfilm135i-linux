@@ -644,10 +644,11 @@ before restarting. 75 is EX_TEMPFAIL ('retry later') but here it means the
 opposite, do NOT restart automatically: set RestartPreventExitStatus=75 for
 systemd. A failed eject previously exited 1, so supervisors and wrappers
 need updating; 130 = Ctrl+C anywhere else (startup, the read-only
-magazine-presence check): nothing was in progress. Eject completion timeouts
-only warn and still return success; exit 75 does not detect them.
-writes_attempted counts for the whole watch session, so after one successful
-eject a later refusal that sends nothing also exits 75.
+magazine-presence check): nothing was in progress. An eject whose completion
+is not confirmed within 10 s raises EjectIncompleteError (the session is
+failed) and also exits 75. writes_attempted counts for the whole watch
+session, so after one successful eject a later refusal that sends nothing
+also exits 75.
 ```
 
 `doctor` is strictly read-only on the wire (USB control reads and

@@ -43,7 +43,7 @@ from typing import Callable
 import usb.core
 
 from . import diag, holder, image, safety, tables
-from .device import SUPPORTED_DPIS, Scanner
+from .device import EJECT_WAIT_TIMEOUT, SUPPORTED_DPIS, Scanner
 from .usbio import InterruptOverflowError, Of135iError, UsbIo
 
 EXIT_BUSY = safety.EXIT_BUSY   # another of135i process holds the scanner lock
@@ -65,8 +65,9 @@ WATCH_EXIT_CODES_HELP = (
     "set RestartPreventExitStatus=75 for systemd. A failed eject previously "
     "exited 1, so supervisors and wrappers need updating; "
     "130 = Ctrl+C anywhere else (startup, the read-only magazine-presence "
-    "check): nothing was in progress. Eject completion timeouts only warn "
-    "and still return success; exit 75 does not detect them. "
+    "check): nothing was in progress. An eject whose completion is not "
+    f"confirmed within {EJECT_WAIT_TIMEOUT:.0f} s raises EjectIncompleteError "
+    "(the session is failed) and also exits 75. "
     "writes_attempted counts for the whole watch session, so after one "
     "successful eject a later refusal that sends nothing also exits 75."
 )

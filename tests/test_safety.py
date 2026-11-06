@@ -2366,8 +2366,11 @@ def test_watch_exit_codes_readme_matches_help_epilog():
     assert watch.epilog == cli.WATCH_EXIT_CODES_HELP
     # The wording distinguishes the three interrupt outcomes and the break.
     for needle in ("130", "EX_TEMPFAIL", "previously", "RestartPreventExitStatus=75",
-                   "writes_attempted counts for the whole watch session"):
+                   "writes_attempted counts for the whole watch session",
+                   "EjectIncompleteError"):
         assert needle in cli.WATCH_EXIT_CODES_HELP, needle
+    # The fork's eject fails closed when completion is not confirmed.
+    assert "only warn" not in cli.WATCH_EXIT_CODES_HELP
 
 
 def test_watch_idle_interrupt_exit_0():
@@ -2440,7 +2443,9 @@ def test_watch_absent_device_remains_error_and_help_explains_supervisor():
     # would split these phrases on a narrow terminal.
     help_text = watch.epilog
     assert "3 = scanner busy" in help_text
-    assert "timeouts only warn" in help_text
+    # The fork's eject raises EjectIncompleteError on an unconfirmed
+    # completion, so that case exits 75 instead of warning.
+    assert "EjectIncompleteError" in help_text and "also exits 75" in help_text
 
 
 def test_watch_success_keeps_eject_write_sequence():
