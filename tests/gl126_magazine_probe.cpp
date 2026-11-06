@@ -220,6 +220,11 @@ void load_wire_reply(int request, int value, int index, int length, std::uint8_t
 void checkpoint_callback(const Genesys_Device&, TestScannerInterface& iface,
                          const std::string& name)
 {
+    if (name == "gl126_magazine_after_jog" && iface.test_usb_device().records_transfers()) {
+        // Where the jog's transfers end in the log: the interrupt drain
+        // "after the jog" must start exactly here.
+        std::printf("XFERMARK after_jog %zu\n", iface.test_usb_device().transfer_log().size());
+    }
     if (g_seed_done_after_load && name == "gl126_magazine_after_load") {
         // The load's own final check reads reg 0x101 through the
         // register cache: the vendor capture's completion 0xdc.
@@ -767,7 +772,43 @@ int cmd_scenario(int argc, char** argv)
         seed(dev, 0x3C, 0x00);
         set_edge_script_resolve_from_present();
         call_hook(dev, "release");     // wait resolves -> "open" (fails closed)
+    } else if (scenario == "load-film-fresh-load-completes" ||
+               scenario == "load-film-fresh-load-completes-event" ||
+               scenario == "load-film-fresh-load-completes-cap") {
+        // The interrupt drain candidate: a FRESH press (Unknown, no
+        // mark, idle-homed), so OPEN + JOG run before the edge wait and
+        // both drain points are reached: after the jog and right before
+        // LOAD. The wire answers like load-film-load-completes; reg 0x101
+        // over the wire answers OPEN's device-open poll (0xd0), JOG's two
+        // plain reads and four completions (0xf8 under mask 0xfb), then
+        // LOAD's reads exactly as in the ejected flow. The interrupt
+        // endpoint is idle ("completes"), holds one pending 0x48
+        // ("-event"), or holds nine 0x04 events, one more than the
+        // drain's cap of 8 reads ("-cap"). Transfers are recorded and
+        // printed (XFER), with the jog's end marked (XFERMARK).
+        auto* iface = dynamic_cast<TestScannerInterface*>(dev->interface.get());
+        seed(dev, 0x01, 0x22);
+        seed(dev, 0x101, 0xF8);
+        seed(dev, 0x3B, 0x00);         // what the jog leaves (the strict rule)
+        seed(dev, 0x3C, 0x00);
+        set_edge_script_resolve_from_present();
+        g_status_replies = { 0xD0, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8, 0xF8,
+                             0xD0, 0xF0, 0xD8, 0xDC, 0xDC };
+        g_seed_done_after_load = true;
+        if (scenario == "load-film-fresh-load-completes-event") {
+            iface->test_usb_device().set_interrupt_script({ 0x48 });
+        } else if (scenario == "load-film-fresh-load-completes-cap") {
+            iface->test_usb_device().set_interrupt_script(std::vector<int>(9, 0x04));
+        }
+        iface->test_usb_device().set_control_in_reply(load_wire_reply);
+        iface->test_usb_device().set_record_transfers(true);
+        call_hook(dev, "release");     // open -> jog -> wait resolves -> load
+        for (const std::string& line : iface->test_usb_device().transfer_log()) {
+            std::printf("XFER %s\n", line.c_str());
+        }
+        iface->test_usb_device().set_record_transfers(false);
     } else if (scenario == "load-film-load-completes" ||
+               scenario == "load-film-load-completes-int-error" ||
                scenario == "load-film-load-freezes-at-op24" ||
                scenario == "load-film-load-freezes-at-op38") {
         // The ejected flow of load-film-edge-seen-ejected, but with a
@@ -783,7 +824,12 @@ int cmd_scenario(int argc, char** argv)
         // "op38": op 24 completes and reg 0x101 then freezes at 0xfc, so
         // the traverse's completion (want 0xd8) times out with one poll
         // of the same program completed before it.
-        bool completes = scenario == "load-film-load-completes";
+        // "-int-error": the same successful load, but every interrupt
+        // read fails with SANE_STATUS_INVAL (what sanei_usb answers when
+        // the device has no interrupt endpoint); the drain stops and the
+        // load must still complete.
+        bool int_error = scenario == "load-film-load-completes-int-error";
+        bool completes = scenario == "load-film-load-completes" || int_error;
         auto* iface = dynamic_cast<TestScannerInterface*>(dev->interface.get());
         seed(dev, 0x01, 0x22);
         seed(dev, 0x101, 0xF0);
@@ -799,6 +845,10 @@ int cmd_scenario(int argc, char** argv)
             g_status_replies = { 0xD0, 0xD0, 0xFC };
         } else {
             g_status_replies = { 0xD0, 0xD0, 0xF0, 0xFC };
+        }
+        if (int_error) {
+            iface->test_usb_device().set_interrupt_script(
+                std::vector<int>(16, -static_cast<int>(SANE_STATUS_INVAL)));
         }
         iface->test_usb_device().set_control_in_reply(load_wire_reply);
         iface->test_usb_device().set_record_transfers(true);

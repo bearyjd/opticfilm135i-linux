@@ -226,6 +226,9 @@ def _run(probe, *args, mark_dir=None, poll_cap_ms=5, debug_level=None):
             out.setdefault("magazine_values", []).append(line[len("MAGVALUE "):].strip())
         elif line.startswith("XFER "):
             out["xfers"].append(line[len("XFER "):])
+        elif line.startswith("XFERMARK "):
+            name, index = line[len("XFERMARK "):].split()
+            out.setdefault("xfermarks", {})[name] = int(index)
         elif line.startswith("EDGEWRITE "):
             out["edgewrite"] = int(line[len("EDGEWRITE "):].strip())
     return out
@@ -1529,6 +1532,15 @@ DBG_INFO = 4
 # blob hashes in each golden's "#" header. Rerun it to check or renew them:
 #
 #   tests/gen_gl126_load_film_goldens.sh <sane-backends repo> <commit> <scratch dir>
+#
+# Interrupt-drain candidate branch only: the drain changes the wire, so
+# these goldens are NOT that script's output. They are the same
+# --write-load-goldens step (write_load_goldens() below) run against the
+# candidate build itself, whose "#" header names it. Each gains exactly
+# one line over the logging commit's goldens, the drain's single idle
+# EP 0x83 read (INT_IDLE) right before LOAD's first transfer; with
+# kDrainInterruptEvents false the candidate build writes the logging
+# commit's goldens again, line for line.
 LOAD_GOLDENS = {
     "load-film-load-completes": "gl126_load_film_transfers.txt",
     "load-film-load-freezes-at-op24": "gl126_load_film_freeze_op24_transfers.txt",
@@ -1594,6 +1606,10 @@ def test_a_successful_load_puts_the_identical_transfers_on_the_wire():
     assert r["text"].startswith("loaded"), r["text"]
     assert r["mark"].startswith("present loaded"), r["mark"]
     n = _assert_same_transfers("load-film-load-completes", r["xfers"])
+    golden = _read_golden(LOAD_GOLDENS["load-film-load-completes"])
+    ints = [(i, x) for i, x in enumerate(golden) if x.startswith("INT ")]
+    assert len(ints) == 1 and ints[0][1] == INT_IDLE, ints
+    assert golden[ints[0][0] + 1].startswith(LOAD_FIRST_XFER), golden[ints[0][0] + 1]
     print("test_a_successful_load_puts_the_identical_transfers_on_the_wire OK "
           f"({n} lines, identical)")
 
@@ -1673,6 +1689,150 @@ def test_a_load_frozen_at_op_38_logs_the_polls_completed_before_it():
           f"({n} transfer lines, identical)")
 
 
+# ------------------------- the interrupt drain candidate (EP 0x83, read-only)
+
+# The Python driver drains the interrupt endpoint after the jog and after
+# the reinsert, before the load (of135i/loadflow.py, usbio.drain_events():
+# 1-byte reads, 50 ms each, at most 8, until the endpoint is idle). The
+# backend candidate does the same at the same two points. An idle read on
+# the mock answers SANE_STATUS_IO_ERROR (9), what sanei_usb answers for a
+# timeout.
+INT_IDLE = "INT IN ep=0x83 len=1: status 9"
+# LOAD's op 0, its first transfer: the reg 0x32 read.
+LOAD_FIRST_XFER = "CTRL IN req=0x04 val=0x008e idx=0x3222 len=2:"
+
+
+def _int_groups(xfers):
+    """(start index, lines) of every run of consecutive interrupt reads."""
+    groups = []
+    i = 0
+    while i < len(xfers):
+        if xfers[i].startswith("INT "):
+            j = i
+            while j < len(xfers) and xfers[j].startswith("INT "):
+                j += 1
+            groups.append((i, xfers[i:j]))
+            i = j
+        else:
+            i += 1
+    return groups
+
+
+def _assert_loaded(r):
+    assert len(r["statuses"]) == 1, r["statuses"]
+    assert r["statuses"][0][0] == SANE_STATUS_GOOD, r["statuses"]
+    assert r["text"].startswith("loaded"), r["text"]
+    assert r["mark"].startswith("present loaded"), r["mark"]
+
+
+def _assert_drain_points(r):
+    """Two drains, no other interrupt read: the first starts exactly where
+    the jog's transfers end and is followed by the edge wait's first
+    reg 0x101 read; the second follows the post-settle check's last read
+    (reg 0x3c) and is followed by LOAD's first transfer."""
+    xfers = r["xfers"]
+    groups = _int_groups(xfers)
+    assert len(groups) == 2, groups
+    (s1, g1), (s2, g2) = groups
+    assert s1 == r["xfermarks"]["after_jog"], (s1, r.get("xfermarks"))
+    assert xfers[s1 + len(g1)].startswith("REG R 0x0101:"), xfers[s1 + len(g1)]
+    assert xfers[s2 - 1].startswith("REG R 0x003c:"), xfers[s2 - 1]
+    assert xfers[s2 + len(g2)].startswith(LOAD_FIRST_XFER), xfers[s2 + len(g2)]
+    return g1, g2
+
+
+def test_the_interrupt_drain_reads_after_the_jog_and_before_the_load():
+    """A fresh press reaches both drain points; with an idle endpoint each
+    drain is one read that times out, and the load completes."""
+    probe = _build_probe()
+    if probe is None:
+        return _skip("test_the_interrupt_drain_reads_after_the_jog_and_before_the_load")
+
+    r = _run(probe, "scenario", "load-film-fresh-load-completes", poll_cap_ms=2000,
+             debug_level=DBG_INFO)
+    _assert_loaded(r)
+    g1, g2 = _assert_drain_points(r)
+    assert g1 == [INT_IDLE] and g2 == [INT_IDLE], (g1, g2)
+    for want in (
+        'gl126: magazine interrupt drain after the jog: events none, 1 read, ended on '
+        'status "Error during device I/O"',
+        'gl126: magazine interrupt drain before the load: events none, 1 read, ended on '
+        'status "Error during device I/O"',
+    ):
+        assert want in r["log"], (want, r["log"][-4000:])
+    print("test_the_interrupt_drain_reads_after_the_jog_and_before_the_load OK")
+
+
+def test_a_pending_interrupt_event_is_consumed_and_logged():
+    """One event latched on EP 0x83 is read, and logged, by the drain after
+    the jog; the drain before the load finds the endpoint idle (the event
+    was consumed, not left pending)."""
+    probe = _build_probe()
+    if probe is None:
+        return _skip("test_a_pending_interrupt_event_is_consumed_and_logged")
+
+    r = _run(probe, "scenario", "load-film-fresh-load-completes-event", poll_cap_ms=2000,
+             debug_level=DBG_INFO)
+    _assert_loaded(r)
+    g1, g2 = _assert_drain_points(r)
+    assert g1 == ["INT IN ep=0x83 len=1: 48", INT_IDLE], g1
+    assert g2 == [INT_IDLE], g2
+    for want in (
+        'gl126: magazine interrupt drain after the jog: events 0x48, 2 reads, ended on '
+        'status "Error during device I/O"',
+        'gl126: magazine interrupt drain before the load: events none, 1 read',
+    ):
+        assert want in r["log"], (want, r["log"][-4000:])
+    print("test_a_pending_interrupt_event_is_consumed_and_logged OK")
+
+
+def test_the_interrupt_drain_stops_at_its_cap():
+    """Nine events pending: the drain after the jog stops at its cap of 8
+    reads (no 9th read, no idle read); the drain before the load reads the
+    ninth and then the idle endpoint."""
+    probe = _build_probe()
+    if probe is None:
+        return _skip("test_the_interrupt_drain_stops_at_its_cap")
+
+    r = _run(probe, "scenario", "load-film-fresh-load-completes-cap", poll_cap_ms=2000,
+             debug_level=DBG_INFO)
+    _assert_loaded(r)
+    g1, g2 = _assert_drain_points(r)
+    assert g1 == ["INT IN ep=0x83 len=1: 04"] * 8, g1
+    assert g2 == ["INT IN ep=0x83 len=1: 04", INT_IDLE], g2
+    want = ("gl126: magazine interrupt drain after the jog: events 0x04 0x04 0x04 0x04 "
+            "0x04 0x04 0x04 0x04, 8 reads, ended at the cap of 8 reads")
+    assert want in r["log"], (want, r["log"][-4000:])
+    print("test_the_interrupt_drain_stops_at_its_cap OK")
+
+
+def test_an_interrupt_read_error_does_not_fail_the_load():
+    """Every interrupt read fails (SANE_STATUS_INVAL, what sanei_usb answers
+    without an interrupt endpoint): the drain makes that one read, logs the
+    status and stops, and the load completes exactly as with an idle
+    endpoint."""
+    probe = _build_probe()
+    if probe is None:
+        return _skip("test_an_interrupt_read_error_does_not_fail_the_load")
+
+    r = _run(probe, "scenario", "load-film-load-completes-int-error", poll_cap_ms=2000,
+             debug_level=DBG_INFO)
+    eject, release = r["statuses"]
+    assert eject[0] == SANE_STATUS_GOOD, eject
+    assert release[0] == SANE_STATUS_GOOD, release
+    assert r["text"].startswith("loaded"), r["text"]
+    assert r["mark"].startswith("present loaded"), r["mark"]
+    groups = _int_groups(r["xfers"])
+    assert [g for _, g in groups] == [["INT IN ep=0x83 len=1: status 4"]], groups
+    golden = _read_golden(LOAD_GOLDENS["load-film-load-completes"])
+    assert [x for x in r["xfers"] if not x.startswith("INT ")] == \
+        [x for x in golden if not x.startswith("INT ")]
+    want = ('gl126: magazine interrupt drain before the load: events none, 1 read, ended on '
+            'status "Invalid argument"')
+    assert want in r["log"], (want, r["log"][-4000:])
+    print("test_an_interrupt_read_error_does_not_fail_the_load OK")
+
+
 def write_load_goldens(provenance):
     """tests/gen_gl126_load_film_goldens.sh's last step: run the three
     scenarios against the build SANE_BACKENDS_DIR names and write their
@@ -1738,6 +1898,10 @@ def main() -> int:
         test_a_successful_load_puts_the_identical_transfers_on_the_wire,
         test_a_load_frozen_at_op_24_logs_what_it_saw,
         test_a_load_frozen_at_op_38_logs_the_polls_completed_before_it,
+        test_the_interrupt_drain_reads_after_the_jog_and_before_the_load,
+        test_a_pending_interrupt_event_is_consumed_and_logged,
+        test_the_interrupt_drain_stops_at_its_cap,
+        test_an_interrupt_read_error_does_not_fail_the_load,
     ]
     passed = 0
     skipped = 0
