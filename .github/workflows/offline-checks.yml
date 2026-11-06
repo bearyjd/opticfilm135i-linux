@@ -1,7 +1,8 @@
 name: offline checks
 
-# Hardware-free regression gate. Runs the generated-table check, the
-# Python offline suites and the compiler-based probe suites. It never
+# Hardware-free regression gate. Runs the generated-table check and
+# tools/release_check.py --no-backend (the Python offline suites and the
+# compiler-based probe suites). It never
 # builds the full SANE backend and never touches a scanner -- see
 # docs/offline-checks.md, which this job mirrors. The three backend
 # suites (check 5 there) need a built libsane-genesys.so and stay a
@@ -32,16 +33,11 @@ jobs:
       - name: Generated-table consistency
         run: python tools/gen_sane_tables.py --check
 
-      - name: Python offline suites
-        run: |
-          set -e
-          for t in test_safety test_calibrate test_hwblock test_park \
-                   test_offline test_diag test_dpi test_ir test_image_probe \
-                   test_aperture_crop test_overscan test_dual_overscan \
-                   test_release_check test_film110 test_film110_digitize test_film110_report test_film110_sideband test_white_blockage; do
-            echo "== $t"
-            python tests/run_suite.py $t
-          done
+      # One list, kept in tools/release_check.py (SUITES): every core
+      # and compiler-based suite must run every test and pass. The
+      # backend suites skip here and --no-backend says so in the verdict.
+      - name: Offline suites (tools/release_check.py --no-backend)
+        run: python tools/release_check.py --no-backend
 
       - name: Mounted-slide and DPI-aware cleaning regressions
         run: python -m pytest -q tests/test_slides.py tests/test_ir.py tests/test_offline.py
@@ -76,7 +72,7 @@ jobs:
       - name: Calibration integrity telemetry regressions
         run: python -m pytest -q tests/test_cal_integrity.py
 
-      - name: Opt-in calibration stop-gate regressions
+      - name: Calibration stop-gate (default enforce) regressions
         run: python -m pytest -q tests/test_cal_wait_scanstop.py tests/test_gate_pin_parity.py
 
       - name: Opt-in calibration buffer-empty gate regressions
@@ -85,11 +81,3 @@ jobs:
       - name: Fail-closed calibration integrity regressions
         run: python -m pytest -q tests/test_cal_integrity_fail.py
 
-      - name: Compiler-based suites (mark, ops, geometry, install)
-        run: |
-          set -e
-          for t in test_sane_mark test_sane_ops test_sane_geometry \
-                   test_sane_install; do
-            echo "== $t"
-            python tests/run_suite.py $t
-          done

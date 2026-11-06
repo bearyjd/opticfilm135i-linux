@@ -231,18 +231,24 @@ vendor's recovery capture; its hardware test waits for the owner's go. If
 the traverse itself does not complete in 30 s the driver stops with
 nothing further written: power-cycle and do not retry blindly.
 
-## Calibration stop gate (opt-in, not hardware-verified)
+## Calibration stop gate (the default)
 
-`--cal-wait-scanstop enforce` (docs/cal-scanstop-gate.md, issue #35)
-adds one wait condition inside calibration: after each acquisition's
+`--cal-wait-scanstop enforce` (docs/cal-scanstop-gate.md, issue #35) is
+the default for `scan`, `digitize` and the library (`Scanner`). It adds
+one wait condition inside calibration: after each acquisition's
 SCAN-clear it polls reg 0x100 bit 0 and then reg 0x101 bit 0 clear
 before the next OUT transfer, within the existing 0.3 s non-strict poll
 floor. Reads only; at the deadline it raises `CalibrationError` before
 any write, the session is FAILED, no recovery is sent, power cycle. It
 never arms outside the seven calibration acquisition phases, so POSITION,
-the image pass and PARK are not delayed. Default `off` is byte-identical
-on the wire (pinned by `tests/test_cal_wait_scanstop.py`). Offline
-verified only; its hardware test (Test 114) waits for the owner's go.
+the image pass and PARK are not delayed. `--cal-wait-scanstop off` is
+byte-identical on the wire to a driver without the gate (pinned by
+`tests/test_cal_wait_scanstop.py`). Run on hardware on three units: Tests
+114 and 115 on the developer unit (every wait cleared at the first read,
+at most 8 ms), a second unit (longest wait 24 ms) and a Steam Deck
+(longest wait 29 ms), all against the 0.3 s budget. Which resolutions and
+modes have not been run with the gate is listed in
+docs/cal-scanstop-gate.md, "Decision".
 
 ## Cross-process exclusion
 
@@ -309,7 +315,9 @@ pass) is acceptable. The unengaged loads are analysed in Tests 14 and 15 of
 standalone load, and the load is preceded by the vendor's app-start
 jog (`Scanner.jog_magazine()`, `tables_load.JOG`, same strict masked
 polls), which every engaging vendor load had and none of ours did. The
-jog + reinsert + load flow is **not yet hardware-verified**. Background in
+jog + reinsert + load flow has run on hardware since 2026-09-05 (it
+latched the magazine three times out of three that day) and has been
+the load flow since. Background in
 [`load-analysis.md`](load-analysis.md).
 
 `--assume-locked` (in `tools/hwblock.py`) is for controlled development
@@ -336,7 +344,10 @@ errors, timeouts and Ctrl-C during the wait propagate untouched.
 A warm lamp takes the same single-measurement path every verified scan
 has taken. Offline-verified (fault injection for a dark lamp, gradual
 warmup, a never-stable lamp, saturation, malformed data, Ctrl-C and USB
-errors); the bounded wait itself has not yet been seen on hardware.
+errors). On hardware the bound has been reached and raised as designed:
+Test 22 (51 measurements over 295 s, then `LampWarmupError`, no motor
+command) and once more during the whole-strip sweep bring-up (after
+58 s).
 
 ## A cold-started session loads before it scans
 
@@ -372,7 +383,7 @@ program is not recovery.
 
 ## Verification status
 
-- **Offline verified** (`tests/test_safety.py`, 38 tests, run with the
+- **Offline verified** (`tests/test_safety.py`, run with the
   full existing offline suite): the start-state matrix (0x22 / 0x00 /
   0x02 / 0x23 / unknown / read timeout / USB error / malformed reply)
   for every public writing entry point, counted at the pyusb boundary

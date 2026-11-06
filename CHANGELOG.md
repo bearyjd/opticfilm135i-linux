@@ -6,15 +6,15 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
-- **Deliberate fork difference: calibration stop gate defaults to `enforce`.**
-  Upstream PR #46 keeps `--cal-wait-scanstop` opt-in (`off`); this fork
-  retains the owner's production choice for `scan`, `digitize` and
-  `Scanner.cal_wait_scanstop`, based on the owner's hardware A/B evidence.
-  The shared gate mechanism and upstream documentation are retained;
-  see `docs/cal-scanstop-gate.md` for evidence and limits. A timeout fails
-  closed before the next OUT transfer. Explicit `off` restores the pre-gate
-  wire sequence; offline wire baselines are pinned off, with separate
-  unpinned tests for the fork's `enforce` default.
+- **SANE backend: file headers credit the gl124 files they started from.**
+  `gl126.cpp`, `gl126.h` and `gl126_registers.h` began as copies of the
+  genesys backend's gl124 files (docs/sane-port.md, stage 1) and named
+  only this project's author. They now carry "Portions derived from"
+  lines with the original copyright holders, Stéphane Voltz and Povilas
+  Kanapickas. The banner of the generated tables no longer says that
+  reads and polls are not reproduced (the op programs carry them). Both
+  are comment changes; no code differs. A stale docstring in
+  `of135i/vendor_derived.py` is corrected.
 - **`--cal-readback-guard fail` now also refuses on calibration integrity**
   (opt-in; EXPERIMENTAL, unverified on hardware). Besides the existing
   refusal when a read-back shows no acquisition (before the bulk read),
@@ -69,14 +69,204 @@ one exists; "offline" means implemented and tested without the scanner.
   empty when the read-back was abandoned. A failing extra read is logged and
   ignored; clean polls and every other timeout are untouched. Off, the
   transfer sequence is unchanged (wire fingerprints identical).
-- **Opt-in transfer recorder** (offline): `OF135I_TRACE=<path>` appends one
-  JSON line per control/bulk transfer (monotonic timestamp, direction, setup
-  fields, status, first 64 data bytes; bulk-IN image data only as a length) to
-  a new 0600 file, flushed per record; an existing file is refused. A
-  recording failure logs one warning and scanning continues. Unset, the
-  transfer path is unchanged (wire fingerprints identical).
-  `tools/trace_to_compiled.py` converts a recording to the compiled trace
-  format for offline comparison.
+
+## v0.2.10 — 2026-11-05
+
+- **Production confirmation (Test 119).** One colour strip through the
+  calling application with `digitize --sweep`: the first whole-strip
+  sweep with the stop gate as default and the first hardware run of
+  `digitize` after the two-strip removal. Status ok, 4 of 4 apertures by
+  edges, seven gate waits cleared at the first read, device phases as in
+  Test 111 (calibration 6.1 s, position 1.8 s, scan 161.4 s, park
+  10.3 s).
+- **SANE backend: calibration stop gate in the generated op programs.**
+  After the SCAN-clear that ends each calibration acquisition, the
+  backend's programs read reg 0x100 and reg 0x101 once and did not wait,
+  so on a fast host the next acquisition could be armed while the
+  previous one was still running; the backend would be expected to fail
+  calibration there as the Python driver did (issue #35), though it was
+  never run on such a host. The
+  generator now emits those two reads in the seven acquisition programs
+  as polls for bit 0 clear (300 ms each; the plain-3600
+  `cal_shading_measure` site keeps its class-F match and 5 s), and a
+  timeout reports "the previous acquisition did not stop". A control read
+  that returns no data no longer counts as a match in any masked poll.
+  Transfers are unchanged when the scanner has already stopped. Offline
+  tests in `tests/test_sane_ops.py`. Hardware, the developer's unit
+  (Test 118): frame 1 at 600 dpi and at plain 3600 dpi completed; at
+  plain 3600 three of the fourteen polls waited 11-18 ms for reg 0x100,
+  where earlier builds went on. Not run on a unit that shows the failure
+  yet. Exported as revision v9 of the SANE submission series
+  (`sane/wp3-package/`: v8 plus one commit, base unchanged; standalone
+  gcc build and a clang 17 `-Werror` build of the genesys backend without
+  warnings), not pushed to the merge request. The wait was designed by bearyjd for the Python
+  driver; the failure was reported by Krustenviech (#35).
+
+- **Removed: `digitize --film 110 --strips 2`.** The mode let two short 110
+  strips share one load of the six-aperture holder (slot 1 = apertures 1-3
+  as roll N, slot 2 = apertures 4-6 as roll N+1; docs/film-110.md §12). It
+  ran on hardware in Tests 103 and 104; one strip per load is the routine,
+  so the option, the per-slot code and its tests are gone. A one-strip run
+  behaves exactly as before: 27 scenarios (110 colour and black-and-white
+  passes, rebuilds, a turned strip, 135 per-frame and sweep, failures) gave
+  the same exit codes, output and file hashes before and after. Offline,
+  no hardware run. Three tests that used the two-strip harness for
+  one-strip behaviour were kept as one-strip tests. A roll whose manifest records `"strips": 2` is still
+  refused by `--from-frames`, with a message that no longer names the
+  removed option.
+
+- **CI runs the whole offline gate; version string corrected.** The
+  GitHub Actions workflow now calls `tools/release_check.py --no-backend`
+  instead of its own list of suites, which had fallen behind: ten core
+  suites, among them the stop gate's and the cross-unit tool's, ran only
+  locally. `of135i.__version__` said 0.2.7 while the package metadata
+  said 0.2.9, so `of135i version` and the cross-unit report printed the
+  older number; both now say 0.2.9 and a test holds them equal. Offline.
+
+- **Watch eject failures exit 75** (breaking for wrappers: a failed watch
+  eject used to exit 1): a raised exception or Ctrl+C inside `eject()` ends
+  the watcher immediately with the session diagnostics. 75 is `EX_TEMPFAIL`
+  ("retry later") but here means the opposite: power-cycle, do NOT restart
+  automatically. Supervisor config is required (systemd:
+  `RestartPreventExitStatus=75`). Idle Ctrl+C still exits 0; Ctrl+C in the
+  read-only magazine-presence check exits 130; startup errors and eject
+  refusals that sent nothing (`refused: ...`, e.g. the unejectable-state
+  guard) still exit 1. Unexpected exception types also print a traceback;
+  the error text is printed once. The README and `watch --help` carry the
+  same exit-code text (test-enforced). CLI-only, offline-tested: no motor
+  sequence, wait, or device API changes. Existing eject completion timeouts
+  still warn and return success, so they do not produce 75. Adapted from
+  bearyjd (https://github.com/bearyjd), commit 22c955b in
+  bearyjd/opticfilm135i-linux.
+
+- **`--cal-wait-scanstop enforce` is now the default** (`scan`, `digitize`,
+  `Scanner.cal_wait_scanstop`). Evidence: Krustenviech's A/B on the Steam
+  Deck, the unit that reported issue #35 (two ungated runs failed in
+  `cal_dark_b`; six gated runs / seven frames completed, longest wait 29 ms),
+  and bearyjd's A/B on a second unit (ungated 0 of 3, gated 7 of 7, longest
+  wait 24 ms); the developer unit completed all 14 gated frames of Tests
+  114-115, and in Test 116 a scan with no gate option ran gated (the default,
+  on hardware). Across the three units ungated scans failed 5 of 5 on the two fast
+  hosts; gated scans completed on all. `--cal-wait-scanstop off` stays and
+  sends exactly the transfers of a driver without the gate. Not run with the
+  gate on hardware: 1200/2400/7200 dpi, the whole-strip sweep, 110 film
+  (docs/cal-scanstop-gate.md, "Decision"; the slide holder has run gated,
+  bearyjd's seven scans, confirmed afterwards). A
+  gate timeout is a fail-closed `CalibrationError` needing a power cycle. The
+  residual-dark_b error now names the gate when it is off; the
+  `_healthy_dark_b` docstring no longer claims frame 1 is always healthy.
+  Tests that compare the wire with the vendor captures state `off`
+  explicitly. Thanks to Krustenviech (reported the failure, ran the Deck A/B)
+  and bearyjd (designed and wrote the gate, ran the first A/B).
+- **Cross-unit protocol made gentler on other people's units.** The default
+  sequence is now `on,on,on,on`: the ungated failure is already established
+  on the affected units and repeating it only costs a power cycle. A sequence
+  with `off` still works and prints a NOTE that the ungated scan is expected
+  to fail on an affected unit (harmless, but the tool stops and the scanner
+  needs a power cycle with the magazine loaded). The plan and the final
+  printout now say what to do after the run: eject command on success; after
+  a failure or interrupt send no command (a motor command from an unknown
+  state), power-cycle, `load --release` if the feed does not engage, never pull
+  a magazine by force. docs/cross-unit-protocol.md gets a Risks section split
+  into what could damage the scanner and what only costs a scan or a power
+  cycle. The new default sequence ran once on the developer unit (Test 116); the
+  tool has not been run on a second unit.
+- **Stop gate confirmed on a second unit (external report, issue #35).**
+  bearyjd ran the A/B asked for on master: gate off 0 of 3 scans completed
+  (all fail at `cal_dark_b`), `--cal-wait-scanstop enforce` 3 of 3 plus four
+  warm-up scans, longest wait 24 ms against the 0.3 s budget. His sidecars
+  compared with Test 114's: the two units calibrate to nearly the same offsets
+  and gains; his host completes a control read about ten times faster (0.39 ms
+  against 3.9 ms), which is why it reaches the next acquisition while the
+  engine still runs. Reading, not proof: the failure follows the host's pace,
+  and the developer unit is hidden by its slower host rather than immune.
+  docs/cal-scanstop-gate.md ("Second unit, on master"), docs/test-log.md.
+  (Superseded by the entry above on the default.)
+
+- **Diag: cr mismatches are now locatable.** Each control-read reply that
+  differs from the capture is recorded in the `.diag.json` as
+  `cr_mismatch_details` (phase, op index, wv/wi, got/want; first 20 per
+  scan; `cr_mismatches` still counts all). Reason: docs/status-read-inventory.md
+  section 6 item 4. Offline, no wire change.
+
+- **Cross-unit protocol (run on the developer unit, Test 115).** `tools/cross_unit_check.py` runs a fixed
+  doctor / load / four-scan sequence (`--cal-wait-scanstop enforce,off,off,enforce`),
+  stops on the first failure without sending any recovery command, and packs the
+  sidecars, doctor reports and log into a tarball without images or personal paths.
+  Protocol in docs/cross-unit-protocol.md; tests in tests/test_cross_unit_check.py.
+  Review by bearyjd, who asked for each step to say what it sends, led to:
+  the printed plan, `plan.txt` and a table in the protocol doc now state for
+  every step whether it only reads, writes registers or moves the film holder
+  (marked MOTOR), what the operator must do (`load` jogs, prompts you to take
+  the magazine out and back in, and needs a real terminal) and what the step is
+  for, with the scan broken down by phase and the code or doc each claim rests
+  on; calibration acquisitions are listed as "may move the motor" because the
+  repo does not establish otherwise. `--dry-run` now writes nothing, not even
+  `plan.txt`. The default sequence was `on,off,off,on` here (changed to `on,on,on,on`, see above) (a gated run first, still
+  symmetric). A scan that exits 4 but left its sidecar (the image check, not
+  the transport or calibration) is recorded as `completed-coverage-unverified`
+  and the run goes on; every run has an `outcome`. A failed scan whose output
+  contains `dark_b is residual` gets `failure_class: dark_b_residual` and is
+  reported as the issue #35 failure. Ctrl-C or an unexpected error still writes
+  `summary.json`, `report.md` and the tarball, and sends nothing more to the
+  scanner. The first hardware run found that the tool missed the sidecars
+  (`--frames` makes the driver name outputs `-f<N>`) and packed the scanned
+  images into the tarball; sidecars are now found by what is on disk, and the
+  archive is built from an allowlist and verified after packing. A second
+  hardware run with the fixed tool confirmed both (Test 115, developer unit).
+- **Status-read inventory (offline).** `tools/status_read_inventory.py`
+  lists every read of reg 0x100/0x101 in the op tables with the
+  engine command before it; docs/status-read-inventory.md judges the
+  142 "read once after a stop or start, no wait" cases: 111 are the
+  calibration acquisitions of issue #35 (gated by
+  `--cal-wait-scanstop`), 27 are the image-pass start where bulk IN
+  does the waiting, 4 are a POSITION pre-move read behind the gate and
+  a strict completion poll. Policy: no new lone read after a stop or
+  start; per-phase mismatch records in the diag are the next step. No
+  code change to the driver. Wording after review by bearyjd: the 142 is
+  stated under its counting rule, "polled" is distinguished from "waited"
+  (non-strict polls outside JOG/LOAD/POSITION only log on timeout), and
+  categorical phrasings are hedged as our reading of the tables.
+- **Opt-in transfer recorder** (`OF135I_TRACE=/new/path/run.jsonl`):
+  records transfers passing through the guarded USB layer, with bounded
+  control/OUT payloads and bulk-IN lengths only. Unset or empty leaves
+  recording off; no command, retry or sleep is added. Files are created
+  exclusively with mode 0600; recording failures warn once and disable
+  recording without changing USB results. Trace files close before warning;
+  recorder warnings remain best effort even if a logging handler fails.
+  `tools/trace_to_compiled.py`
+  converts the diagnostic JSONL to compiled traces for offline comparison
+  (payloads beyond 64 bytes are incomplete; not a replay capture).
+  Standalone tests cover failure handling, conversion and the upstream
+  wire digests with recording on/off (offline). One hardware pair on the
+  developer unit (Test 117): a 600 dpi scan with the recorder on matched
+  the same scan with it off in calibration, timing and output size, and
+  the 2336-record file was as documented; the failure paths ran offline
+  only.
+  Credit: adapted from bearyjd (https://github.com/bearyjd),
+  commits a02b4b6 and 6c2be93 in bearyjd/opticfilm135i-linux.
+  Review fixes (offline): Ctrl-C while recording disables the recorder
+  and never replaces a failed transfer's exception; reads record the
+  requested size and mark short reads; the converter validates the header
+  and records, reports damaged lines (refusing unless `--skip-damaged`),
+  emits `null` + `"partial": true` instead of padded/truncated payloads,
+  follows compile_trace.py timestamps and writes atomically; and
+  `tools/replay_trace.py` refuses partial or data-less write ops before
+  opening the device. Round 2 (offline): record data must be strict hex
+  of exactly `min(len, 64)` bytes (converter) and strict hex (replay);
+  every converted op carries `"src": "of135i-trace/1"` and replay refuses
+  it (converter output is diagnostic only; committed captures unaffected);
+  the converter copies into place where hard links are unsupported;
+  `gen_tables.py` refuses partial or null-data write ops; documented the
+  converter exit codes 0/1/2 and that a Ctrl-C during recording of a
+  failed transfer is only a note on the USB exception.
+  Round 3 (offline): converter output is a dict
+  `{"format": "of135i-trace-converted/1", "ops": [...]}`, which replay
+  refuses as not a list (stripping `src` cannot undo it; committed bare-list
+  captures unchanged); the failed-copy cleanup unlinks only the file it
+  created (device/inode check) and cannot mask the original error; docs
+  qualify atomicity (hard-link path atomic, copy fallback not under a hard
+  kill).
 - **Docs: the driver is no longer single-unit.** README, CONTRIBUTING and
   the ROADMAP now say what is true as of 2026-11-03: the driver has
   scanned on two units besides the maintainer's (a Steam Deck and a fork's
@@ -101,7 +291,8 @@ one exists; "offline" means implemented and tested without the scanner.
   IR frame-1 runs: harmless (every wait ≤ 8 ms against 0.3 s) but the
   residual dark_b did not occur in any frame, so its effect is unproven;
   stays opt-in until the issue's reporter runs it. The SANE backend has no
-  gate.
+  gate. (Superseded by the entry above on the default: the reporter and a
+  second user have run it, and `enforce` is now the default.)
   Credit: the mechanism, the code and the offline tests are by bearyjd
   (https://github.com/bearyjd); the report and the Steam Deck logs are by
   Krustenviech (https://github.com/Krustenviech), issue #35.

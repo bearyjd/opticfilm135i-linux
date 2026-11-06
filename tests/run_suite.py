@@ -25,7 +25,8 @@ def main(argv: list[str]) -> int:
         print("usage: run_suite.py test_<name>", file=sys.stderr)
         return 2
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), argv[1] + ".py")
-    with (nullcontext() if argv[1] in ("test_cal_wait_scanstop", "test_gate_pin_parity")
+    with (nullcontext() if argv[1] in ("test_cal_wait_scanstop", "test_gate_pin_parity",
+                                         "test_trace_recorder")
           else gate_off()):
         try:
             runpy.run_path(path, run_name="__main__")
