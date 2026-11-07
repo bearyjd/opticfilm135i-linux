@@ -40,12 +40,13 @@ DPIS = (600, 1200, 2400, 3600, 7200)
 MM = holder.MM_PER_UNIT
 
 
-def _slide_geom(slide, dpi, overscan=holder.SLIDE_OVERSCAN_MM):
+def _slide_geom(slide, dpi, overscan=holder.SLIDE_OVERSCAN_MM, offset_mm=0.0):
     t = dual_tables(dpi)
     return holder.slide_dual_geometry(
         slide, dpi=dpi, lines_per_chunk=t.LINES_PER_CHUNK,
         colour_crop_lines=image.align_shift(dpi),
-        default_wire_lines=t.DEFAULT_LINES, overscan_mm=overscan)
+        default_wire_lines=t.DEFAULT_LINES, overscan_mm=overscan,
+        offset_mm=offset_mm)
 
 
 def _strip_geom(frame, dpi, overscan=holder.OVERSCAN_MM):
@@ -750,12 +751,41 @@ def test_cli_slide_offset_validated_before_hardware():
     print("test_cli_slide_offset_validated_before_hardware OK")
 
 
+def test_slide_position_offset_moves_every_feedl_and_is_travel_checked():
+    """offset_mm (--position-offset, issue #61) moves every slide FEEDL by
+    the same amount and leaves window length, chunks and margins alone; a
+    positive offset that pushes slide 4 past the ceiling is refused; a
+    negative one is not; an out-of-range offset is a ValueError."""
+    for dpi in DPIS:
+        for off in (-0.5, 0.25):
+            shift = off / MM
+            for n in range(1, 5):
+                g0, w0 = _slide_geom(n, dpi)
+                g1, w1 = _slide_geom(n, dpi, offset_mm=off)
+                assert abs((g1.feedl - g0.feedl) - shift) <= 1, (dpi, n, off)
+                assert (g1.chunks, g1.delivered_lines, w1) == \
+                    (g0.chunks, g0.delivered_lines, w0), (dpi, n, off)
+                assert abs(g1.leading_margin_mm - g0.leading_margin_mm) < 1e-9
+                assert abs(g1.trailing_margin_mm - g0.trailing_margin_mm) < 1e-6
+                assert holder.slide_travel_end(g1.feedl, w1, dpi) \
+                    <= holder.FEEDL_CEILING, (dpi, n, off)
+        assert _slide_geom(1, dpi, offset_mm=0.0) == _slide_geom(1, dpi)
+        # Slide 4 sits 175..307 steps (0.62..1.08 mm) inside the ceiling
+        # on every profile, so +1.5 mm must be refused by the travel check.
+        _raises(safety.FeedlOutOfRangeError, _slide_geom, 4, dpi, offset_mm=1.5)
+        _slide_geom(3, dpi, offset_mm=1.5)
+        for bad in (holder.POSITION_OFFSET_MAX_MM + 0.1, float("nan")):
+            _raises(ValueError, _slide_geom, 1, dpi, offset_mm=bad)
+    print("test_slide_position_offset_moves_every_feedl_and_is_travel_checked OK")
+
+
 def main() -> int:
     tests = [
         test_slide_model_matches_documented_numbers,
         test_slide_feedl_grid_every_profile,
         test_slide_ledger_default_every_profile,
         test_slide_geometry_refusals,
+        test_slide_position_offset_moves_every_feedl_and_is_travel_checked,
         test_slide_wiring_same_phases_slide_geometry,
         test_device_scan_slide_refusals_send_nothing,
         test_line_count_encode_guard,
