@@ -201,9 +201,9 @@ def _validate_overscan(overscan: float, frames, dpi: int = 3600,
             what = "slide" if slide else "frame"
             hint = (f" (the slide default is {holder.SLIDE_OVERSCAN_MM} mm; slide 4 "
                     f"is the furthest window, see docs/slide-scanning.md)"
-                    ) if slide and not offset_mm else ""
-            arg = (f"--position-offset {offset_mm} mm" if offset_mm
-                   else f"--overscan {overscan} mm")
+                    ) if slide else ""
+            arg = (f"--overscan {overscan} mm with --position-offset {offset_mm} mm"
+                   if offset_mm else f"--overscan {overscan} mm")
             return f"{arg} is out of range for {what} {frame}: {e}{hint}"
         except ValueError as e:
             if "position offset" in str(e):
