@@ -322,6 +322,75 @@ def test_cli_refuses_a_bad_offset_with_zero_hardware_activity():
     print("test_cli_refuses_a_bad_offset_with_zero_hardware_activity OK")
 
 
+class _Stop(Exception):
+    """Raised by the fake scanner right after the setup block."""
+
+
+class _SpyScanner:
+    """Records the attributes the CLI body sets, stops at the first
+    scanner call after them (check_start_state) so nothing else runs."""
+
+    def check_start_state(self):
+        raise _Stop()
+
+
+def _offset_reaching_the_scanner(argv, env_value=None):
+    """Run the CLI command `argv` with every device entry replaced by a
+    spy; return the spy's position_offset_mm (None if never assigned)."""
+    import io
+    import os
+    from contextlib import redirect_stderr, redirect_stdout
+    from of135i import cli
+    seen = []
+
+    def session(body):
+        sc = _SpyScanner()
+        try:
+            body(sc)
+        except _Stop:
+            pass
+        seen.append(getattr(sc, "position_offset_mm", None))
+        return 1
+
+    saved_session = cli._run_writing_session
+    saved_env = os.environ.pop(cli.POSITION_OFFSET_ENV, None)
+    if env_value is not None:
+        os.environ[cli.POSITION_OFFSET_ENV] = env_value
+    cli._run_writing_session = session
+    try:
+        args = cli.build_parser().parse_args(argv)
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            args.func(args)
+    finally:
+        cli._run_writing_session = saved_session
+        os.environ.pop(cli.POSITION_OFFSET_ENV, None)
+        if saved_env is not None:
+            os.environ[cli.POSITION_OFFSET_ENV] = saved_env
+    assert len(seen) == 1, (argv, seen)
+    return seen[0]
+
+
+def test_every_scan_body_hands_the_offset_to_the_scanner():
+    """_cmd_scan, _cmd_digitize and _digitize_sweep each set
+    scanner.position_offset_mm from the flag (or the environment) before
+    any hardware call; a dropped assignment would scan at offset 0."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        cmds = {
+            "scan": ["scan", "--frame", "1", "-o", f"{d}/x.tiff"],
+            "digitize": ["digitize", "-o", f"{d}/dig", "--assume-loaded"],
+            "sweep": ["digitize", "--sweep", "--dpi", "1200", "-o", f"{d}/swp", "--assume-loaded"],
+        }
+        for name, base in cmds.items():
+            got = _offset_reaching_the_scanner(base + ["--position-offset", "-0.5"])
+            assert got == -0.5, (name, got)
+            got = _offset_reaching_the_scanner(base, env_value="0.3")
+            assert got == 0.3, (name, "env", got)
+            got = _offset_reaching_the_scanner(base)
+            assert got == 0.0, (name, "default", got)
+    print("test_every_scan_body_hands_the_offset_to_the_scanner OK")
+
+
 def test_sidecar_records_the_offset():
     import argparse
     import json
@@ -536,6 +605,7 @@ def main():
         test_environment_variable_is_the_per_unit_default,
         test_sweep_meta_records_the_offset,
         test_cli_refuses_a_bad_offset_with_zero_hardware_activity,
+        test_every_scan_body_hands_the_offset_to_the_scanner,
         test_sidecar_records_the_offset,
         test_hint_is_relative_to_the_offset_already_applied,
         test_hint_from_the_second_units_margins,
