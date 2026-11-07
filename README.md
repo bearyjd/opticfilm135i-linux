@@ -2,7 +2,7 @@
 
 ![License: GPL-2.0-or-later or MIT (driver), CC BY 4.0 (docs)](https://img.shields.io/badge/License-GPL--2.0--or--later%20%7C%20MIT%20%7C%20CC--BY--4.0-blue.svg)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
-![Release: v0.2.10](https://img.shields.io/badge/Release-v0.2.10-blue.svg)
+![Release: v0.2.11](https://img.shields.io/badge/Release-v0.2.11-blue.svg)
 ![Status: CLI driver complete, SANE backend working locally](https://img.shields.io/badge/Status-CLI%20driver%20complete%2C%20SANE%20backend%20working%20locally-green.svg)
 
 **Unofficial, community-built Linux driver for the Plustek OpticFilm 135i**
@@ -16,11 +16,12 @@ driver for the OpticFilm 135i (USB `07b3:1436`, GL126), **under active
 development**. On that unit it scans without Windows, a virtual machine, or the
 manufacturer's driver. It was developed and hardware-tested by one person on a
 **single scanner unit** in a limited Linux environment. As of November 2026 it
-has also scanned on **two other units** reported by users (one on a Steam
-Deck, one through a fork). On both, calibration failed at a step the
-developer's unit has never failed
+has also scanned on **two other units** reported by users
+([Krustenviech](https://github.com/Krustenviech) on a Steam Deck,
+[bearyjd](https://github.com/bearyjd) through a fork). On both, calibration
+failed at a step the developer's unit has never failed
 ([issue #35](https://github.com/cgillinger/opticfilm135i-linux/issues/35));
-a fix contributed by one of those users, the calibration stop gate
+a fix contributed by bearyjd, the calibration stop gate
 (`--cal-wait-scanstop`), is now the default and both units completed every
 gated scan (docs/cal-scanstop-gate.md). So compatibility with other
 OpticFilm 135i units and other Linux setups is **not yet verified** —
@@ -29,7 +30,7 @@ additional hardware testing is welcome (see
 
 The project has two parts, at different stages:
 
-- **Python / pyusb command-line driver — released (v0.2.10), working on the
+- **Python / pyusb command-line driver — released (v0.2.11), working on the
   test unit.** Scans to raw 16-bit TIFF/PNM at all five resolutions
   (600 / 1200 / 2400 / 3600 / 7200 dpi), with an infrared dust/scratch channel,
   whole-strip batch scanning, and a resumable bulk-digitisation workflow.
@@ -180,7 +181,7 @@ installed from this repository's build.
 
 ## Development status
 
-**Status: v0.2.10 released (2026-11-05; [release notes](docs/release-notes-v0.2.10.md)).** The standalone Python/pyusb
+**Status: v0.2.11 released (2026-11-06; [release notes](docs/release-notes-v0.2.11.md)).** The standalone Python/pyusb
 command-line driver reached its defined milestone — magazine loading,
 single-frame and whole-strip batch scanning, all five resolutions, IR and dust
 removal, and eject — with scan, calibration, IR and dust removal
@@ -219,7 +220,11 @@ stop gate the default, the fix for a calibration failure found on two
 other users' units (issue #35), adds a transfer recorder and a
 cross-unit protocol, removes the two-strip 110 mode, and gives the SANE
 backend the same wait (submission revision v9, prepared, not yet on the
-merge request). Changes on master after v0.2.10 are in
+merge request); v0.2.11 (2026-11-06) adds a per-unit position offset
+for units whose frames sit off the model (issue #61), `recrop` to make
+the products from a frame's preserved overscan, and an album numbering
+a film's photographs through its strips (issue #65). Changes on master
+after v0.2.11 are in
 [CHANGELOG.md](CHANGELOG.md) under "Unreleased".
 "Complete" here means that functional milestone is met **within
 its frozen scope on the developer's unit** — it is **not** broad field testing or
@@ -460,6 +465,25 @@ every dust speck appeared three times in the IR image).
 five dual profiles in Test 61, including measured sub-line IR-to-
 visible registration.)
 
+**A scanner whose frames sit early or late.** The positioning model was
+fitted on one scanner. On another unit the holder can sit a fraction of
+a millimetre away from it: every frame then has a small margin on one
+side and a large one on the other, and the tightest frames (4 and 5 on
+the unit that reported it, issue #61) fail with `leading margin below
+min_margin_mm`. The failure message then suggests the correction, and
+`--position-offset MM` (on `scan` and `digitize`) applies it: every scan
+window is moved along the strip by that much, negative for earlier
+(`--position-offset -0.5` on that unit). A unit's value can be set once
+in the environment instead of on every command, `export
+OF135I_POSITION_OFFSET=-0.5`; the flag overrides it. Read the value off a frame's
+`.diag.json`: with `coverage.leading_margin_mm` and
+`coverage.trailing_margin_mm` the offset that centres the opening is
+`(leading − trailing) / 2`; aim for the two margins to come out about
+equal (0.6–0.8 mm each at the default overscan). The margins, window
+length and transport checks are otherwise unchanged, and the value is
+recorded in the sidecar. Frames already scanned and refused do not need
+scanning again: see `recrop` under "Other commands".
+
 `--park {semantic,verbatim}` selects the park phase: `semantic` (the
 default) sends the same motor sequence with real condition waits,
 `verbatim` replays the captured stream byte for byte (see
@@ -517,9 +541,27 @@ in your editor. On the plain 3600 path each frame carries the same
 aperture-registered contract as `scan`: `fN.overscan.tiff` preserves the
 full window, `fN.tiff` is the verified crop, and a frame whose coverage
 does not verify gets **no** `fN.tiff` — the roll is recorded failed with
-the reason in the manifest, and is re-run whole. `--positive` writes a **separate** `fN-preview.tiff` and
+the reason in the manifest, and is re-run whole (or, when the opening was
+located and only the margin was short, cropped from the overscan file
+with `recrop`; and `--position-offset` corrects the next strips on a unit
+whose frames sit early or late). `--positive` writes a **separate** `fN-preview.tiff` and
 leaves the negative untouched; `--roll N` targets a specific roll,
 `--no-ir` drops the IR output (non-3600 profiles still capture dual-light).
+**One folder per film, numbered 01–36 (`--album NAME`).** A film comes as
+several strips, and each strip gets its own `roll-NNN/` with the holder's
+`f1`–`f6` names. Give every strip of one film the same `--album Rolle01`
+and the photographs are also collected in `<out>/Rolle01/` as `01.tiff`,
+`02.tiff`, …, `36.tiff` (with `NN.diag.json` beside each), numbered
+through the strips in the order they were scanned. The numbering is
+gap-free: a strip's images follow the previous strip's, and an empty
+opening (a short strip) takes no number. A frame that was scanned but not
+delivered (coverage not verified, only its overscan file exists) keeps its
+number reserved and is listed as missing in `Rolle01/index.json`, so the
+gap is visible; `recrop` delivers it under that number. The numbered
+files are hard links to the roll products (no extra disk), and the album
+is rebuilt from the manifest after every strip and at any time with
+`of135i album -o DIR Rolle01`, so a `--force` re-run of a strip renumbers
+the strips after it. 135 only (110 numbers its photographs itself).
 `--film 110` digitises a 110 strip as a roll of passes: run the roll again
 (`--roll N`) with the strip re-seated — slid or turned end for end — until
 nothing is missing; frame files are `p1-f1.tiff`, `p2-f1.tiff`, …, each
@@ -630,7 +672,29 @@ stdout/stderr pipe can no longer abort a scan.
 .venv/bin/python -m of135i doctor --json report.json   # full read-only health report
 .venv/bin/python -m of135i watch                   # ejects on the Eject button only; prints other buttons
 .venv/bin/python -m of135i buttons [--duration S]  # read-only: print button presses
+.venv/bin/python -m of135i recrop --min-margin 0.05 roll-006/f4.overscan.tiff   # no scanner: crop a refused frame
+.venv/bin/python -m of135i album -o Scans Rolle01   # no scanner: rebuild a film's numbered folder
 ```
+
+`recrop` makes `fN.tiff` (and `fN-ir.tiff`) from a frame's preserved
+`fN.overscan.tiff` (and `fN-ir.overscan.tiff`) without scanning again.
+Use it for a frame that was refused with a margin below the 0.15 mm
+floor but whose opening was located (the usual case on a unit whose
+frames sit early or late, issue #61): `--min-margin 0.05` accepts such a
+frame, `--force` accepts any located edge. It does exactly the delivery
+step of `scan`/`digitize` on the stored files (IR first on a dual frame,
+an empty opening refused as `digitize` refuses it, both channels cropped
+to the same lines, rotated as the files are), reads the resolution and
+rotation from `fN.diag.json` (or both `--dpi` and `--rotate`), never
+alters the overscan files, refuses to overwrite a product without
+`--overwrite`, writes a `fN.recrop.json` record, and leaves the digitize
+manifest as it was. A `scan --positive` frame cannot be recropped (its
+overscan file is the positive rendering; `digitize --positive` frames
+are fine, their overscan is the negative). Exit 0 when every frame was
+written (or, with `--dry-run`, would be), 4 when a frame did not verify
+at the chosen floor or its opening was empty, 2 when any frame could not
+be processed at all (a missing file, unknown settings, a product in the
+way; this outranks 4).
 
 The exit codes of `watch` are also printed by `of135i watch --help`; the
 text below is the same and a test keeps the two identical.

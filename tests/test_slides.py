@@ -616,6 +616,131 @@ def test_cli_dark_b_fallback_provenance_in_sidecar():
     print("test_cli_dark_b_fallback_provenance_in_sidecar OK")
 
 
+# ------------------------------------------- per-unit position offset
+
+
+def test_slide_position_offset_zero_is_the_default_geometry():
+    """offset_mm=0 (the default) is the slide geometry exactly: the same
+    OverscanGeometry and wire lines as without the argument, and the
+    docs/slide-scanning.md ledger, on every profile and slide."""
+    for dpi, want in _DEFAULT_LEDGER.items():
+        t = dual_tables(dpi)
+        for n in range(1, 5):
+            base = _slide_geom(n, dpi)
+            zero = holder.slide_dual_geometry(
+                n, dpi=dpi, lines_per_chunk=t.LINES_PER_CHUNK,
+                colour_crop_lines=image.align_shift(dpi),
+                default_wire_lines=t.DEFAULT_LINES, offset_mm=0.0)
+            assert zero == base, (dpi, n)
+            g, wire = zero
+            assert (g.feedl, round(g.feedl + wire * (7200 // dpi) / 2)) == want[n]
+    print("test_slide_position_offset_zero_is_the_default_geometry OK")
+
+
+def test_slide_position_offset_composes_on_the_slide_model():
+    """A non-zero offset is applied on top of the slide holder's nominal
+    position: the result is dual_overscan_geometry on
+    SLIDE_FIDUCIAL.shifted(offset), the FEEDL moves by the offset (+-1
+    for rounding) and the window (chunks, wire lines, margins) does not."""
+    for dpi in DPIS:
+        t = dual_tables(dpi)
+        for off in (-0.5, 0.3):
+            for n in range(1, 4):
+                g0, w0 = _slide_geom(n, dpi)
+                got = holder.slide_dual_geometry(
+                    n, dpi=dpi, lines_per_chunk=t.LINES_PER_CHUNK,
+                    colour_crop_lines=image.align_shift(dpi),
+                    default_wire_lines=t.DEFAULT_LINES, offset_mm=off)
+                want = holder.dual_overscan_geometry(
+                    n, dpi=dpi, lines_per_chunk=t.LINES_PER_CHUNK,
+                    colour_crop_lines=image.align_shift(dpi),
+                    default_wire_lines=t.DEFAULT_LINES,
+                    fiducial=holder.SLIDE_FIDUCIAL.shifted(off),
+                    overscan_mm=holder.SLIDE_OVERSCAN_MM, holder=holder.SLIDE)
+                assert got == want, (dpi, off, n)
+                g, w = got
+                assert abs((g.feedl - g0.feedl) - off / MM) <= 1, (dpi, off, n)
+                assert (g.chunks, w) == (g0.chunks, w0), (dpi, off, n)
+                assert g.leading_margin_mm == g0.leading_margin_mm
+    print("test_slide_position_offset_composes_on_the_slide_model OK")
+
+
+def test_slide_position_offset_still_checked():
+    """The shifted window keeps every slide check: the offset's own range
+    (ValueError) and slide 4's stricter FEEDL + travel bound, which a
+    +1 mm offset passes at 1200 dpi (175 steps of margin at offset 0)."""
+    t = dual_tables(1200)
+    kw = dict(dpi=1200, lines_per_chunk=t.LINES_PER_CHUNK,
+              colour_crop_lines=image.align_shift(1200),
+              default_wire_lines=t.DEFAULT_LINES)
+    for bad in (3.5, -3.5, float("nan")):
+        _raises(ValueError, holder.slide_dual_geometry, 1, offset_mm=bad, **kw)
+    _raises(safety.FeedlOutOfRangeError, holder.slide_dual_geometry, 4,
+            offset_mm=1.0, **kw)
+    holder.slide_dual_geometry(4, offset_mm=-1.0, **kw)
+    print("test_slide_position_offset_still_checked OK")
+
+
+def test_slide_wiring_uses_the_scanner_offset():
+    """Scanner.position_offset_mm reaches the slide FEEDL on the wire and
+    the diag records it; 0 leaves the wire as the default geometry."""
+    from tests.test_dual_overscan import _RecordingDualScanner
+    for dpi in (600, 3600):
+        t = dual_tables(dpi)
+        for off in (0.0, -0.5):
+            rec = _RecordingDualScanner(t)
+            rec.s.position_offset_mm = off
+            rec.s._scan_dual(t, frame=2, slide=True)
+            g, wire = holder.slide_dual_geometry(
+                2, dpi=dpi, lines_per_chunk=t.LINES_PER_CHUNK,
+                colour_crop_lines=image.align_shift(dpi),
+                default_wire_lines=t.DEFAULT_LINES, offset_mm=off)
+            assert _feedl_lines(rec.runs) == (g.feedl, wire), (dpi, off)
+            assert rec.s.last_diag["position_offset_mm"] == off
+            if off == 0.0:
+                assert g.feedl == _DEFAULT_LEDGER[dpi][2][0], dpi
+    print("test_slide_wiring_uses_the_scanner_offset OK")
+
+
+def test_device_scan_slide_offset_refused_before_any_phase():
+    """scan(slide=True) checks the offset-shifted window before the
+    operation: slide 4 at 1200 dpi with +1 mm is refused, no phase, zero
+    writes, session not failed."""
+    from tests.test_calibrate import MockUsbIo
+    s = Scanner(MockUsbIo({}))
+    s.position_offset_mm = 1.0
+    s._prepared_for_scan = True
+    phases = []
+    s._run_phase = lambda ph, **k: phases.append(ph.name) or [b""]  # type: ignore[method-assign]
+    s._exec_ops = lambda ops: phases.append("exec") or [b""]       # type: ignore[method-assign]
+    _raises(safety.FeedlOutOfRangeError, s.scan, frame=4, dpi=1200, slide=True)
+    assert phases == [] and s.session.writes == 0
+    assert s.session.state is not safety.SessionState.FAILED
+    print("test_device_scan_slide_offset_refused_before_any_phase OK")
+
+
+def test_cli_slide_offset_validated_before_hardware():
+    """CLI: --position-offset is checked with the slide geometry before
+    the device opens (exit 2, message names the offset and the slide)."""
+    from of135i import cli
+    assert cli._validate_overscan(holder.SLIDE_OVERSCAN_MM, [1, 2, 3, 4], dpi=1200,
+                                  dual=True, slide=True, offset_mm=-0.5) is None
+    msg = cli._validate_overscan(holder.SLIDE_OVERSCAN_MM, [4], dpi=1200,
+                                 dual=True, slide=True, offset_mm=1.0)
+    assert msg and "--position-offset 1.0 mm" in msg and "slide 4" in msg, msg
+    old = os.environ.pop(cli.POSITION_OFFSET_ENV, None)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            a = _cli_args(output=os.path.join(d, "roll.tiff"), dpi=1200, slide=4,
+                          position_offset=1.0)
+            rc, _, err = _run_cli(a)
+            assert rc == 2 and "--position-offset" in err, (rc, err)
+    finally:
+        if old is not None:
+            os.environ[cli.POSITION_OFFSET_ENV] = old
+    print("test_cli_slide_offset_validated_before_hardware OK")
+
+
 def main() -> int:
     tests = [
         test_slide_model_matches_documented_numbers,
@@ -635,6 +760,12 @@ def main() -> int:
         test_dark_b_fallback_plain_path_and_cache,
         test_dark_b_fallback_dual_path_and_strict_unchanged,
         test_cli_dark_b_fallback_provenance_in_sidecar,
+        test_slide_position_offset_zero_is_the_default_geometry,
+        test_slide_position_offset_composes_on_the_slide_model,
+        test_slide_position_offset_still_checked,
+        test_slide_wiring_uses_the_scanner_offset,
+        test_device_scan_slide_offset_refused_before_any_phase,
+        test_cli_slide_offset_validated_before_hardware,
     ]
     for t in tests:
         t()

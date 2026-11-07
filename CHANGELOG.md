@@ -6,15 +6,17 @@ one exists; "offline" means implemented and tested without the scanner.
 
 ## Unreleased
 
-- **SANE backend: file headers credit the gl124 files they started from.**
-  `gl126.cpp`, `gl126.h` and `gl126_registers.h` began as copies of the
-  genesys backend's gl124 files (docs/sane-port.md, stage 1) and named
-  only this project's author. They now carry "Portions derived from"
-  lines with the original copyright holders, Stéphane Voltz and Povilas
-  Kanapickas. The banner of the generated tables no longer says that
-  reads and polls are not reproduced (the op programs carry them). Both
-  are comment changes; no code differs. A stale docstring in
-  `of135i/vendor_derived.py` is corrected.
+- **Merged upstream v0.2.11; `--position-offset` composes with `scan
+  --slides`.** The per-unit offset is applied on top of the selected
+  holder's nominal position, for slides exactly as for strips:
+  `holder.slide_dual_geometry(offset_mm=)` computes the window on
+  `SLIDE_FIDUCIAL.shifted(offset)`, and the CLI pre-check, `scan()`'s
+  pre-operation check and `_scan_dual` all pass `Scanner.position_offset_mm`.
+  Every slide check (offset range, slide 4's FEEDL + travel bound) runs on
+  the shifted window, before anything is sent. At offset 0 (the default)
+  the slide windows are unchanged: `tests/test_slides.py` pins the
+  docs/slide-scanning.md ledger and the injected FEEDL/line count.
+  Offline only; no hardware run with an offset on the slide holder.
 - **`--cal-readback-guard fail` now also refuses on calibration integrity**
   (opt-in; EXPERIMENTAL, unverified on hardware). Besides the existing
   refusal when a read-back shows no acquisition (before the bulk read),
@@ -69,6 +71,83 @@ one exists; "offline" means implemented and tested without the scanner.
   empty when the read-back was abandoned. A failing extra read is logged and
   ignored; clean polls and every other timeout are untouched. Off, the
   transfer sequence is unchanged (wire fingerprints identical).
+
+## v0.2.11 — Second Scanner Gamble — 2026-11-06
+
+- **Release codename.** `of135i.__codename__` ("Second Scanner Gamble"
+  for this release) is printed by `of135i version` and recorded in the
+  sidecar's host block (`driver_codename`), so a report from another
+  unit names the release it ran. `tests/test_release_check.py` holds the
+  CHANGELOG heading, the version line and the sidecar to it.
+- **External reports from the second unit (test log, 2026-11-06).** The
+  cross-unit check, gated: 4 of 4 completed, exit 0, coverage verified at
+  frame 1 with the slide holder. SANE v9's magazine load, twice: one miss
+  with the known "transport ran, cassette not taken" signature, one load;
+  from the reg 0x32 write to the end of the load the backend's transfers
+  match the Python driver's on that unit. v9's scans there are pending.
+
+- **Per-unit position offset: `--position-offset MM` on `scan` and
+  `digitize` (issue #61).** The corrected mean mapping was fitted on one
+  scanner. On a third unit (the Steam Deck of issue #35) every frame sat
+  about 0.5 mm earlier in the scan window, on all six frames and both of
+  that user's holders, so frames 4 and 5 sat at the 0.15 mm floor
+  (leading margin 0.10–0.14 mm where refused) and were refused on some
+  strips and passed on others (sidecars of 2026-11-05, the test log's
+  external report). The flag moves every scan and sweep window
+  along the strip by a per-unit amount (`holder.FiducialModel.shifted`;
+  negative = earlier). Margins, window length and chunk count are
+  unchanged; the transport ceiling is checked after the shift, before
+  anything is sent; at most ±3 mm. The `OF135I_POSITION_OFFSET`
+  environment variable holds a unit's value as the default; the flag
+  overrides it. Recorded in the sidecar
+  (`position_offset_mm`, `cli.position_offset`) and in `sweep.json`. A
+  coverage failure whose two margins are known now ends with the value
+  that would centre the opening (e.g. `--position-offset -0.6` for that
+  unit's frame 4). Offline-verified (`tests/test_position_offset.py`,
+  17 tests) and hardware-verified on the owner's unit (Test 120: three
+  scans at 0, −0.3 and +0.3 mm, FEEDL moved by exactly the offset, the
+  margins followed it); not yet run on the unit it is for. Reported by
+  Krustenviech.
+- **`digitize --album NAME`: one folder per film, photographs numbered
+  01–36 through the strips (issue #65).** Each strip keeps its
+  `roll-NNN/` with the holder's `f1`–`f6`; the album `<out>/NAME/` holds
+  `NN.tiff` and `NN.diag.json` for every frame with film, numbered
+  gap-free in strip order. An empty opening takes no number; a frame
+  scanned but not delivered (coverage not verified) reserves its number
+  and is listed as missing in `NAME/index.json` until `recrop` delivers
+  it. The numbered files are hard links to the roll products; the album
+  is a view rebuilt from the manifest after every strip and by the new
+  `of135i album -o DIR NAME` command, so a `--force` re-run renumbers
+  what follows. 135 only. Offline-verified (`tests/test_album.py`, 5
+  tests). Requested by Krustenviech.
+- **`of135i recrop FILE...`: the cropped products from a frame's preserved
+  overscan files, without scanning again (issue #61).** A frame whose
+  coverage did not verify keeps only `fN.overscan.tiff` (and
+  `fN-ir.overscan.tiff`); most such frames hold the whole picture. The
+  command un-rotates those files, measures coverage as the scan did (IR
+  first on a dual frame), refuses an empty opening (the `digitize` rule;
+  `scan` does not check for film), crops both channels
+  to the same lines and writes `fN.tiff` and `fN-ir.tiff`, with a margin
+  floor the operator chooses (`--min-margin MM`, default the scan
+  commands' 0.15; `--force` accepts any located edge). Resolution and
+  rotation come from `fN.diag.json` (which now also records the command
+  that wrote it); a `scan --positive` frame is refused, a `digitize
+  --positive` one is not (its overscan is the negative); an existing
+  product needs `--overwrite`; `--dry-run` reports only. Exit 2 (a frame
+  not processed) outranks exit 4 (a margin failure). The
+  overscan files are never altered and dust removal is not repeated (the
+  visible overscan frame of a dual scan is already the cleaned image). A
+  `fN.recrop.json` records the run; the digitize manifest is not changed.
+  Offline-verified (`tests/test_recrop.py`, 7 tests).
+- **SANE backend: file headers credit the gl124 files they started from.**
+  `gl126.cpp`, `gl126.h` and `gl126_registers.h` began as copies of the
+  genesys backend's gl124 files (docs/sane-port.md, stage 1) and named
+  only this project's author. They now carry "Portions derived from"
+  lines with the original copyright holders, Stéphane Voltz and Povilas
+  Kanapickas. The banner of the generated tables no longer says that
+  reads and polls are not reproduced (the op programs carry them). Both
+  are comment changes; no code differs. A stale docstring in
+  `of135i/vendor_derived.py` is corrected.
 
 ## v0.2.10 — 2026-11-05
 
