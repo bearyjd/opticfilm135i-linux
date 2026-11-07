@@ -36,7 +36,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from . import aperture
+from . import aperture, holder
 
 MM_PER_INCH = 25.4
 
@@ -260,7 +260,8 @@ def position_offset_hint(coverage: ApertureCoverage, step_mm: float = 0.1,
     The margins are those of a scan that already had ``current_mm``
     applied, so the result is that value plus the further correction
     (offset = current_mm + (leading - trailing) / 2): the absolute value
-    for the next scan. None also when that equals ``current_mm``.
+    for the next scan. None also when that would exceed holder.POSITION_OFFSET_MAX_MM
+    (the CLI refuses it).
     A hint, not a measurement of the unit: one frame's margins also carry
     the load-to-load spread (docs/holder-position-design.md section 2.3).
     """
@@ -273,6 +274,8 @@ def position_offset_hint(coverage: ApertureCoverage, step_mm: float = 0.1,
     if correction == 0:
         return None
     offset = round(current_mm + correction, 3)
+    if abs(offset) > holder.POSITION_OFFSET_MAX_MM:
+        return None
     return {"off_centre_mm": (trail - lead) / 2.0, "offset_mm": offset}
 
 

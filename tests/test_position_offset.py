@@ -460,6 +460,22 @@ def test_hint_is_relative_to_the_offset_already_applied():
     print("test_hint_is_relative_to_the_offset_already_applied OK")
 
 
+def test_hint_beyond_the_offset_limit_is_not_given():
+    """The CLI refuses |offset| > POSITION_OFFSET_MAX_MM, so a hint past
+    it is withheld; exactly the limit is allowed."""
+    from of135i import cli
+    # lead - trail = +1.0 -> a further correction of +0.5 mm
+    cov = aperture_crop.ApertureCoverage(False, 0.0, 0.0, 1.5, 0.5, "x", 0.0)
+    assert aperture_crop.position_offset_hint(cov, current_mm=2.9) is None
+    assert cli._offset_hint(cov, 2.9) == ""
+    assert aperture_crop.position_offset_hint(cov, current_mm=2.5)["offset_mm"] == 3.0
+    assert aperture_crop.position_offset_hint(cov, current_mm=2.6) is None
+    neg = aperture_crop.ApertureCoverage(False, 0.0, 0.0, 0.5, 1.5, "x", 0.0)
+    assert aperture_crop.position_offset_hint(neg, current_mm=-2.5)["offset_mm"] == -3.0
+    assert aperture_crop.position_offset_hint(neg, current_mm=-2.9) is None
+    print("test_hint_beyond_the_offset_limit_is_not_given OK")
+
+
 def test_hint_from_the_second_units_margins():
     """Issue #61, roll-006 frame 4 at 3600 dpi: lead 0.1035 mm, trail
     1.2154 mm -> the opening sits 0.56 mm late, offset -0.6 centres it."""
@@ -608,6 +624,7 @@ def main():
         test_every_scan_body_hands_the_offset_to_the_scanner,
         test_sidecar_records_the_offset,
         test_hint_is_relative_to_the_offset_already_applied,
+        test_hint_beyond_the_offset_limit_is_not_given,
         test_hint_from_the_second_units_margins,
         test_failure_message_carries_the_hint,
         test_failure_message_carries_the_hint_on_the_dual_and_digitize_paths,
