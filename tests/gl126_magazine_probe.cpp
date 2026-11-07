@@ -59,6 +59,18 @@
              MARK <present <kind> <key>|absent>   (kind: released|ejected)
          Exit 0 whenever the scenario ran (a refusal is a valid outcome
          to assert on); 2 on a setup error.
+     magprobe replay <script> scan <dpi> <frame> [<fills>]
+         The scan of a recording (tests/golden/replay_s1_*.txt): sane_open,
+         the mark seeded "loaded", resolution <dpi> and frame <frame> set,
+         sane_start (calibration, positioning, the scan), sane_read to the
+         end, sane_cancel (park), sane_close; see cmd_replay().
+     magprobe replay <script> eject
+         "Eject film" in a fresh process whose mark says loaded.
+     magprobe replay <script> [twice]
+         "Load film" on a cold scanner with the wire answered from a
+         recording of a real unit (tests/pcap_to_replay.py's reply
+         script), every transfer matched against it; see cmd_replay()
+         and tests/test_sane_replay.py.
 */
 
 #include "sane/sane.h"
@@ -72,8 +84,13 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <fstream>
 #include <initializer_list>
+#include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -1198,6 +1215,528 @@ int cmd_scenario(int argc, char** argv)
     return 0;
 }
 
+/* ---- "replay": the magazine load against a recording of a real unit ----
+
+   magprobe replay <script> [twice]
+   magprobe replay <script> scan <dpi> <frame> [<fills>]
+
+   <script> is a reply script (tests/pcap_to_replay.py; the format is in
+   its docstring), e.g. tests/golden/replay_r1_backend.txt. Runs what the
+   recording ran: "Load film" in a fresh process on a cold scanner
+   (scanimage --load-film), cold start, OPEN, JOG, the edge wait, LOAD.
+   With "twice" it presses Load film a second time afterwards.
+
+   With "eject" it presses Eject film in a fresh process after a load
+   (the mark seeded loaded), the recording's session of an eject.
+
+   With "scan" it runs the scan of a recording instead (a session of
+   tests/pcap_to_replay.py --session): the magazine mark is set to
+   loaded, options resolution and frame set as the recording's
+   scanimage had them, then sane_start (offset and gain calibration,
+   shading, positioning, the scan), sane_read until the end of the
+   image, sane_cancel (the park) and sane_close. The script never carries
+   image data, so a bulk IN is answered with zeroes, or with the constant
+   stand-in of <fills> (replay_bulk_in); the values the backend computes
+   from the image data that the stand-in cannot reproduce -- the shading
+   tables -- are not in the script either: a bulk OUT is matched by its
+   length. Prints STARTSTATUS, READSTATUS (status and bytes read) and
+   PROGRESS.
+
+   Every transfer the backend sends is matched against the script:
+   control IN/OUT and bulk through the mock's hooks, and register
+   reads/writes too (TestScannerInterface::set_registers_on_wire(), as the
+   GL124-class control transfers the real interface sends), so the reads
+   of reg 0x01/0x101/0x3b/0x3c outside the op programs are answered from
+   the recording like everything else. A transfer's key is its kind and
+   setup (control: bmRequestType, bRequest, wValue, wIndex, wLength),
+   plus, for a control OUT, its data (a bulk OUT is matched by its length
+   alone: the script does not store the tables' bytes):
+
+   - It is answered from (consumes) the FIRST UNCONSUMED script entry with
+     the same key, wherever it is, not the entry at the backend's position;
+   - except a poll held past the recording: an IN whose previous backend
+     transfer had the same key, when the script has something else
+     unconsumed between the last entry of that key consumed and the next
+     one (on the unit the device moved on, here the backend is still
+     polling -- a best-effort poll spinning its wall-clock budget against
+     a no-op sleep, or a poll whose recorded reply a test changed). It is
+     answered with the last consumed entry's reply again and counted as
+     held, nothing consumed;
+   - anything else is a DIVERGENCE, a transfer the recording does not
+     contain: a key the script never has, a key whose entries are all
+     consumed, or an entry consumed out of the recorded order (the
+     backend reordered something the unit saw in another order). An
+     unanswerable IN reads as zeroes, as the plain mock answers.
+
+   Printed after the KEY/STATUS/XFER lines:
+       REPLAY consumed=<n> held=<n> divergences=<n> skipped=<n> tail=<n>
+       DIVERGE <reason>: <transfer>     the first divergence, then
+       BEFORE <transfer>                the backend's 5 transfers before it,
+       DIVERGE ...                      then the next ones (10 at most)
+       SKIPPED <script line>            up to 20 entries left unconsumed
+                                        before the last one consumed (the
+                                        recording has them, the backend
+                                        never sent them)
+   tail = the entries after the last one consumed, never reached. Then
+   TEXT, MARK and EDGEWRITE as for "scenario". */
+
+struct ReplayEntry
+{
+    std::string key;
+    std::string text;     // the script line, run suffix dropped
+    unsigned index = 0;   // the recording's transfer index
+    std::vector<std::uint8_t> data;
+    bool consumed = false;
+};
+
+struct Replay
+{
+    std::vector<ReplayEntry> entries;
+    std::map<std::string, std::deque<std::size_t>> queues;
+    std::map<std::string, std::size_t> last_consumed;
+    std::string prev_key;
+    bool prev_held = false;
+    bool have_last = false;
+    std::size_t last_pos = 0;
+    std::size_t high_water = 0;
+    unsigned consumed = 0;
+    unsigned held = 0;
+    unsigned divergences = 0;
+    std::vector<std::string> divergence_lines;   // the first 10
+    std::vector<std::string> before_divergence;
+    std::deque<std::string> recent;
+};
+
+Replay g_replay;
+
+std::string hex_of(const std::uint8_t* data, std::size_t len)
+{
+    std::string out;
+    char b[4];
+    for (std::size_t i = 0; i < len; ++i) {
+        std::snprintf(b, sizeof(b), "%02x", data[i]);
+        out += b;
+    }
+    return out.empty() ? "-" : out;
+}
+
+std::string control_key(const char* kind, int bm, int request, int value, int index, int length)
+{
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s %02x %02x %04x %04x %d", kind, bm, request, value, index,
+                  length);
+    return buf;
+}
+
+/* One script line into an entry (or entries, for a run). Returns false
+   on a line it cannot read. */
+bool parse_replay_line(const std::string& line, Replay& r)
+{
+    std::istringstream in(line);
+    std::vector<std::string> tok;
+    for (std::string t; in >> t; ) {
+        tok.push_back(t);
+    }
+    if (tok.empty() || tok[0][0] == '#' || tok[0] == "GAP") {
+        return true;
+    }
+    unsigned count = 1;
+    while (tok.size() > 3 && (tok.back()[0] == 'x' || tok.back().compare(0, 3, "st=") == 0 ||
+                              tok.back().compare(0, 6, "every=") == 0)) {
+        if (tok.back()[0] == 'x') {
+            count = static_cast<unsigned>(std::stoul(tok.back().substr(1)));
+        }
+        tok.pop_back();
+    }
+    ReplayEntry e;
+    e.index = static_cast<unsigned>(std::stoul(tok[0]));
+    const std::string& kind = tok[1];
+    const std::string& hex = tok.back();
+    if (hex != "-" && hex != "~") {   // "~": a bulk OUT's bytes, not stored
+        for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
+            e.data.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+        }
+    }
+    if ((kind == "CI" || kind == "CO") && tok.size() == 8) {
+        e.key = control_key(kind.c_str(), std::stoi(tok[2], nullptr, 16),
+                            std::stoi(tok[3], nullptr, 16), std::stoi(tok[4], nullptr, 16),
+                            std::stoi(tok[5], nullptr, 16), std::stoi(tok[6]));
+        if (kind == "CO") {
+            e.key += " " + hex;
+        }
+    } else if ((kind == "BO" || kind == "BI" || kind == "II" || kind == "IO") && tok.size() == 5) {
+        e.key = kind + " " + tok[3] + std::string();
+    } else {
+        return false;
+    }
+    for (std::size_t i = 2; i < tok.size(); ++i) {
+        e.text += (i > 2 ? " " : "") + tok[i];
+    }
+    e.text = kind + " " + e.text;
+    for (unsigned k = 0; k < count; ++k) {
+        ReplayEntry copy = e;
+        copy.index = e.index + k;
+        r.queues[copy.key].push_back(r.entries.size());
+        r.entries.push_back(copy);
+    }
+    return true;
+}
+
+void replay_note(const std::string& shown)
+{
+    g_replay.recent.push_back(shown);
+    if (g_replay.recent.size() > 5) {
+        g_replay.recent.pop_front();
+    }
+}
+
+void replay_diverge(const std::string& reason, const std::string& shown)
+{
+    if (g_replay.divergences++ == 0) {
+        g_replay.before_divergence.assign(g_replay.recent.begin(), g_replay.recent.end());
+    }
+    if (g_replay.divergence_lines.size() < 10) {
+        g_replay.divergence_lines.push_back(reason + ": " + shown);
+    }
+}
+
+/* The matching rules of the comment above; the entry answering this
+   transfer, or nullptr. */
+const ReplayEntry* replay_match(const std::string& key, bool is_in, const std::string& shown)
+{
+    Replay& r = g_replay;
+    bool same_as_prev = r.prev_key == key;
+    r.prev_key = key;
+    if (is_in && same_as_prev) {
+        auto lc = r.last_consumed.find(key);
+        if (r.prev_held) {
+            ++r.held;
+            return &r.entries[lc->second];
+        }
+        if (lc != r.last_consumed.end()) {
+            const std::deque<std::size_t>& q = r.queues[key];
+            bool moved_on = q.empty();
+            for (std::size_t p = lc->second + 1; !moved_on && p < q.front(); ++p) {
+                moved_on = !r.entries[p].consumed;
+            }
+            if (moved_on) {
+                r.prev_held = true;
+                ++r.held;
+                return &r.entries[lc->second];
+            }
+        }
+    }
+    r.prev_held = false;
+    auto it = r.queues.find(key);
+    if (it == r.queues.end() || it->second.empty()) {
+        replay_diverge(it == r.queues.end() ? "not in the recording"
+                                            : "every recorded one already answered", shown);
+        return nullptr;
+    }
+    std::size_t pos = it->second.front();
+    it->second.pop_front();
+    ReplayEntry& e = r.entries[pos];
+    e.consumed = true;
+    r.last_consumed[key] = pos;
+    ++r.consumed;
+    if (r.have_last && pos < r.last_pos) {
+        replay_diverge("out of the recorded order (recorded #" + std::to_string(e.index) +
+                       ", after #" + std::to_string(r.entries[r.last_pos].index) + ")", shown);
+    }
+    r.have_last = true;
+    r.last_pos = pos;
+    r.high_water = std::max(r.high_water, pos + 1);
+    return &e;
+}
+
+void replay_control_in(int request, int value, int index, int length, std::uint8_t* data)
+{
+    std::string key = control_key("CI", REQUEST_TYPE_IN, request, value, index, length);
+    const ReplayEntry* e = replay_match(key, true, key);
+    if (e != nullptr) {
+        std::size_t n = std::min(e->data.size(), static_cast<std::size_t>(length));
+        std::copy(e->data.begin(), e->data.begin() + n, data);
+    }
+    replay_note(key + " -> " + hex_of(data, static_cast<std::size_t>(length)));
+}
+
+/* The stand-in image data for the recording's bulk INs (the scan replay
+   only): a fills file, one line per run of the recording's bulk-IN entries,
+
+       <first idx>-<last idx> <R> <G> <B>        # or a single <idx>
+
+   each a 16-bit channel value. A bulk IN the file names is answered with
+   RGB16LE pixels of that constant, so the backend's per-channel means,
+   peaks and so the AFE codes it computes are the recording's. Every other
+   bulk IN reads zeroes. The values are statistics the backend logged for
+   the calibration frames (gl126: offset/white/gain-check/shading means),
+   never bytes of the pcap. */
+struct Fill
+{
+    unsigned first = 0;
+    unsigned last = 0;
+    std::uint16_t rgb[3] = {0, 0, 0};
+    unsigned spread = 0;     // +-spread around the value, mean-preserving
+    std::size_t bytes = 0;   // handed out so far: the pixel phase carries over
+};
+std::vector<Fill> g_fills;
+
+bool load_fills(const char* path)
+{
+    std::ifstream file(path);
+    if (!file) {
+        return false;
+    }
+    for (std::string line; std::getline(file, line); ) {
+        line = line.substr(0, line.find('#'));
+        std::istringstream in(line);
+        std::string span;
+        unsigned v[3];
+        if (!(in >> span)) {
+            continue;
+        }
+        if (!(in >> v[0] >> v[1] >> v[2])) {
+            return false;
+        }
+        Fill f;
+        std::size_t dash = span.find('-');
+        f.first = static_cast<unsigned>(std::stoul(span.substr(0, dash)));
+        f.last = dash == std::string::npos ? f.first
+                                           : static_cast<unsigned>(std::stoul(span.substr(dash + 1)));
+        for (int c = 0; c < 3; ++c) {
+            f.rgb[c] = static_cast<std::uint16_t>(v[c]);
+        }
+        if (!(in >> f.spread)) {
+            f.spread = 0;
+        }
+        g_fills.push_back(f);
+    }
+    return true;
+}
+
+void replay_bulk_in(std::size_t length, std::uint8_t* data)
+{
+    std::string key = "BI " + std::to_string(length);
+    const ReplayEntry* e = replay_match(key, true, key);
+    replay_note(key);
+    if (e == nullptr) {
+        return;
+    }
+    for (Fill& f : g_fills) {
+        if (e->index < f.first || e->index > f.last) {
+            continue;
+        }
+        for (std::size_t i = 0; i + 1 < length; i += 2) {
+            std::size_t sample = (f.bytes + i) / 2;
+            int wobble = f.spread == 0 ? 0
+                : static_cast<int>((sample / 3) % (2 * f.spread + 1)) - static_cast<int>(f.spread);
+            std::uint16_t v = static_cast<std::uint16_t>(f.rgb[sample % 3] + wobble);
+            data[i] = static_cast<std::uint8_t>(v & 0xff);
+            data[i + 1] = static_cast<std::uint8_t>(v >> 8);
+        }
+        f.bytes += length;
+        return;
+    }
+}
+
+void replay_transfer(TestUsbDevice::Transfer kind, int request, int value, int index,
+                     std::size_t length, const std::uint8_t* data)
+{
+    std::string key;
+    if (kind == TestUsbDevice::Transfer::ControlOut) {
+        key = control_key("CO", REQUEST_TYPE_OUT, request, value, index,
+                          static_cast<int>(length)) + " " + hex_of(data, length);
+    } else if (kind == TestUsbDevice::Transfer::BulkOut) {
+        key = "BO " + std::to_string(length);
+    } else {
+        return;   // a bulk IN is matched in replay_bulk_in(), which answers it
+    }
+    replay_match(key, false, key);
+    replay_note(key.size() > 80 ? key.substr(0, 80) + "..." : key);
+}
+
+void print_replay_summary()
+{
+    const Replay& r = g_replay;
+    unsigned skipped = 0;
+    unsigned tail = 0;
+    std::vector<std::string> skipped_lines;
+    for (std::size_t p = 0; p < r.entries.size(); ++p) {
+        if (r.entries[p].consumed) {
+            continue;
+        }
+        if (p < r.high_water) {
+            ++skipped;
+            if (skipped_lines.size() < 20) {
+                skipped_lines.push_back(std::to_string(r.entries[p].index) + " " +
+                                        r.entries[p].text.substr(0, 100));
+            }
+        } else {
+            ++tail;
+        }
+    }
+    std::printf("REPLAY consumed=%u held=%u divergences=%u skipped=%u tail=%u\n", r.consumed,
+                r.held, r.divergences, skipped, tail);
+    for (std::size_t i = 0; i < r.divergence_lines.size(); ++i) {
+        std::printf("DIVERGE %s\n", r.divergence_lines[i].c_str());
+        if (i == 0) {
+            for (const std::string& b : r.before_divergence) {
+                std::printf("BEFORE %s\n", b.c_str());
+            }
+        }
+    }
+    for (const std::string& s : skipped_lines) {
+        std::printf("SKIPPED %s\n", s.c_str());
+    }
+}
+
+/* The scan of a recording (cmd_replay "scan"): see the comment above.
+   Genesys's test mode does not read the image: sane_read only counts
+   bytes (genesys.cpp, sane_read_impl), so the scan pass's chunk reads
+   are made here, straight through the backend's read_image_chunk_usb(),
+   the call the image pipeline makes on hardware. The chunk is the
+   recording's largest bulk IN. */
+void replay_scan(SANE_Handle h, Genesys_Device* dev, int dpi, int frame)
+{
+    set_int(h, "resolution", dpi);
+    set_int(h, "frame", frame);
+    gl126::magazine_mark_write(gl126::MagazineMarkKind::Loaded, dev->file_name);
+    SANE_Status st = SANE_STATUS_GOOD;
+    std::string msg;
+    try {
+        st = sane_start(h);
+    } catch (const SaneException& e) {
+        st = e.status();
+        msg = e.what();
+    }
+    std::printf("STARTSTATUS %d %s\n", static_cast<int>(st), msg.c_str());
+    std::size_t chunk = 0;
+    for (const ReplayEntry& e : g_replay.entries) {
+        if (e.key.compare(0, 3, "BI ") == 0) {
+            chunk = std::max(chunk, static_cast<std::size_t>(std::stoul(e.key.substr(3))));
+        }
+    }
+    std::size_t expected = dev->session.output_line_bytes_raw * dev->session.optical_line_count;
+    std::size_t done = 0;
+    unsigned chunks = 0;
+    if (st == SANE_STATUS_GOOD && chunk > 0) {
+        std::vector<std::uint8_t> buf(chunk);
+        try {
+            while (done < expected) {
+                std::size_t n = std::min(chunk, expected - done);
+                gl126::read_image_chunk_usb(dev, buf.data(), n);
+                done += n;
+                ++chunks;
+            }
+        } catch (const SaneException& e) {
+            msg = e.what();
+        }
+    }
+    std::printf("CHUNKS %u %zu %zu %s\n", chunks, done, expected, msg.c_str());
+    std::printf("PROGRESS %s\n", progress_of(dev).c_str());
+    try {
+        sane_cancel(h);   // end_scan: the park
+    } catch (const SaneException& e) {
+        std::printf("CANCEL %s\n", e.what());
+    }
+}
+
+int cmd_replay(int argc, char** argv)
+{
+    if (argc < 3) {
+        std::fprintf(stderr, "usage: magprobe replay <script> [twice]\n");
+        return 2;
+    }
+    bool twice = argc > 3 && std::strcmp(argv[3], "twice") == 0;
+    bool scan = argc > 3 && std::strcmp(argv[3], "scan") == 0;
+    bool eject = argc > 3 && std::strcmp(argv[3], "eject") == 0;
+    if (scan && argc != 6 && argc != 7) {
+        std::fprintf(stderr, "usage: magprobe replay <script> scan <dpi> <frame> [<fills>]\n");
+        return 2;
+    }
+    if (scan && argc == 7 && !load_fills(argv[6])) {
+        std::fprintf(stderr, "cannot read the fills %s\n", argv[6]);
+        return 2;
+    }
+    std::ifstream file(argv[2]);
+    if (!file) {
+        std::fprintf(stderr, "cannot read %s\n", argv[2]);
+        return 2;
+    }
+    for (std::string line; std::getline(file, line); ) {
+        if (!parse_replay_line(line, g_replay)) {
+            std::fprintf(stderr, "bad script line: %s\n", line.c_str());
+            return 2;
+        }
+    }
+
+    enable_testing_mode(0x07b3, 0x1436, 0x0000, TestCheckpointCallback(checkpoint_callback));
+    SANE_Int version = 0;
+    if (sane_init(&version, nullptr) != SANE_STATUS_GOOD) {
+        std::fprintf(stderr, "sane_init failed\n");
+        return 2;
+    }
+    std::string devname = get_testing_device_name();
+    SANE_Handle h = nullptr;
+    if (sane_open(devname.c_str(), &h) != SANE_STATUS_GOOD) {
+        std::fprintf(stderr, "sane_open(%s) failed\n", devname.c_str());
+        sane_exit();
+        return 2;
+    }
+    Genesys_Device* dev = reinterpret_cast<Genesys_Scanner*>(h)->dev;
+    std::printf("KEY %s\n", dev->file_name.c_str());
+    auto* iface = dynamic_cast<TestScannerInterface*>(dev->interface.get());
+    TestUsbDevice& usb = iface->test_usb_device();
+    usb.set_control_in_reply(replay_control_in);
+    usb.set_transfer_observer(replay_transfer);
+    usb.set_bulk_in_reply(replay_bulk_in);
+    iface->set_registers_on_wire(true);
+    usb.set_record_transfers(!scan);   // a scan's image bytes would be logged in hex
+
+    // sane_open's own reg 0x01 read (genesys init(), "reg 0x01 = 0x00
+    // (cold, never homed), nothing written" in the recording's log) went
+    // to the wire on the unit before this mock could be scripted; made
+    // again here so the script's first reg 0x01 reply goes to it, not to
+    // the load's own first read.
+    iface->read_register(0x01);
+
+    if (scan) {
+        replay_scan(h, dev, std::atoi(argv[4]), std::atoi(argv[5]));
+        print_text(h);
+        print_mark();
+        sane_close(h);   // with the hooks still set: what close sends is matched too
+        h = nullptr;
+    } else if (eject) {
+        gl126::magazine_mark_write(gl126::MagazineMarkKind::Loaded, dev->file_name);
+        call_hook(dev, "eject");
+    } else {
+        call_hook(dev, "release");
+        if (twice) {
+            call_hook(dev, "release");
+        }
+    }
+    for (const std::string& line : usb.transfer_log()) {
+        std::printf("XFER %s\n", line.c_str());
+    }
+    usb.set_record_transfers(false);
+    iface->set_registers_on_wire(false);
+    usb.set_control_in_reply(nullptr);
+    usb.set_transfer_observer(nullptr);
+    usb.set_bulk_in_reply(nullptr);
+    print_replay_summary();
+
+    if (h != nullptr) {
+        print_text(h);
+        print_mark();
+    }
+    std::printf("EDGEWRITE %d\n", g_edge_write_violation ? 1 : 0);
+    if (h != nullptr) {
+        sane_close(h);
+    }
+    sane_exit();
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1216,10 +1755,13 @@ int main(int argc, char** argv)
         if (std::strcmp(argv[1], "scenario") == 0) {
             return cmd_scenario(argc, argv);
         }
+        if (std::strcmp(argv[1], "replay") == 0) {
+            return cmd_replay(argc, argv);
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "ERROR %s\n", e.what());
         return 2;
     }
-    std::fprintf(stderr, "usage: magprobe options|layout|scenario ...\n");
+    std::fprintf(stderr, "usage: magprobe options|layout|scenario|replay ...\n");
     return 2;
 }

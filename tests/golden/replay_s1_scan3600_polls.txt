@@ -1,0 +1,25 @@
+# poll lines of the backend's own 3600 dpi frame 4 scan on the owner's unit (s3600.log, 2026-11-06), the host's ms dropped; the replay must print the same
+gl126: cal_dark_a op 16 poll: first 0xcd last 0xcd, 1 polls
+gl126: cal_dark_a op 27 poll: first 0xf3 last 0xf0, 6 polls
+gl126: cal_dark_a op 28 poll: first 0xdc last 0xdc, 1 polls
+gl126: cal_dark_b op 16 poll: first 0xcd last 0xcd, 1 polls
+gl126: cal_dark_b op 27 poll: first 0xf3 last 0xf0, 6 polls
+gl126: cal_dark_b op 28 poll: first 0xdc last 0xdc, 1 polls
+gl126: cal_white op 57 poll: first 0xcd last 0xcd, 1 polls
+gl126: cal_white op 70 poll: first 0xf3 last 0xf0, 6 polls
+gl126: cal_white op 71 poll: first 0xdc last 0xdc, 1 polls
+gl126: cal_gain_check_a op 24 poll: first 0xcd last 0xcd, 1 polls
+gl126: cal_gain_check_a op 35 poll: first 0xf3 last 0xf0, 6 polls
+gl126: cal_gain_check_a op 36 poll: first 0xdc last 0xdc, 1 polls
+gl126: cal_gain_check_b op 16 poll: first 0xcd last 0xcd, 1 polls
+gl126: cal_gain_check_b op 27 poll: first 0xf3 last 0xf0, 6 polls
+gl126: cal_gain_check_b op 28 poll: first 0xdc last 0xdc, 1 polls
+gl126: cal_shading_measure op 55 poll: first 0xc9 last 0xc9, 1 polls
+gl126: cal_shading_measure op 448 poll: first 0xf3 last 0xf0, 5 polls
+gl126: cal_shading_measure op 449 poll: first 0xd8 last 0xd8, 1 polls
+gl126: cal_shading_verify op 50 poll: first 0xcd last 0xcd, 1 polls
+gl126: cal_shading_verify op 443 poll: first 0xf3 last 0xf0, 7 polls
+gl126: cal_shading_verify op 444 poll: first 0xdc last 0xdc, 1 polls
+gl126: position op 47 poll: first 0xdd last 0xf5, 1795 polls
+gl126: park op 13 poll: first 0xfb last 0xfb, 1 polls
+gl126: park op 15 poll: first 0x81 last 0xe8, 2271 polls

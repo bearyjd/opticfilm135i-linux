@@ -1,0 +1,12 @@
+# Stand-in image data for tests/golden/replay_s1_scan3600.txt, built as
+# replay_s1_scan600_fills.txt is, from s3600.log.
+# dark_a, dark_b
+9917 23113 29294 24954 32
+9951 25644 31819 27501 32
+# cal_white
+10026-10028 23555 31801 25925
+# gain check A, B
+10070 53221 50667 51344 32
+10104 59042 55029 56624 32
+# cal_shading_verify
+10632-11014 57259 55940 55643

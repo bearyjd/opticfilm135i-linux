@@ -1,0 +1,18 @@
+# Stand-in image data for tests/golden/replay_s1_scan600.txt (magprobe replay
+# <script> scan 600 4 <this>; format: gl126_magazine_probe.cpp, replay_bulk_in).
+# The pcap's bulk-IN bytes are never kept; these are constants built from the
+# MEANS the backend logged for each calibration frame on the unit (s600.log
+# "gl126: offset ... dark_a mean", "white measurement ... peaks", "gain check
+# ... means", "shading white measurement"), rounded to whole counts.
+# <first idx>-<last idx>  R G B  [spread]
+# dark_a, dark_b
+4354 21658 24030 22458 32
+4386 24175 26541 24974 32
+# cal_white (the visible line's peaks; the IR half is not consulted)
+4457-4462 24198 31162 26387
+# gain check A, B
+4502 48323 42536 44920 32
+4534 53972 47022 50011 32
+# cal_shading_verify: the visible lines' means for all of it, the IR lines'
+# (47462 36099 42051) not told apart
+4938-5189 50204 51381 49058
