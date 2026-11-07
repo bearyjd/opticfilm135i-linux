@@ -591,8 +591,8 @@ def dual_overscan_geometry(
 # The mounted-slide holder's four openings, positioned with the SAME
 # corrected mapping and the SAME POSITION/scan/PARK path as the strip
 # frames -- only the fiducial model (where the opening is, how long it
-# is) differs. docs/slide-holder-analysis.md section 5 and
-# docs/slide-scanning.md.
+# is) differs. docs/slide-holder-analysis.md section 5 (the grid) and
+# docs/test-log.md Test 84.
 #
 # Source numbers (docs/test-log.md Test 84, n = 1 load, "600-dual
 # coordinate" = commanded FEEDL + 12 x delivered line):
@@ -644,11 +644,10 @@ SLIDE_FIDUCIAL = FiducialModel(
 
 #: Default overscan per side for slides, mm. The strip default (0.75 mm,
 #: OVERSCAN_MM) is sized around a ~36 mm aperture; the slide opening is
-#: 38.05 mm, and a real 2026-10 scan of opening 1 through strip frame 1
-#: left only ~0.6 mm of holder plastic per side. Slides also carry more
-#: position uncertainty than strips: the grid is n = 1 load (plus that
-#: scan), opening 1 is extrapolated (+-0.1 mm), the load-to-load spread is
-#: +-0.24 mm (Test 56) and a mount can sit off-centre in its opening.
+#: 38.05 mm, so a strip-sized margin leaves little holder plastic either
+#: side of the opening. Slides also carry more position uncertainty than
+#: strips: the grid is n = 1 load, opening 1 is extrapolated (+-0.1 mm),
+#: the load-to-load spread is +-0.24 mm (Test 56) and a mount can sit off-centre in its opening.
 #: 1.5 mm is twice the strip margin and > 4x that position uncertainty.
 #: It is also bounded from above by slide 4's travel check
 #: (slide_dual_geometry): FEEDL + wire travel must stay <= FEEDL_CEILING,
@@ -672,13 +671,6 @@ def slide_dual_geometry(
 ) -> tuple[OverscanGeometry, int]:
     """dual_overscan_geometry() for slide-holder opening ``slide`` (1-4).
 
-    ``offset_mm`` is the per-unit position offset (--position-offset,
-    Scanner.position_offset_mm), applied exactly as for strips: on top of
-    the selected holder's nominal position, i.e. the window is computed
-    on SLIDE_FIDUCIAL.shifted(offset_mm). 0.0 (the default) is
-    SLIDE_FIDUCIAL itself, so the slide windows are unchanged. All the
-    checks below run on the shifted window.
-
     Same arithmetic, same checks (slide number against SLIDE.frames, the
     model end position and the FEEDL against FEEDL_CEILING), plus one
     STRICTER travel check that only the slide path gets: the commanded
@@ -693,6 +685,11 @@ def slide_dual_geometry(
     (FrameOutOfRangeError / FeedlOutOfRangeError) before any write, like
     every other geometry check; a non-positive or non-finite overscan, or
     a window of fewer than one chunk, is a ValueError.
+
+    ``offset_mm`` is the per-unit position offset (``--position-offset``,
+    issue #61), passed to dual_overscan_geometry() which shifts the slide
+    model by it. The travel check below runs on the SHIFTED FEEDL, so a
+    positive offset that pushes slide 4 past the ceiling is refused.
     """
     if not (isinstance(overscan_mm, (int, float)) and math.isfinite(overscan_mm)
             and overscan_mm > 0):

@@ -8767,3 +8767,136 @@ of the miss. The one difference between the flows: the Python driver
 runs LOAD on Enter, the backend about a second after it sees the
 magazine back in. bearyjd's logging patch is held for the next SANE
 revision; v9 stays as tested.
+
+## 2026-11-07 — External report (issue #50): SANE v9 through its whole test table on the second unit — load, 600 dpi, plain 3600 dpi and eject completed; every one of the fourteen reg 0x100 gate polls found the engine still running at the first read and waited 9–26 ms; no timeout
+
+Not run by the owner. Reported by bearyjd on issue #50 (comment of
+2026-11-07, 00:41Z) with the four `scanimage` logs and the extracted
+`poll:` lines in a gist (no images); this entry is the owner's side
+reading those files. Hardware: bearyjd's unit and host (bare metal, a
+passive usbmon capture alongside, not sent because it holds image data),
+slide holder, frame 4, the v9 tree plus bearyjd's logging patch 0001
+(`sane-backends 1.4.0.361-18bea9-dirty`; the patch adds no transfers,
+see the entry of 2026-11-06), run uninstalled. Scanner power-cycled
+first, magazine loose in the slot. Steps 3 to 6 of the v9 table, in
+order, on 2026-11-06 evening (host clock 19:28–19:33). Exit codes were
+not captured; every step wrote its output and no log holds an error
+line beyond the old harmless "Cannot open calibration for writing".
+
+| step | command | result |
+|---|---|---|
+| 3 | `scanimage -d $D -n --load-film` | loaded: cold start and jog completed, edge seen after 36 polls (~3.6 s, `last reg 0x101 0xf8`), after the settle `reg 0x101 = 0xf8, reg 0x01 = 0x22, regs 0x3b/0x3c = 0x00/0x00`, load op 0 `reg 0x32 = 0x1f`, op 24 `0xf4` at the first read, op 38 34 polls / 146 ms, `reg 0x101 = 0xdc`. Pushed in with one motion and left, as advised |
+| 4 | `--mode Color --frame 4 --resolution 600` | completed, 4.9 MB PNM (picture not inspected; off-centre on a slide is expected) |
+| 5 | the same at `--resolution 3600` (plain 3600) | completed, 119 MB PNM |
+| 6 | `scanimage -d $D -n --eject-film` | ejected, eject completion 213 polls / 940 ms |
+
+With run 1 (miss) and run 2 (load) of the previous entry this is three
+`--load-film` runs of v9 on this unit: two loaded after a firm
+push-and-leave, one missed.
+
+**The gate polls.** Each scan has fourteen: after each of the seven
+calibration acquisitions, reg 0x100 then reg 0x101, bit 0 clear wanted
+(`PollMasked`, 300 ms; the plain-3600 `cal_shading_measure` reg 0x100
+site 0xF1/0xF0 with 5 s). The seven reg 0x101 polls settled at the first
+read in both scans (0xdc, or 0xd8 after `cal_shading_measure`). **All
+fourteen reg 0x100 polls found bit 0 set at the first read** and waited:
+
+| phase | 600 dpi: first → last, polls, ms | plain 3600: first → last, polls, ms |
+|---|---|---|
+| cal_dark_a | 0xf1 → 0xf0, 4, 14 | 0xf3 → 0xf0, 6, 22 |
+| cal_dark_b | 0xf1 → 0xf0, 4, 14 | 0xf3 → 0xf0, 6, 21 |
+| cal_white | 0xf1 → 0xf0, 4, 14 | 0xf3 → 0xf0, 6, 22 |
+| cal_gain_check_a | 0xf1 → 0xf0, 4, 14 | 0xf3 → 0xf0, 6, 22 |
+| cal_gain_check_b | 0xf1 → 0xf0, 4, 14 | 0xf3 → 0xf0, 6, 23 |
+| cal_shading_measure | 0xf1 → 0xf0, 3, 9 | 0xf3 → 0xf0, 5, 17 |
+| cal_shading_verify | 0xf1 → 0xf0, 4, 14 | 0xf3 → 0xf0, 7, 26 |
+
+No poll timed out; no "the previous acquisition did not stop", no
+"dark_b is residual". At plain 3600 the first read is 0xf3, not 0xf1:
+bit 1 is also set right after the clear on this unit; it is outside the
+mask and clears with bit 0.
+
+**Against the owner's unit (Test 118).** On the owner's host 25 of 28
+gate polls settled at the first read and three waited 11–18 ms, because
+one control transfer there takes about 4 ms and the first read lands
+after the engine has stopped. On this host a control transfer takes a
+fraction of that, the first read lands while the engine is still
+running, and v8 (plain reads, logged only) would have gone on into the
+next acquisition at every one of the fourteen sites per scan: the same
+mechanism that produced the residual dark_b in the Python driver on this
+unit and on the Steam Deck (entries of 2026-11-04 and 2026-11-05). So
+this run is the first on a unit that showed the failure, and the first
+where every gate wait did work. The wait times (9–26 ms) match the
+Python gate's on the same unit (5.0–24.4 ms, median 14.0, 2026-11-04 entry).
+
+**Calibration, both units at frame 4 vs frame 1 (offsets as codes):**
+
+| | bearyjd 600 | owner 600 (Test 118, f1) | bearyjd plain 3600 | owner plain 3600 (Test 118, f1) |
+|---|---|---|---|---|
+| offset R/G/B | 0x10a/0x109/0x10a | 266/265/266 (= 0x10a/0x109/0x10a) | 0x10a/0x109/0x10a | 266/266/266 |
+| gain R/G/B | 0x2a/0x21/0x26 (42/33/38) | 44/33/39 | 0x2b/0x20/0x27 (43/32/39) | 45/32/39 |
+| POSITION | 7917 ms (frame 4, FEEDL 38809) | 1433 ms (frame 1) | 7913 ms (FEEDL 38806) | 1439 ms |
+| PARK | 10378 ms | 3840 ms | 10269 ms | 3770 ms |
+
+The offsets are identical, the gains within two codes, as in every
+cross-unit comparison so far. Shading tables at 600 dpi: 2628 pairs,
+white gains to 0xffff on both visible and IR lines (slide holder, frame
+4: the backend has no slide profile and the white reference is read
+where the strip holder's would be; the gain ceiling is expected there
+and is not a finding about the gate).
+
+**Consequences.** The v9 tree has now run on hardware on two units: the
+owner's (Test 118, the development clone's build of the same sources)
+and bearyjd's (the v9 tree's own build, plus logging). Nothing in v9
+changes. The next step is the owner's: push `wp3-gl126-submission-v9` to
+the merge request (`docs/sane-wp3-submission.md`). bearyjd offers a 7200
+dpi run and more load/eject cycles with the logging build; neither is
+needed for v9. Open from the entry of 2026-11-06: why bit 0x08 stayed set
+in load run 1.
+
+## 2026-11-07 — Offline check, PR #66 (bearyjd): dust cleaning scaled by resolution on the Test 84 and Test 85 slide scans — 3600 dpi byte-identical to master, 600 dpi mask 28.8 % → 6.0 %, eye check: clearly better, nothing destroyed
+
+No scanner contact. The contributor's change (`image.dust_mask()` and
+`image.remove_dust()` take `dpi` and scale every footprint from the
+3600 dpi sizes to the profile's physical sampling) run against master
+on existing private scans, before the merge. Interpreter: the
+repository venv; the contributor's own suites passed (`test_ir` 9,
+`test_offline` 50) and `tools/release_check.py` was FULL (768 passed,
+0 skipped) on the branch merged with master.
+
+**3600 dpi (Test 85, the slide after brushing, `dia1.overscan.tiff`
++ `-ir`, 8-bit products, a 3000-line band around the middle, same band
+for both runs, memory-capped):** mask 3.610 % on both; mask and cleaned
+band SHA-256 identical between master and the branch. The pinned hashes
+in the new `test_dust_removal_3600_backwards_compatible` were also
+recomputed with master's code by a separate script and match.
+
+**600 dpi (Test 84, the six dual-600 windows of the slide holder with
+one slide in opening 1, `f-f1..f6.overscan.tiff` + `-ir`, 927 × 876,
+8-bit):**
+
+| window | content | IR median | mask master | mask branch |
+|---|---|---|---|---|
+| f1 | the slide | 171 | 28.83 % | 6.00 % |
+| f2 | slide end / holder plastic | 4 | 53.22 % | 29.06 % |
+| f3 | holder plastic, opening edge | 6 | 0.00 % | 22.40 % |
+| f4 | holder plastic | 13 | 0.00 % | 12.41 % |
+| f5 | holder plastic | 4 | 50.50 % | 26.61 % |
+| f6 | empty opening | 215 | 0.00 % | 0.00 % |
+
+Only f1 holds a picture. There master's mask is blobs that merge over
+the picture and its fill smears the tree line and the sky (the Test 84
+finding); the branch's mask is specks plus a thin ring along the mount
+edge. Windows f2–f5 are holder plastic and differ because the border
+rule (bg below a fraction of the frame's median) behaves differently
+with the smaller box on a mostly dark frame; no picture is affected.
+
+**Eye check (the owner, 2026-11-07, review images in the review folder
+with a LASMIG.txt; side-by-side original / master / branch at 1:1 and
+brightened 3× crops of the tree edge and the dusty sky):** the branch's
+result is clearly better than master's and nothing is destroyed; the
+tree silhouette and the cloud detail are intact. Left as known
+weaknesses of low-resolution cleaning, not of the change: specks inside
+the border halo next to the mount edge stay, and a thin scratch in the
+sky is only partly removed (the 5 px kernel scales to 1 × 1 at 600 dpi
+and cannot fill). Merged as `bd0a66f` on the owner's go.

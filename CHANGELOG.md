@@ -72,6 +72,38 @@ one exists; "offline" means implemented and tested without the scanner.
   ignored; clean polls and every other timeout are untouched. Off, the
   transfer sequence is unchanged (wire fingerprints identical).
 
+- **Mounted-slide geometry model, library only (PR #67, bearyjd).**
+  `of135i/holder.py` carries the slide holder's measured grid from Test
+  84 (`SLIDE_FIDUCIAL`: 38.05 mm openings on a 62.6 mm pitch, opening 1
+  extrapolated at 23.5 mm) and `slide_dual_geometry()`, the strip path's
+  dual geometry with that model, the `--position-offset` shift, and one
+  stricter travel check for slides (FEEDL plus the wire's travel must
+  stay inside the proven ceiling; slide 4 keeps 175 to 307 steps on every
+  profile at the 1.5 mm default overscan). (Upstream text; in this fork `scan --slides` already calls it.) Upstream: no
+  option selects the slide holder, nothing sent to the scanner changes.
+  `tests/test_slides.py` (5 tests) pins the numbers, the per-profile
+  FEEDL grid, the refusals and the offset. The rest of C2 (holder
+  option, IR-keyed crop, positive output, hardware runs with mounted
+  slides) is being built by the contributor on his unit, issue #70.
+
+- **IR dust cleaning scaled by resolution (PR #66, bearyjd).** The
+  dust mask's background box, border halo and dilation and the inpaint
+  footprints were fixed pixel counts tuned at 3600 dpi; at 600 dpi the
+  same counts covered six times the film area, so specks merged into a
+  mass mask (Test 84). `image.dust_mask()` and `image.remove_dust()` now
+  take `dpi` and convert every footprint to the profile's physical
+  sampling, per axis for the anisotropic 2400 dpi profile; `scan --ir`
+  and `digitize` pass the scan's dpi. At 3600 dpi the output is
+  unchanged: pinned hashes in `tests/test_ir.py`, and a 3000-line band
+  of the Test 85 slide cleaned byte-identically before and after. At
+  600 dpi on the Test 84 slide the mask fell from 28.8 % to 6.0 % of the
+  frame and the owner's eye check found the cleaned picture clearly
+  better, with the tree line and sky intact (test log, 2026-11-07,
+  offline). Specks within the border halo of the mount edge stay, and a
+  thin scratch is only partly removed at 600 dpi (the smallest inpaint
+  kernel is one pixel there). Offline; no transfer to the scanner
+  changes.
+
 ## v0.2.11 — Second Scanner Gamble — 2026-11-06
 
 - **Release codename.** `of135i.__codename__` ("Second Scanner Gamble"
