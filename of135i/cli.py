@@ -201,9 +201,9 @@ def _validate_overscan(overscan: float, frames, dpi: int = 3600,
             what = "slide" if slide else "frame"
             hint = (f" (the slide default is {holder.SLIDE_OVERSCAN_MM} mm; slide 4 "
                     f"is the furthest window, see docs/slide-scanning.md)"
-                    ) if slide and not offset_mm else ""
-            arg = (f"--position-offset {offset_mm} mm" if offset_mm
-                   else f"--overscan {overscan} mm")
+                    ) if slide else ""
+            arg = (f"--overscan {overscan} mm with --position-offset {offset_mm} mm"
+                   if offset_mm else f"--overscan {overscan} mm")
             return f"{arg} is out of range for {what} {frame}: {e}{hint}"
         except ValueError as e:
             if "position offset" in str(e):
@@ -213,18 +213,22 @@ def _validate_overscan(overscan: float, frames, dpi: int = 3600,
     return None
 
 
-def _offset_hint(cov) -> str:
+def _offset_hint(cov, current_mm: float = 0.0) -> str:
     """A sentence for the coverage-failure messages: how far off centre
     the opening sits in the window and the --position-offset that would
     centre it (aperture_crop.position_offset_hint), or '' when the
-    verdict has no two margins to compute it from."""
+    verdict has no two margins to compute it from. ``current_mm`` is the
+    --position-offset the scan ran with: the suggestion is absolute, so
+    it already includes it."""
     from . import aperture_crop
-    hint = aperture_crop.position_offset_hint(cov)
+    hint = aperture_crop.position_offset_hint(cov, current_mm=current_mm)
     if hint is None:
         return ""
     return (f" The opening sits {hint['off_centre_mm']:+.2f} mm from the "
-            f"window's centre on this unit; a per-unit correction of "
-            f"--position-offset {hint['offset_mm']:+.1f} would centre it "
+            f"window's centre on this unit"
+            f"{f' (scanned at --position-offset {current_mm:+.2f})' if current_mm else ''}; "
+            f"a per-unit correction of "
+            f"--position-offset {hint['offset_mm']:+.2f} would centre it "
             f"(README, 'A scanner whose frames sit early or late').")
 
 _STATUS_REGS = (0x01, 0x31, 0x32, 0x35)
@@ -1554,7 +1558,7 @@ def _finish_plain_scan(args: argparse.Namespace, raw: bytes, width: int,
     else:
         print(f"aperture coverage: NOT verified — {cov.reason}. Kept the full "
               f"overscan at {raw_out}; no aperture-registered product written "
-              f"for this frame.{_offset_hint(cov)}", file=sys.stderr)
+              f"for this frame.{_offset_hint(cov, _position_offset(args))}", file=sys.stderr)
     return cov
 
 
@@ -1672,7 +1676,7 @@ def _finish_dual_scan(args: argparse.Namespace, raw: bytes, width: int,
     if not cov.verified:
         print(f"aperture coverage: NOT verified — {cov.reason}. Kept the full "
               f"overscan frame(s); no registered product written for this "
-              f"frame.{_offset_hint(cov)}", file=sys.stderr)
+              f"frame.{_offset_hint(cov, _position_offset(args))}", file=sys.stderr)
         return cov
 
     print(f"aperture coverage: VERIFIED (source: {cov.source}) — margins lead "
@@ -1943,7 +1947,7 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         if not coverage.verified:
             print(f"aperture coverage: NOT verified — {coverage.reason}. "
                   f"Kept the full overscan frame(s); no main negative "
-                  f"written for this frame.{_offset_hint(coverage)}", file=sys.stderr)
+                  f"written for this frame.{_offset_hint(coverage, _position_offset(args))}", file=sys.stderr)
             return None, None, None, bool(args.ir and not args.no_clean), coverage
         print(f"aperture coverage: VERIFIED (source: {coverage.source}) — "
               f"margins lead {coverage.leading_margin_mm:.3f} mm, trail "
@@ -1999,7 +2003,7 @@ def _finish_digitize_frame(args: argparse.Namespace, raw: bytes, width: int,
         if not coverage.verified:
             print(f"aperture coverage: NOT verified — {coverage.reason}. "
                   f"Kept the full overscan at {raw_out}; no main negative "
-                  f"written for this frame.{_offset_hint(coverage)}", file=sys.stderr)
+                  f"written for this frame.{_offset_hint(coverage, _position_offset(args))}", file=sys.stderr)
             return None, None, None, False, coverage
         print(f"aperture coverage: VERIFIED"
               f"{' (' + coverage.reason + ')' if coverage.source != 'visible' else ''}"
@@ -3822,8 +3826,10 @@ def _cmd_recrop(args: argparse.Namespace) -> int:
         else:
             hint = ""
             if res.offset_hint_mm is not None:
+                assumed = (" (assuming the frame was scanned at --position-offset 0)"
+                           if res.offset_assumed else "")
                 hint = (f" For the next scans on this unit: --position-offset "
-                        f"{res.offset_hint_mm:+.1f}.")
+                        f"{res.offset_hint_mm:+.2f}{assumed}.")
             print(f"{res.overscan}: aperture coverage NOT verified at a "
                   f"{res.min_margin_mm:.2f} mm floor — {res.reason}{margins}; nothing "
                   f"written.{hint}", file=sys.stderr)

@@ -728,6 +728,15 @@ def test_cli_slide_offset_validated_before_hardware():
     msg = cli._validate_overscan(holder.SLIDE_OVERSCAN_MM, [4], dpi=1200,
                                  dual=True, slide=True, offset_mm=1.0)
     assert msg and "--position-offset 1.0 mm" in msg and "slide 4" in msg, msg
+    # the refusal names both values and keeps the slide hint when an
+    # offset is set; at offset 0 it names --overscan alone
+    assert "--overscan %s mm with --position-offset 1.0 mm" % holder.SLIDE_OVERSCAN_MM in msg, msg
+    assert "slide default" in msg, msg
+    msg0 = cli._validate_overscan(5.0, [4], dpi=1200, dual=True, slide=True, offset_mm=0.0)
+    assert msg0 and msg0.startswith("--overscan 5.0 mm is out of range") \
+        and "--position-offset" not in msg0 and "slide default" in msg0, msg0
+    msgf = cli._validate_overscan(5.0, [4], dpi=1200, dual=True, slide=True, offset_mm=-0.5)
+    assert msgf and "--overscan 5.0 mm with --position-offset -0.5 mm" in msgf, msgf
     old = os.environ.pop(cli.POSITION_OFFSET_ENV, None)
     try:
         with tempfile.TemporaryDirectory() as d:

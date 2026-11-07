@@ -33,6 +33,7 @@ says positive).
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,6 +91,8 @@ class RecropSettings:
     rotate: int
     positive: bool          #: the overscan file is a positive rendering
     source: str             #: "sidecar" or "arguments"
+    position_offset_mm: float = 0.0   #: --position-offset the frame was scanned with
+    position_offset_assumed: bool = False  #: the sidecar did not say; 0 is assumed
 
 
 def settings_from_sidecar(sidecar: Path) -> RecropSettings | None:
@@ -107,8 +110,29 @@ def settings_from_sidecar(sidecar: Path) -> RecropSettings | None:
     # its preview. A sidecar without the "command" key (written before it
     # existed) is read as scan's when it says positive.
     positive = bool(cli.get("positive")) and cli.get("command") != "digitize"
+    recorded = cli.get("position_offset")
+    assumed = (isinstance(recorded, bool) or not isinstance(recorded, (int, float))
+               or not math.isfinite(recorded))
+    offset = 0.0 if assumed else float(recorded)
     return RecropSettings(dpi=int(cli["dpi"]), rotate=int(cli.get("rotate") or 0),
-                          positive=positive, source="sidecar")
+                          positive=positive, source="sidecar",
+                          position_offset_mm=offset, position_offset_assumed=assumed)
+
+
+def _is_slide_sidecar(sidecar: Path) -> bool:
+    """True when the sidecar says the frame came from the mounted-slide
+    holder: ``cli.slides`` is set, or ``coverage.applicable`` is False
+    (either signal is enough; the fork writes both for a slide)."""
+    try:
+        d = json.loads(sidecar.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(d, dict):
+        return False
+    cli = d.get("cli")
+    cov = d.get("coverage")
+    return bool((isinstance(cli, dict) and cli.get("slides"))
+                or (isinstance(cov, dict) and cov.get("applicable") is False))
 
 
 def axis_dpi(dpi: int, rotate: int) -> tuple[int, int]:
@@ -144,6 +168,7 @@ class RecropResult:
     settings_source: str
     offset_hint_mm: float | None
     record_error: str | None = None     #: why <stem>.recrop.json was not written
+    offset_assumed: bool = False        #: offset_hint_mm assumes the frame was scanned at 0
 
 
 class RecropError(Exception):
@@ -194,6 +219,10 @@ def recrop(name: str | Path, *, min_margin_mm: float = 0.15,
     if not np.isfinite(min_margin_mm) or min_margin_mm < 0:
         raise RecropError(f"min_margin_mm must be a finite number >= 0, got {min_margin_mm}")
 
+    if _is_slide_sidecar(paths.sidecar):
+        raise RecropError(
+            f"{paths.overscan} is a mounted-slide frame: the overscan pair is "
+            f"the product (there are no strip crossbars to crop from)")
     side = settings_from_sidecar(paths.sidecar)
     if side is not None and side.positive:
         raise RecropError(
@@ -240,13 +269,15 @@ def recrop(name: str | Path, *, min_margin_mm: float = 0.15,
     else:
         cov = aperture_crop.measure_coverage(visible, dpi=dpi, min_margin_mm=min_margin_mm)
 
-    hint = aperture_crop.position_offset_hint(cov)
+    hint = aperture_crop.position_offset_hint(
+        cov, current_mm=side.position_offset_mm if side is not None else 0.0)
     common = dict(overscan=str(paths.overscan), verified=cov.verified, source=cov.source,
                   leading_margin_mm=cov.leading_margin_mm,
                   trailing_margin_mm=cov.trailing_margin_mm,
                   min_margin_mm=float(min_margin_mm), dpi=int(dpi), rotate=int(rotate),
                   settings_source=settings_source,
-                  offset_hint_mm=hint["offset_mm"] if hint else None)
+                  offset_hint_mm=hint["offset_mm"] if hint else None,
+                  offset_assumed=side is None or side.position_offset_assumed)
     if not cov.verified:
         res = RecropResult(written=False, reason=cov.reason, main=None, ir=None,
                            film_present=None, **common)

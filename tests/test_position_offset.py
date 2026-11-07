@@ -322,6 +322,75 @@ def test_cli_refuses_a_bad_offset_with_zero_hardware_activity():
     print("test_cli_refuses_a_bad_offset_with_zero_hardware_activity OK")
 
 
+class _Stop(Exception):
+    """Raised by the fake scanner right after the setup block."""
+
+
+class _SpyScanner:
+    """Records the attributes the CLI body sets, stops at the first
+    scanner call after them (check_start_state) so nothing else runs."""
+
+    def check_start_state(self):
+        raise _Stop()
+
+
+def _offset_reaching_the_scanner(argv, env_value=None):
+    """Run the CLI command `argv` with every device entry replaced by a
+    spy; return the spy's position_offset_mm (None if never assigned)."""
+    import io
+    import os
+    from contextlib import redirect_stderr, redirect_stdout
+    from of135i import cli
+    seen = []
+
+    def session(body):
+        sc = _SpyScanner()
+        try:
+            body(sc)
+        except _Stop:
+            pass
+        seen.append(getattr(sc, "position_offset_mm", None))
+        return 1
+
+    saved_session = cli._run_writing_session
+    saved_env = os.environ.pop(cli.POSITION_OFFSET_ENV, None)
+    if env_value is not None:
+        os.environ[cli.POSITION_OFFSET_ENV] = env_value
+    cli._run_writing_session = session
+    try:
+        args = cli.build_parser().parse_args(argv)
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            args.func(args)
+    finally:
+        cli._run_writing_session = saved_session
+        os.environ.pop(cli.POSITION_OFFSET_ENV, None)
+        if saved_env is not None:
+            os.environ[cli.POSITION_OFFSET_ENV] = saved_env
+    assert len(seen) == 1, (argv, seen)
+    return seen[0]
+
+
+def test_every_scan_body_hands_the_offset_to_the_scanner():
+    """_cmd_scan, _cmd_digitize and _digitize_sweep each set
+    scanner.position_offset_mm from the flag (or the environment) before
+    any hardware call; a dropped assignment would scan at offset 0."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        cmds = {
+            "scan": ["scan", "--frame", "1", "-o", f"{d}/x.tiff"],
+            "digitize": ["digitize", "-o", f"{d}/dig", "--assume-loaded"],
+            "sweep": ["digitize", "--sweep", "--dpi", "1200", "-o", f"{d}/swp", "--assume-loaded"],
+        }
+        for name, base in cmds.items():
+            got = _offset_reaching_the_scanner(base + ["--position-offset", "-0.5"])
+            assert got == -0.5, (name, got)
+            got = _offset_reaching_the_scanner(base, env_value="0.3")
+            assert got == 0.3, (name, "env", got)
+            got = _offset_reaching_the_scanner(base)
+            assert got == 0.0, (name, "default", got)
+    print("test_every_scan_body_hands_the_offset_to_the_scanner OK")
+
+
 def test_sidecar_records_the_offset():
     import argparse
     import json
@@ -345,6 +414,76 @@ def test_sidecar_records_the_offset():
             side = json.loads(Path(diag.sidecar_path(out)).read_text())
             assert side["cli"]["position_offset"] == want, side["cli"]
     print("test_sidecar_records_the_offset OK")
+
+
+def test_hint_is_relative_to_the_offset_already_applied():
+    """A unit already scanned at -0.5 whose margins (measured with that
+    offset applied) still say a further -0.2 is needed is told -0.7, the
+    absolute value for the next scan, not -0.2."""
+    import argparse
+    import json
+    import tempfile
+    from of135i import cli, recrop
+    cov = aperture_crop.ApertureCoverage(
+        verified=False, leading_line=0.0, trailing_line=0.0,
+        leading_margin_mm=0.1, trailing_margin_mm=0.5,
+        reason="leading margin below min_margin_mm (0.15 mm)", threshold=0.0)
+    assert aperture_crop.position_offset_hint(cov)["offset_mm"] == -0.2
+    hint = aperture_crop.position_offset_hint(cov, current_mm=-0.5)
+    assert hint["offset_mm"] == -0.7, hint
+    assert math.isclose(hint["off_centre_mm"], 0.2), hint
+    # centred relative to the offset already applied: nothing to suggest
+    even = aperture_crop.ApertureCoverage(False, 0.0, 0.0, 0.3, 0.3, "x", 0.0)
+    assert aperture_crop.position_offset_hint(even, current_mm=-0.5) is None
+    # the CLI sentence reads the offset the command ran with
+    args = argparse.Namespace(position_offset=-0.5)
+    text = cli._offset_hint(cov, cli._position_offset(args))
+    assert "--position-offset -0.7" in text and "-0.5" in text, text
+    assert "--position-offset -0.2" in cli._offset_hint(cov), cli._offset_hint(cov)
+    # recrop reads the offset the frame was scanned with from its sidecar
+    with tempfile.TemporaryDirectory() as d:
+        from tests.test_recrop import _write_frame
+        for given, want_shift in ((None, 0.0), (-0.5, -0.5)):
+            p, _, _ = _write_frame(d, f"f{given}")
+            sc = json.loads(p.sidecar.read_text())
+            if given is not None:
+                sc["cli"]["position_offset"] = given
+            p.sidecar.write_text(json.dumps(sc))
+            res = recrop.recrop(p.overscan, min_margin_mm=5.0, dry_run=True)
+            assert not res.verified, res
+            want = aperture_crop.position_offset_hint(
+                aperture_crop.ApertureCoverage(
+                    False, 0.0, 0.0, res.leading_margin_mm, res.trailing_margin_mm, "x", 0.0),
+                current_mm=want_shift)
+            assert want is not None and res.offset_hint_mm == want["offset_mm"], (res, want)
+        assert recrop.settings_from_sidecar(p.sidecar).position_offset_mm == -0.5
+    print("test_hint_is_relative_to_the_offset_already_applied OK")
+
+
+def test_hint_prints_the_value_it_computed():
+    """0.25 already applied plus a further +0.1 is +0.35, not +0.3."""
+    from of135i import cli
+    cov = aperture_crop.ApertureCoverage(False, 0.0, 0.0, 0.7, 0.5, "x", 0.0)
+    assert aperture_crop.position_offset_hint(cov, current_mm=0.25)["offset_mm"] == 0.35
+    text = cli._offset_hint(cov, 0.25)
+    assert "--position-offset +0.35 would" in text and "+0.25)" in text, text
+    print("test_hint_prints_the_value_it_computed OK")
+
+
+def test_hint_beyond_the_offset_limit_is_not_given():
+    """The CLI refuses |offset| > POSITION_OFFSET_MAX_MM, so a hint past
+    it is withheld; exactly the limit is allowed."""
+    from of135i import cli
+    # lead - trail = +1.0 -> a further correction of +0.5 mm
+    cov = aperture_crop.ApertureCoverage(False, 0.0, 0.0, 1.5, 0.5, "x", 0.0)
+    assert aperture_crop.position_offset_hint(cov, current_mm=2.9) is None
+    assert cli._offset_hint(cov, 2.9) == ""
+    assert aperture_crop.position_offset_hint(cov, current_mm=2.5)["offset_mm"] == 3.0
+    assert aperture_crop.position_offset_hint(cov, current_mm=2.6) is None
+    neg = aperture_crop.ApertureCoverage(False, 0.0, 0.0, 0.5, 1.5, "x", 0.0)
+    assert aperture_crop.position_offset_hint(neg, current_mm=-2.5)["offset_mm"] == -3.0
+    assert aperture_crop.position_offset_hint(neg, current_mm=-2.9) is None
+    print("test_hint_beyond_the_offset_limit_is_not_given OK")
 
 
 def test_hint_from_the_second_units_margins():
@@ -492,7 +631,11 @@ def main():
         test_environment_variable_is_the_per_unit_default,
         test_sweep_meta_records_the_offset,
         test_cli_refuses_a_bad_offset_with_zero_hardware_activity,
+        test_every_scan_body_hands_the_offset_to_the_scanner,
         test_sidecar_records_the_offset,
+        test_hint_is_relative_to_the_offset_already_applied,
+        test_hint_prints_the_value_it_computed,
+        test_hint_beyond_the_offset_limit_is_not_given,
         test_hint_from_the_second_units_margins,
         test_failure_message_carries_the_hint,
         test_failure_message_carries_the_hint_on_the_dual_and_digitize_paths,

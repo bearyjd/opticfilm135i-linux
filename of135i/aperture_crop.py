@@ -36,7 +36,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from . import aperture
+from . import aperture, holder
 
 MM_PER_INCH = 25.4
 
@@ -244,7 +244,8 @@ def margin_warning(coverage: ApertureCoverage,
             f"inside it; check the crop against the strip's other frames")
 
 
-def position_offset_hint(coverage: ApertureCoverage, step_mm: float = 0.1) -> dict | None:
+def position_offset_hint(coverage: ApertureCoverage, step_mm: float = 0.1,
+                         current_mm: float = 0.0) -> dict | None:
     """From a verdict with both margins, the per-unit --position-offset
     that would centre the opening in the window, rounded to ``step_mm``.
 
@@ -256,16 +257,24 @@ def position_offset_hint(coverage: ApertureCoverage, step_mm: float = 0.1) -> di
     trailing end, i.e. the window started late), "offset_mm": the
     suggested flag value}, or None when a margin is unknown (an edge was
     not found) or the opening is already centred to within ``step_mm``.
+    The margins are those of a scan that already had ``current_mm``
+    applied, so the result is that value plus the further correction
+    (offset = current_mm + (leading - trailing) / 2): the absolute value
+    for the next scan. None also when that would exceed holder.POSITION_OFFSET_MAX_MM
+    (the CLI refuses it).
     A hint, not a measurement of the unit: one frame's margins also carry
     the load-to-load spread (docs/holder-position-design.md section 2.3).
     """
     lead, trail = coverage.leading_margin_mm, coverage.trailing_margin_mm
     if lead is None or trail is None:
         return None
-    offset = (lead - trail) / 2.0
+    correction = (lead - trail) / 2.0
     if step_mm > 0:
-        offset = round(round(offset / step_mm) * step_mm, 3)
-    if offset == 0:
+        correction = round(round(correction / step_mm) * step_mm, 3)
+    if correction == 0:
+        return None
+    offset = round(current_mm + correction, 3)
+    if abs(offset) > holder.POSITION_OFFSET_MAX_MM:
         return None
     return {"off_centre_mm": (trail - lead) / 2.0, "offset_mm": offset}
 
