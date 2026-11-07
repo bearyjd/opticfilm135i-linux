@@ -85,6 +85,28 @@ travel in brackets (ceiling 71490; pinned in
 | 3600 dual | 6255 (17951) | 24000 (35696) | 41745 (53441) | 59490 (71186) |
 | 7200 dual | 6256 (17944) | 24001 (35689) | 41746 (53434) | 59491 (71179) |
 
+### With `--position-offset`
+
+The per-unit position offset (`--position-offset MM` or
+`OF135I_POSITION_OFFSET`, upstream v0.2.11, issue #61) applies to slides
+exactly as to strips: on top of the selected holder's nominal position.
+`holder.slide_dual_geometry(offset_mm=)` computes the window on
+`SLIDE_FIDUCIAL.shifted(offset)`, so every slide FEEDL moves by the offset
+(±1 step for rounding) and the window length, chunk count and margins do
+not. The offset is a property of the unit, not of the holder, so one
+value serves both holders. The CLI pre-check, `Scanner.scan()`'s
+pre-operation check and the scan itself all use the same
+`Scanner.position_offset_mm`, and every slide check (the ±3 mm offset
+range, slide 4's FEEDL + travel bound) runs on the shifted window before
+anything is sent. At 1200 dual, slide 4 has 175 steps (about 0.62 mm) of
+margin, so a positive offset larger than that refuses slide 4 there.
+
+At offset 0, the default, the table above is unchanged:
+`FiducialModel.shifted(0)` returns the model itself, and
+`tests/test_slides.py` pins the table and the injected FEEDL and line
+count against it. No hardware run has been made with an offset on the
+slide holder.
+
 ### Dust cleaning at each resolution
 
 IR cleaning scales its detection, border exclusion, mask dilation and

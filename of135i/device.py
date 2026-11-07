@@ -930,6 +930,13 @@ class Scanner:
         # two waits are scaled by it too. 1.0 until a frame is
         # positioned to, which is also the value for frame 1.
         self._park_scale = 1.0
+        # Per-unit position offset, mm along the strip (holder
+        # FiducialModel.shifted): every scan and sweep window is moved by
+        # this much. 0.0 is the model as fitted on the owner's unit; a
+        # unit whose apertures sit earlier needs a negative value
+        # (issue #61, about -0.5 mm on that unit). Set by the CLI's
+        # --position-offset; range-checked by the geometry functions.
+        self.position_offset_mm = 0.0
 
         # Hardware-safety session (safety.py). A real UsbIo brings its
         # own; a duck-typed transport (tests) gets one attached here,
@@ -3345,6 +3352,7 @@ class Scanner:
                 colour_crop_lines=image_mod.align_shift(dpi),
                 default_wire_lines=t.DEFAULT_LINES,
                 overscan_mm=overscan_mm,
+                offset_mm=self.position_offset_mm,
             )
         if t is not None:
             # Dual: the production default (lines=None, overscan_mm=None)
@@ -3731,6 +3739,7 @@ class Scanner:
                 chunk_lines=tables.IMAGE_CHUNK_LINES,
                 colour_crop_lines=image_mod.align_shift(3600),
                 overscan_mm=overscan_mm,
+                offset_mm=self.position_offset_mm,
             )
             feedl = holder.check_feedl(geom.feedl)
             travel_margin_steps = holder.travel_margin(
@@ -3795,6 +3804,7 @@ class Scanner:
             "raw_bytes": len(image),
             "chunk_count": n_chunks,
             "overscan_mm": overscan_mm,
+            "position_offset_mm": self.position_offset_mm,
             "calibration": calibration,
             "dark_a_mean": dark_a_mean,
             "dark_b_mean": dark_b_mean,
@@ -4074,6 +4084,7 @@ class Scanner:
                 default_wire_lines=t.DEFAULT_LINES,
                 overscan_mm=(overscan_mm if overscan_mm is not None
                              else holder.SLIDE_OVERSCAN_MM),
+                offset_mm=self.position_offset_mm,
             )
             feedl = holder.check_feedl(geom.feedl, holder.SLIDE)
             travel_margin_steps = holder.travel_margin(
@@ -4090,6 +4101,7 @@ class Scanner:
                 colour_crop_lines=image_mod.align_shift(dpi),
                 default_wire_lines=t.DEFAULT_LINES,
                 overscan_mm=overscan_mm if overscan_mm is not None else holder.OVERSCAN_MM,
+                offset_mm=self.position_offset_mm,
             )
             feedl = holder.check_feedl(geom.feedl)
             travel_margin_steps = holder.travel_margin(
@@ -4167,6 +4179,7 @@ class Scanner:
             "overscan_mm": (overscan_mm if overscan_mm is not None
                             else (holder.SLIDE_OVERSCAN_MM if slide
                                   else holder.OVERSCAN_MM)) if geom is not None else None,
+            "position_offset_mm": self.position_offset_mm,
             # Dual has no skip-calibration path (see _scan_dual's opening
             # comment) -- always a fresh measurement.
             "calibration": "fresh",
@@ -4272,7 +4285,8 @@ class Scanner:
         # Validate the whole window BEFORE the operation: a bad range is a
         # plain error, not a hardware-session failure.
         self._sweep_geometry(t, first, last,
-                             overscan_mm if overscan_mm is not None else holder.OVERSCAN_MM)
+                             overscan_mm if overscan_mm is not None else holder.OVERSCAN_MM,
+                             self.position_offset_mm)
         with self._operation("sweep"):
             self._prepared_for_scan = False
             if self._cal_capture is not None:
@@ -4284,9 +4298,12 @@ class Scanner:
                 t, first=first, last=last, overscan_mm=ov, sink=sink)
 
     @staticmethod
-    def _sweep_geometry(t, first: int, last: int, overscan_mm: float):
+    def _sweep_geometry(t, first: int, last: int, overscan_mm: float,
+                        offset_mm: float = 0.0):
         """holder.dual_sweep_geometry for table module ``t`` (or
-        holder.plain_sweep_geometry for the plain-3600 module ``tables``)."""
+        holder.plain_sweep_geometry for the plain-3600 module ``tables``).
+        ``offset_mm`` is the per-unit position offset (Scanner.
+        position_offset_mm)."""
         if t is tables:
             return holder.plain_sweep_geometry(
                 first, last,
@@ -4294,6 +4311,7 @@ class Scanner:
                 colour_crop_lines=image_mod.align_shift(3600),
                 default_lines=tables.DEFAULT_LINES,
                 overscan_mm=overscan_mm,
+                offset_mm=offset_mm,
             )
         return holder.dual_sweep_geometry(
             first, last,
@@ -4302,6 +4320,7 @@ class Scanner:
             colour_crop_lines=image_mod.align_shift(t.DPI),
             default_wire_lines=t.DEFAULT_LINES,
             overscan_mm=overscan_mm,
+            offset_mm=offset_mm,
         )
 
     def _sweep_plain(self, first: int, last: int, *, overscan_mm: float,
@@ -4342,7 +4361,8 @@ class Scanner:
         counted = {"chunks": 0, "bytes": 0, "extra": 0}
 
         try:
-            geom, _ = self._sweep_geometry(tables, first, last, overscan_mm)
+            geom, _ = self._sweep_geometry(tables, first, last, overscan_mm,
+                                           self.position_offset_mm)
             feedl = holder.check_feedl(geom.feedl)
             n_chunks = geom.chunks
             n_lines = tables.scan_lines_for_chunks(n_chunks)
@@ -4405,6 +4425,7 @@ class Scanner:
             "raw_bytes": counted["bytes"],
             "chunk_count": n_chunks,
             "overscan_mm": overscan_mm,
+            "position_offset_mm": self.position_offset_mm,
             "calibration": cal.calibration,
             "dark_b_fallback": dark_b_fallback,
             **integ,
@@ -4483,7 +4504,8 @@ class Scanner:
         gain_r, gain_g, gain_b = cal.gain_codes
         off_r, off_g, off_b = cal.offset_codes
 
-        geom, wire_lines = self._sweep_geometry(t, first, last, overscan_mm)
+        geom, wire_lines = self._sweep_geometry(t, first, last, overscan_mm,
+                                                self.position_offset_mm)
         feedl = holder.check_feedl(geom.feedl)
         log.info("sweep apertures %d-%d (%d dpi dual): FEEDL=%d chunks=%d wire_lines=%d "
                  "end=%d margins lead=%.3f trail=%.3f mm",
@@ -4568,6 +4590,7 @@ class Scanner:
             "raw_bytes": counted["bytes"],
             "chunk_count": n_chunks,
             "overscan_mm": overscan_mm,
+            "position_offset_mm": self.position_offset_mm,
             "calibration": "fresh",
             "dark_b_fallback": dark_b_fallback,
             **integ,
