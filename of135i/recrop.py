@@ -111,6 +111,22 @@ def settings_from_sidecar(sidecar: Path) -> RecropSettings | None:
                           positive=positive, source="sidecar")
 
 
+def _is_slide_sidecar(sidecar: Path) -> bool:
+    """True when the sidecar says the frame came from the mounted-slide
+    holder: ``cli.slides`` is set, or ``coverage.applicable`` is False
+    (either signal is enough; the fork writes both for a slide)."""
+    try:
+        d = json.loads(sidecar.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(d, dict):
+        return False
+    cli = d.get("cli")
+    cov = d.get("coverage")
+    return bool((isinstance(cli, dict) and cli.get("slides"))
+                or (isinstance(cov, dict) and cov.get("applicable") is False))
+
+
 def axis_dpi(dpi: int, rotate: int) -> tuple[int, int]:
     """The (x, y) resolution to stamp on a product turned by ``rotate``
     degrees (any multiple of 90): the delivered strip runs along axis 0
@@ -194,6 +210,10 @@ def recrop(name: str | Path, *, min_margin_mm: float = 0.15,
     if not np.isfinite(min_margin_mm) or min_margin_mm < 0:
         raise RecropError(f"min_margin_mm must be a finite number >= 0, got {min_margin_mm}")
 
+    if _is_slide_sidecar(paths.sidecar):
+        raise RecropError(
+            f"{paths.overscan} is a mounted-slide frame: the overscan pair is "
+            f"the product (there are no strip crossbars to crop from)")
     side = settings_from_sidecar(paths.sidecar)
     if side is not None and side.positive:
         raise RecropError(

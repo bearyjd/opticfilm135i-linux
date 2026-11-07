@@ -219,6 +219,40 @@ def test_refusals():
     print("test_refusals OK")
 
 
+def test_mounted_slide_frame_is_refused():
+    """A mounted-slide frame (sidecar cli.slides set, or coverage.applicable
+    False) is overscan-only by design: recrop must not crop it from the
+    mount edges. A strip frame keeps working."""
+    with tempfile.TemporaryDirectory() as d:
+        for stem, edit in (
+                ("s1", lambda sc: sc["cli"].update(slides="4")),
+                ("s2", lambda sc: sc.update(coverage={"applicable": False})),
+                ("s3", lambda sc: (sc["cli"].update(slides="1,2"),
+                                   sc.update(coverage={"applicable": False})))):
+            p, _, _ = _write_frame(d, stem)
+            sc = json.loads(p.sidecar.read_text())
+            edit(sc)
+            p.sidecar.write_text(json.dumps(sc))
+            for kw in ({}, {"dry_run": True}, {"overwrite": True}):
+                try:
+                    recrop.recrop(p.overscan, min_margin_mm=0.0, **kw)
+                except recrop.RecropError as e:
+                    assert "is a mounted-slide frame: the overscan pair is the product" \
+                        in str(e), e
+                else:
+                    raise AssertionError(f"recropped a slide frame ({stem}, {kw})")
+            assert not p.main.exists()
+        # a strip frame's sidecar (slides None, coverage verified) is untouched
+        p, _, _ = _write_frame(d, "strip")
+        sc = json.loads(p.sidecar.read_text())
+        sc["cli"]["slides"] = None
+        sc["coverage"] = {"verified": True}
+        p.sidecar.write_text(json.dumps(sc))
+        res = recrop.recrop(p.overscan, min_margin_mm=0.0)
+        assert res.written, res
+    print("test_mounted_slide_frame_is_refused OK")
+
+
 def _run_cli(argv):
     from of135i import cli
     out, err = io.StringIO(), io.StringIO()
@@ -271,6 +305,7 @@ def main():
         test_plain_frame_without_ir_overscan,
         test_empty_opening_is_not_written,
         test_refusals,
+        test_mounted_slide_frame_is_refused,
         test_cli_exit_codes_and_messages,
     ]
     for t in tests:
