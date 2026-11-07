@@ -253,6 +253,42 @@ def test_mounted_slide_frame_is_refused():
     print("test_mounted_slide_frame_is_refused OK")
 
 
+def test_offset_assumed_when_the_sidecar_does_not_say():
+    """The hint is absolute, so it needs the offset the frame was scanned
+    with. A missing sidecar, missing/null/invalid/non-finite key means 0 is
+    ASSUMED and the result and the CLI message say so; a recorded number
+    (0.0 included) does not."""
+    ASSUME = "(assuming the frame was scanned at --position-offset 0)"
+    with tempfile.TemporaryDirectory() as d:
+        cases = [("missing", "DEL", True), ("null", None, True), ("text", "abc", True),
+                 ("nan", float("nan"), True), ("inf", float("inf"), True),
+                 ("bool", True, True), ("zero", 0.0, False), ("neg", -0.5, False)]
+        for stem, val, assumed in cases:
+            p, _, _ = _write_frame(d, f"c{len(stem)}{stem[:1]}")
+            sc = json.loads(p.sidecar.read_text())
+            if val == "DEL":
+                sc["cli"].pop("position_offset", None)
+            else:
+                sc["cli"]["position_offset"] = val
+            p.sidecar.write_text(json.dumps(sc))      # NaN/Infinity tokens included
+            res = recrop.recrop(p.overscan, min_margin_mm=5.0, dry_run=True)
+            assert res.offset_assumed is assumed, (stem, res)
+            if val == -0.5:
+                assert res.offset_hint_mm is not None and res.offset_hint_mm < -0.5, res
+            rc, out, err = _run_cli(["--min-margin", "5", str(p.overscan)])
+            assert rc == 4 and "--position-offset" in err, (stem, err)
+            assert (ASSUME in err) is assumed, (stem, err)
+            assert "+nan" not in err and "+inf" not in err, (stem, err)
+        # no sidecar at all (settings given as arguments)
+        p, _, _ = _write_frame(d, "nosc", sidecar=False)
+        res = recrop.recrop(p.overscan, min_margin_mm=5.0, dry_run=True, dpi=DPI, rotate=0)
+        assert res.offset_assumed is True, res
+        rc, out, err = _run_cli(["--min-margin", "5", "--dpi", str(DPI), "--rotate", "0",
+                                 str(p.overscan)])
+        assert ASSUME in err, err
+    print("test_offset_assumed_when_the_sidecar_does_not_say OK")
+
+
 def _run_cli(argv):
     from of135i import cli
     out, err = io.StringIO(), io.StringIO()
@@ -306,6 +342,7 @@ def main():
         test_empty_opening_is_not_written,
         test_refusals,
         test_mounted_slide_frame_is_refused,
+        test_offset_assumed_when_the_sidecar_does_not_say,
         test_cli_exit_codes_and_messages,
     ]
     for t in tests:

@@ -3826,8 +3826,10 @@ def _cmd_recrop(args: argparse.Namespace) -> int:
         else:
             hint = ""
             if res.offset_hint_mm is not None:
+                assumed = (" (assuming the frame was scanned at --position-offset 0)"
+                           if res.offset_assumed else "")
                 hint = (f" For the next scans on this unit: --position-offset "
-                        f"{res.offset_hint_mm:+.1f}.")
+                        f"{res.offset_hint_mm:+.1f}{assumed}.")
             print(f"{res.overscan}: aperture coverage NOT verified at a "
                   f"{res.min_margin_mm:.2f} mm floor — {res.reason}{margins}; nothing "
                   f"written.{hint}", file=sys.stderr)

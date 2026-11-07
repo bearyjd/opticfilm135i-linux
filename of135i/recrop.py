@@ -33,6 +33,7 @@ says positive).
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +92,7 @@ class RecropSettings:
     positive: bool          #: the overscan file is a positive rendering
     source: str             #: "sidecar" or "arguments"
     position_offset_mm: float = 0.0   #: --position-offset the frame was scanned with
+    position_offset_assumed: bool = False  #: the sidecar did not say; 0 is assumed
 
 
 def settings_from_sidecar(sidecar: Path) -> RecropSettings | None:
@@ -108,13 +110,13 @@ def settings_from_sidecar(sidecar: Path) -> RecropSettings | None:
     # its preview. A sidecar without the "command" key (written before it
     # existed) is read as scan's when it says positive.
     positive = bool(cli.get("positive")) and cli.get("command") != "digitize"
-    try:
-        offset = float(cli.get("position_offset") or 0.0)
-    except (TypeError, ValueError):
-        offset = 0.0
+    recorded = cli.get("position_offset")
+    assumed = (isinstance(recorded, bool) or not isinstance(recorded, (int, float))
+               or not math.isfinite(recorded))
+    offset = 0.0 if assumed else float(recorded)
     return RecropSettings(dpi=int(cli["dpi"]), rotate=int(cli.get("rotate") or 0),
                           positive=positive, source="sidecar",
-                          position_offset_mm=offset)
+                          position_offset_mm=offset, position_offset_assumed=assumed)
 
 
 def _is_slide_sidecar(sidecar: Path) -> bool:
@@ -166,6 +168,7 @@ class RecropResult:
     settings_source: str
     offset_hint_mm: float | None
     record_error: str | None = None     #: why <stem>.recrop.json was not written
+    offset_assumed: bool = False        #: offset_hint_mm assumes the frame was scanned at 0
 
 
 class RecropError(Exception):
@@ -273,7 +276,8 @@ def recrop(name: str | Path, *, min_margin_mm: float = 0.15,
                   trailing_margin_mm=cov.trailing_margin_mm,
                   min_margin_mm=float(min_margin_mm), dpi=int(dpi), rotate=int(rotate),
                   settings_source=settings_source,
-                  offset_hint_mm=hint["offset_mm"] if hint else None)
+                  offset_hint_mm=hint["offset_mm"] if hint else None,
+                  offset_assumed=side is None or side.position_offset_assumed)
     if not cov.verified:
         res = RecropResult(written=False, reason=cov.reason, main=None, ir=None,
                            film_present=None, **common)
