@@ -460,6 +460,16 @@ def test_hint_is_relative_to_the_offset_already_applied():
     print("test_hint_is_relative_to_the_offset_already_applied OK")
 
 
+def test_hint_prints_the_value_it_computed():
+    """0.25 already applied plus a further +0.1 is +0.35, not +0.3."""
+    from of135i import cli
+    cov = aperture_crop.ApertureCoverage(False, 0.0, 0.0, 0.7, 0.5, "x", 0.0)
+    assert aperture_crop.position_offset_hint(cov, current_mm=0.25)["offset_mm"] == 0.35
+    text = cli._offset_hint(cov, 0.25)
+    assert "--position-offset +0.35 would" in text and "+0.25)" in text, text
+    print("test_hint_prints_the_value_it_computed OK")
+
+
 def test_hint_beyond_the_offset_limit_is_not_given():
     """The CLI refuses |offset| > POSITION_OFFSET_MAX_MM, so a hint past
     it is withheld; exactly the limit is allowed."""
@@ -624,6 +634,7 @@ def main():
         test_every_scan_body_hands_the_offset_to_the_scanner,
         test_sidecar_records_the_offset,
         test_hint_is_relative_to_the_offset_already_applied,
+        test_hint_prints_the_value_it_computed,
         test_hint_beyond_the_offset_limit_is_not_given,
         test_hint_from_the_second_units_margins,
         test_failure_message_carries_the_hint,

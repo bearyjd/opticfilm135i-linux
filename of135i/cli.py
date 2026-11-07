@@ -226,9 +226,9 @@ def _offset_hint(cov, current_mm: float = 0.0) -> str:
         return ""
     return (f" The opening sits {hint['off_centre_mm']:+.2f} mm from the "
             f"window's centre on this unit"
-            f"{f' (scanned at --position-offset {current_mm:+.1f})' if current_mm else ''}; "
+            f"{f' (scanned at --position-offset {current_mm:+.2f})' if current_mm else ''}; "
             f"a per-unit correction of "
-            f"--position-offset {hint['offset_mm']:+.1f} would centre it "
+            f"--position-offset {hint['offset_mm']:+.2f} would centre it "
             f"(README, 'A scanner whose frames sit early or late').")
 
 _STATUS_REGS = (0x01, 0x31, 0x32, 0x35)
@@ -3829,7 +3829,7 @@ def _cmd_recrop(args: argparse.Namespace) -> int:
                 assumed = (" (assuming the frame was scanned at --position-offset 0)"
                            if res.offset_assumed else "")
                 hint = (f" For the next scans on this unit: --position-offset "
-                        f"{res.offset_hint_mm:+.1f}{assumed}.")
+                        f"{res.offset_hint_mm:+.2f}{assumed}.")
             print(f"{res.overscan}: aperture coverage NOT verified at a "
                   f"{res.min_margin_mm:.2f} mm floor — {res.reason}{margins}; nothing "
                   f"written.{hint}", file=sys.stderr)
