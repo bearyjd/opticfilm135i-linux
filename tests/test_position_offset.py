@@ -347,6 +347,50 @@ def test_sidecar_records_the_offset():
     print("test_sidecar_records_the_offset OK")
 
 
+def test_hint_is_relative_to_the_offset_already_applied():
+    """A unit already scanned at -0.5 whose margins (measured with that
+    offset applied) still say a further -0.2 is needed is told -0.7, the
+    absolute value for the next scan, not -0.2."""
+    import argparse
+    import json
+    import tempfile
+    from of135i import cli, recrop
+    cov = aperture_crop.ApertureCoverage(
+        verified=False, leading_line=0.0, trailing_line=0.0,
+        leading_margin_mm=0.1, trailing_margin_mm=0.5,
+        reason="leading margin below min_margin_mm (0.15 mm)", threshold=0.0)
+    assert aperture_crop.position_offset_hint(cov)["offset_mm"] == -0.2
+    hint = aperture_crop.position_offset_hint(cov, current_mm=-0.5)
+    assert hint["offset_mm"] == -0.7, hint
+    assert math.isclose(hint["off_centre_mm"], 0.2), hint
+    # centred relative to the offset already applied: nothing to suggest
+    even = aperture_crop.ApertureCoverage(False, 0.0, 0.0, 0.3, 0.3, "x", 0.0)
+    assert aperture_crop.position_offset_hint(even, current_mm=-0.5) is None
+    # the CLI sentence reads the offset the command ran with
+    args = argparse.Namespace(position_offset=-0.5)
+    text = cli._offset_hint(cov, cli._position_offset(args))
+    assert "--position-offset -0.7" in text and "-0.5" in text, text
+    assert "--position-offset -0.2" in cli._offset_hint(cov), cli._offset_hint(cov)
+    # recrop reads the offset the frame was scanned with from its sidecar
+    with tempfile.TemporaryDirectory() as d:
+        from tests.test_recrop import _write_frame
+        for given, want_shift in ((None, 0.0), (-0.5, -0.5)):
+            p, _, _ = _write_frame(d, f"f{given}")
+            sc = json.loads(p.sidecar.read_text())
+            if given is not None:
+                sc["cli"]["position_offset"] = given
+            p.sidecar.write_text(json.dumps(sc))
+            res = recrop.recrop(p.overscan, min_margin_mm=5.0, dry_run=True)
+            assert not res.verified, res
+            want = aperture_crop.position_offset_hint(
+                aperture_crop.ApertureCoverage(
+                    False, 0.0, 0.0, res.leading_margin_mm, res.trailing_margin_mm, "x", 0.0),
+                current_mm=want_shift)
+            assert want is not None and res.offset_hint_mm == want["offset_mm"], (res, want)
+        assert recrop.settings_from_sidecar(p.sidecar).position_offset_mm == -0.5
+    print("test_hint_is_relative_to_the_offset_already_applied OK")
+
+
 def test_hint_from_the_second_units_margins():
     """Issue #61, roll-006 frame 4 at 3600 dpi: lead 0.1035 mm, trail
     1.2154 mm -> the opening sits 0.56 mm late, offset -0.6 centres it."""
@@ -493,6 +537,7 @@ def main():
         test_sweep_meta_records_the_offset,
         test_cli_refuses_a_bad_offset_with_zero_hardware_activity,
         test_sidecar_records_the_offset,
+        test_hint_is_relative_to_the_offset_already_applied,
         test_hint_from_the_second_units_margins,
         test_failure_message_carries_the_hint,
         test_failure_message_carries_the_hint_on_the_dual_and_digitize_paths,

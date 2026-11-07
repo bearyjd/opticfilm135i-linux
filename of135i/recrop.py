@@ -90,6 +90,7 @@ class RecropSettings:
     rotate: int
     positive: bool          #: the overscan file is a positive rendering
     source: str             #: "sidecar" or "arguments"
+    position_offset_mm: float = 0.0   #: --position-offset the frame was scanned with
 
 
 def settings_from_sidecar(sidecar: Path) -> RecropSettings | None:
@@ -107,8 +108,13 @@ def settings_from_sidecar(sidecar: Path) -> RecropSettings | None:
     # its preview. A sidecar without the "command" key (written before it
     # existed) is read as scan's when it says positive.
     positive = bool(cli.get("positive")) and cli.get("command") != "digitize"
+    try:
+        offset = float(cli.get("position_offset") or 0.0)
+    except (TypeError, ValueError):
+        offset = 0.0
     return RecropSettings(dpi=int(cli["dpi"]), rotate=int(cli.get("rotate") or 0),
-                          positive=positive, source="sidecar")
+                          positive=positive, source="sidecar",
+                          position_offset_mm=offset)
 
 
 def _is_slide_sidecar(sidecar: Path) -> bool:
@@ -260,7 +266,8 @@ def recrop(name: str | Path, *, min_margin_mm: float = 0.15,
     else:
         cov = aperture_crop.measure_coverage(visible, dpi=dpi, min_margin_mm=min_margin_mm)
 
-    hint = aperture_crop.position_offset_hint(cov)
+    hint = aperture_crop.position_offset_hint(
+        cov, current_mm=side.position_offset_mm if side is not None else 0.0)
     common = dict(overscan=str(paths.overscan), verified=cov.verified, source=cov.source,
                   leading_margin_mm=cov.leading_margin_mm,
                   trailing_margin_mm=cov.trailing_margin_mm,
