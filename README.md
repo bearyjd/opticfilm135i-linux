@@ -285,6 +285,15 @@ know about:
   (orientation only: slides are never inverted; linear values, no sRGB
   tag); checked on one slide, one mount. The positioning has been run on one unit,
   with cardboard mounts of several brands, and is still experimental.
+  To scan several holders in one power-on, run `of135i eject`, swap the
+  holder and push it in to the stop in one motion, then `of135i load
+  --next-strip` (no jog, no reinsert prompt; refused on a power-cycled
+  scanner, which needs a plain `of135i load`). Hardware-verified in five
+  consecutive swaps on one unit (eject 1-2 s, load 5-6 s, Test 89).
+  `scan --holder slide --frames 1-4` runs a whole holder in one device
+  session; an empty opening reads as the bare 38 mm holder opening and
+  ends NOT verified (exit 4), so scan only the occupied openings
+  (`--frames 1-3`).
   The SANE backend has no slide path. It is a separate milestone (C2 in
   the roadmap).
   **110 (Pocket Instamatic) film in the strip holder — supported, two
