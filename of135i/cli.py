@@ -27,15 +27,21 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
+import concurrent.futures
 import errno
+import functools
 import logging
 import os
+import queue
 import re
 import shutil
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 import usb.core
@@ -78,6 +84,9 @@ _MAX_OVERSCAN_MM = 5.0
 #: Environment variable holding a per-unit default for --position-offset
 #: (mm). The flag overrides it; unset or empty means 0.
 POSITION_OFFSET_ENV = "OF135I_POSITION_OFFSET"
+# Set to anything but "" / "0" to finish every frame before the next scan
+# starts (no overlap of post-processing and scanning; see _PostScanWorker).
+SERIAL_POSTPROCESS_ENV = "OF135I_SERIAL_POSTPROCESS"
 
 POSITION_OFFSET_HELP = (
     "per-unit position correction, mm along the strip (default: the "
@@ -267,6 +276,90 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0
+
+
+class _PostScanWorker:
+    """Runs a batch's per-frame post-processing (the dual-light split,
+    dust removal, crop, TIFF writes and the diag sidecar) on ONE worker
+    thread while the main thread scans the next frame; the scanner is
+    otherwise idle for minutes per frame at 7200 dpi.
+
+    At most one frame is in flight (a ~7200 dpi frame holds ~9 GB while it
+    is processed): `submit` first waits for the previous frame, and raises
+    its exception on the main thread, so a failed frame stops the batch
+    and reaches _run_writing_session exactly as it did when the work ran
+    inline. `check` raises a finished frame's failure before the next
+    frame is scanned. Disabled (`enabled=False`) it runs every job inline.
+    """
+
+    def __init__(self, enabled: bool):
+        self._jobs: "queue.SimpleQueue | None" = None
+        self._pending: "concurrent.futures.Future | None" = None
+        if enabled:
+            self._jobs = queue.SimpleQueue()
+            # Daemon: a second Ctrl-C while waiting may abandon the frame.
+            threading.Thread(target=self._run, name="of135i-post",
+                             daemon=True).start()
+
+    def _run(self) -> None:
+        # The USB reads on the main thread must not starve behind the
+        # image maths: run at a lower priority (inherited by any helper
+        # threads the numpy work starts).
+        try:
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+        except (AttributeError, OSError):
+            pass
+        while True:
+            item = self._jobs.get()
+            if item is None:
+                return
+            fut, job = item
+            item = None
+            if fut.set_running_or_notify_cancel():
+                try:
+                    fut.set_result(job())
+                except BaseException as e:      # re-raised by the caller
+                    fut.set_exception(e)
+            fut = job = None                    # release the frame's raw buffer
+
+    def check(self) -> None:
+        """Raise the in-flight frame's exception if it has already failed."""
+        if self._pending is not None and self._pending.done():
+            self.drain()
+
+    def submit(self, job: Callable[[], None]) -> None:
+        if self._jobs is None:
+            job()
+            return
+        self.drain()
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        self._pending = fut
+        self._jobs.put((fut, job))
+
+    def drain(self) -> None:
+        """Wait for the in-flight frame; raise its exception."""
+        fut, self._pending = self._pending, None
+        if fut is not None:
+            fut.result()
+
+    def abort(self) -> None:
+        """The batch is failing for another reason: let the frame in
+        flight finish writing (its scan is already paid for), and say so
+        if it failed too -- never swallow it."""
+        fut, self._pending = self._pending, None
+        if fut is None:
+            return
+        if not fut.done():
+            print("waiting for the post-processing of the previous frame to "
+                  "finish (Ctrl-C again to abandon it)", file=sys.stderr)
+        err = fut.exception()
+        if err is not None:
+            print(f"error: post-processing of the previous frame also failed: "
+                  f"{type(err).__name__}: {err}", file=sys.stderr)
+
+    def close(self) -> None:
+        if self._jobs is not None:
+            self._jobs.put(None)
 
 
 def _run_writing_session(body: Callable[[Scanner], int]) -> int:
@@ -570,37 +663,65 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         # command (shared across every aperture scanned), not per frame.
         film110_state = (Film110State(getattr(args, "placement", None))
                          if getattr(args, "film", "135") == "110" else None)
-        for frame in frames:
-            scanner.initialize(ir=dual, dpi=args.dpi)
-            out = _frame_output(args.output, frame) if multi else args.output
-            log.info("scanning frame %d @ %d dpi%s", frame, args.dpi,
-                      " (dual-light pass)" if dual else "")
-            cov = None
-            if slide:
-                # One opening = the strip path's position-scan-PARK with
-                # the slide geometry; coverage and crop keyed on the IR
-                # channel (aperture_crop.measure_slide_coverage), same
-                # contract as strips.
-                raw, width, _meta = scanner.scan(
-                    frame=frame, ir=True, dpi=args.dpi,
-                    overscan_mm=args.overscan, slide=True)
-                cov = _finish_dual_scan(args, raw, width, out, write_ir=args.ir,
-                                        frame=frame, slide=True)
-            elif dual:
-                raw, width, _meta = scanner.scan(
-                    frame=frame, ir=True, dpi=args.dpi,
-                    overscan_mm=getattr(args, "overscan", None))
-                cov = _finish_dual_scan(args, raw, width, out, write_ir=args.ir,
-                                        frame=frame, film110_state=film110_state)
-            else:
-                raw, width = scanner.scan(
-                    frame=frame, overscan_mm=getattr(args, "overscan", None))
-                cov = _finish_plain_scan(args, raw, width, out, frame=frame,
-                                         film110_state=film110_state)
-            del raw
+        # Frame N's post-processing overlaps frame N+1's scan (dual-light
+        # batches only; a single frame has nothing to overlap with).
+        worker = _PostScanWorker(
+            enabled=dual and len(frames) > 1
+            and os.environ.get(SERIAL_POSTPROCESS_ENV, "") in ("", "0"))
+
+        def post(frame: int, out: str, finish, diag_src) -> None:
+            cov = finish()
             if cov is not None and not cov.verified:
                 incomplete.append(frame)
-            _write_diag_sidecar(args, scanner, out, frame, coverage=cov)
+            _write_diag_sidecar(args, diag_src, out, frame, coverage=cov)
+
+        try:
+            for frame in frames:
+                worker.check()
+                scanner.initialize(ir=dual, dpi=args.dpi)
+                out = _frame_output(args.output, frame) if multi else args.output
+                log.info("scanning frame %d @ %d dpi%s", frame, args.dpi,
+                          " (dual-light pass)" if dual else "")
+                if slide:
+                    # One opening = the strip path's position-scan-PARK with
+                    # the slide geometry; coverage and crop keyed on the IR
+                    # channel (aperture_crop.measure_slide_coverage), same
+                    # contract as strips.
+                    raw, width, _meta = scanner.scan(
+                        frame=frame, ir=True, dpi=args.dpi,
+                        overscan_mm=args.overscan, slide=True)
+                    finish = functools.partial(
+                        _finish_dual_scan, args, raw, width, out,
+                        write_ir=args.ir, frame=frame, slide=True)
+                elif dual:
+                    raw, width, _meta = scanner.scan(
+                        frame=frame, ir=True, dpi=args.dpi,
+                        overscan_mm=getattr(args, "overscan", None))
+                    finish = functools.partial(
+                        _finish_dual_scan, args, raw, width, out,
+                        write_ir=args.ir, frame=frame,
+                        film110_state=film110_state)
+                else:
+                    raw, width = scanner.scan(
+                        frame=frame, overscan_mm=getattr(args, "overscan", None))
+                    finish = functools.partial(
+                        _finish_plain_scan, args, raw, width, out, frame=frame,
+                        film110_state=film110_state)
+                del raw
+                # The next scan replaces the scanner's per-scan diagnostics,
+                # so a frame finished in the background keeps its own copy.
+                diag_src = (SimpleNamespace(
+                                last_diag=copy.deepcopy(scanner.last_diag),
+                                last_cal_data=scanner.last_cal_data)
+                            if worker._jobs is not None else scanner)
+                worker.submit(functools.partial(post, frame, out, finish, diag_src))
+                del finish
+            worker.drain()
+        except BaseException:
+            worker.abort()
+            raise
+        finally:
+            worker.close()
         if args.eject:
             scanner.eject()
             print("ejected")
