@@ -57,6 +57,7 @@ SUITES = (
     ("test_position_offset", "core"), ("test_recrop", "core"), ("test_album", "core"),
     ("test_py310_syntax", "core"), ("test_cold_homing_rounds", "core"),
     ("test_diag_readback_regs", "core"), ("test_load_probe", "core"), ("test_replay_harness", "core"),
+    ("test_postscan_perf", "core"),
     ("test_sane_mark", "compiler"), ("test_sane_ops", "compiler"),
     ("test_sane_geometry", "compiler"), ("test_sane_install", "compiler"),
     ("test_sane_open_params", "backend"), ("test_sane_calibration_cache", "backend"),

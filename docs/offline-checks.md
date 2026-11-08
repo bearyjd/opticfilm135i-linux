@@ -83,7 +83,8 @@ for t in test_safety test_cold_reseat test_calibrate test_hwblock \
          test_cr_mismatch_details test_trace_recorder \
          test_position_offset test_recrop test_album \
          test_py310_syntax test_cold_homing_rounds test_diag_readback_regs \
-         test_load_probe test_replay_harness; do
+         test_load_probe test_replay_harness \
+         test_postscan_perf; do
     .venv/bin/python tests/run_suite.py $t || exit 1
 done
 ```
