@@ -60,6 +60,12 @@ one exists; "offline" means implemented and tested without the scanner.
   moves, the pre-move prep and the resync are unchanged. EXPERIMENTAL,
   motor-affecting and unverified on hardware; the default (3) wire traffic
   is identical to before. Invalid values are rejected before any transfer.
+- **Faster dust removal and TIFF writing, same output.** `remove_dust`
+  builds the fill plan once for all channels and reads the summed-area
+  tables only at the masked pixels; `write_tiff16` streams the pixel
+  block instead of joining a copy; `align_channels` copies once. Pixels
+  and written bytes are identical to before (offline suite
+  `test_postscan_perf`, compared against a frozen copy of the old code).
 
 - **Opt-in read-back register diagnostic** (offline): `--diag-readback-regs`
   on `scan` and `digitize` (`Scanner.diag_readback_regs`, default off). When
