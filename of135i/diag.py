@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import usb.core
 import usb.util
 
 from . import safety, tables, tables_ir
@@ -377,6 +378,40 @@ def sidecar_path(out: str) -> str:
     """Per-scan diagnostics sidecar path for an output image path:
     foo.tiff -> foo.diag.json, dir/x.pnm -> dir/x.diag.json."""
     return str(Path(out).with_suffix(".diag.json"))
+
+
+def failure_path(out: str) -> str:
+    """Failure record path for an output image path: foo.tiff ->
+    foo.fail.json (where foo.diag.json would have been written had the
+    frame finished)."""
+    return str(Path(out).with_suffix(".fail.json"))
+
+
+# errno -> (kind, what it means for the operator). Descriptive only: the
+# driver's reaction to every one of them is the same (stop, send nothing).
+_USB_ERROR_KINDS = {
+    19: ("device_gone", "the scanner dropped off the USB bus (power, cable, hub, "
+                        "or the device reset itself)"),
+    110: ("timeout", "the scanner stayed on the bus but did not answer in time "
+                     "(a stall: it stopped producing data or did not finish a move)"),
+    32: ("pipe", "the scanner refused the transfer (endpoint stalled)"),
+    5: ("io_error", "the USB transfer failed on the wire (cable, hub or host "
+                    "controller error; often followed by the device leaving the bus)"),
+}
+
+
+def classify_usb_error(exc: BaseException) -> dict | None:
+    """Name a pyusb error for a failure report: ``{"kind", "errno",
+    "meaning"}``, or None when `exc` is not a USB error. Tells a device
+    that left the bus (errno 19) from one that stopped answering (110)."""
+    if not isinstance(exc, usb.core.USBError):
+        return None
+    errno = getattr(exc, "errno", None)
+    kind, meaning = _USB_ERROR_KINDS.get(
+        errno, ("usb_error", "an unclassified USB error"))
+    if errno is None and isinstance(exc, usb.core.USBTimeoutError):
+        kind, meaning = _USB_ERROR_KINDS[110]
+    return {"kind": kind, "errno": errno, "meaning": meaning}
 
 
 def cal_data_path(out: str) -> str:

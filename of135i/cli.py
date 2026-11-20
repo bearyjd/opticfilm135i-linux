@@ -37,6 +37,7 @@ import shutil
 import sys
 import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -320,6 +321,48 @@ def _busy_not_started(roll) -> int:
           f"process holds the lock). {safety.BUSY_NO_RECOVERY_MSG}",
           file=sys.stderr)
     return EXIT_BUSY
+
+
+def _report_frame_failure(args: argparse.Namespace, scanner: Scanner, out: str,
+                          frame: int, frames: list[int], finished: list[int],
+                          exc: BaseException) -> None:
+    """Say which frame of a scan run failed, how far it had got and what
+    kind of USB error it was, and keep that as <out>'s .fail.json record
+    (unless --no-diag). Reads driver state only; sends nothing. A record
+    that cannot be written is reported and never replaces the failure."""
+    usb_info = diag.classify_usb_error(exc)
+    progress = scanner.progress()
+    done = ", ".join(map(str, finished)) or "none"
+    print(f"error: frame {frame} failed; frames finished before it: {done} "
+          f"(their files are complete and were kept)", file=sys.stderr)
+    if usb_info is not None:
+        print(f"USB: {usb_info['kind']} (errno {usb_info['errno']}): "
+              f"{usb_info['meaning']}", file=sys.stderr)
+    if progress is not None:
+        print(f"progress: phase {progress['phase']}, op {progress['op_index']} of "
+              f"{progress['ops_total']}, {progress['bulk_in_reads']} image read(s) / "
+              f"{progress['bulk_in_bytes']} bytes received, {progress['seconds']} s "
+              f"into the phase", file=sys.stderr)
+    if getattr(args, "no_diag", False):
+        return
+    record = {
+        "frame": frame,
+        "frames_requested": list(frames),
+        "frames_finished": list(finished),
+        "exception": f"{type(exc).__name__}: {exc}",
+        "usb": usb_info,
+        "progress": progress,
+        "session": scanner.session.snapshot(),
+        "failed_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    path = diag.failure_path(out)
+    try:
+        diag.write_sidecar(path, record)
+    except Exception as e:
+        print(f"warning: could not write the failure record {path}: {e}",
+              file=sys.stderr)
+        return
+    print(f"wrote {path}", file=sys.stderr)
 
 
 def _print_session_failure(scanner: Scanner | None) -> None:
@@ -624,44 +667,53 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                   "and run load_magazine.py first", file=sys.stderr)
             return 1
         incomplete: list[int] = []
+        finished: list[int] = []
         # --film 110: one running counter/state object for the WHOLE
         # command (shared across every aperture scanned), not per frame.
         film110_state = (Film110State(getattr(args, "placement", None))
                          if getattr(args, "film", "135") == "110" else None)
         for frame in frames:
-            scanner.initialize(ir=dual, dpi=args.dpi)
             out = _frame_output(args.output, frame) if multi else args.output
-            log.info("scanning frame %d @ %d dpi%s", frame, args.dpi,
-                      " (dual-light pass)" if dual else "")
-            cov = None
-            if slide_spec is not None:
-                # One slide = the strip path's load-position-scan-PARK
-                # with the slide geometry. No coverage check (cov stays
-                # None): the strip crossbar detector does not apply, and
-                # the full overscan pair IS the slide product.
-                raw, width, _meta = scanner.scan(
-                    frame=frame, ir=True, dpi=args.dpi,
-                    overscan_mm=args.overscan, slide=True)
-                # The IR overscan frame is ALWAYS written for a slide (the
-                # visible + IR pair is the product); --ir/--no-clean only
-                # decide the dust cleaning (see _finish_dual_scan).
-                _finish_dual_scan(args, raw, width, out, write_ir=True,
-                                  frame=frame, slide=True)
-            elif dual:
-                raw, width, _meta = scanner.scan(
-                    frame=frame, ir=True, dpi=args.dpi,
-                    overscan_mm=getattr(args, "overscan", None))
-                cov = _finish_dual_scan(args, raw, width, out, write_ir=args.ir,
-                                        frame=frame, film110_state=film110_state)
-            else:
-                raw, width = scanner.scan(
-                    frame=frame, overscan_mm=getattr(args, "overscan", None))
-                cov = _finish_plain_scan(args, raw, width, out, frame=frame,
-                                         film110_state=film110_state)
-            del raw
-            if cov is not None and not cov.verified:
-                incomplete.append(frame)
-            _write_diag_sidecar(args, scanner, out, frame, coverage=cov)
+            try:
+                scanner.initialize(ir=dual, dpi=args.dpi)
+                log.info("scanning frame %d @ %d dpi%s", frame, args.dpi,
+                          " (dual-light pass)" if dual else "")
+                cov = None
+                if slide_spec is not None:
+                    # One slide = the strip path's load-position-scan-PARK
+                    # with the slide geometry. No coverage check (cov stays
+                    # None): the strip crossbar detector does not apply, and
+                    # the full overscan pair IS the slide product.
+                    raw, width, _meta = scanner.scan(
+                        frame=frame, ir=True, dpi=args.dpi,
+                        overscan_mm=args.overscan, slide=True)
+                    # The IR overscan frame is ALWAYS written for a slide (the
+                    # visible + IR pair is the product); --ir/--no-clean only
+                    # decide the dust cleaning (see _finish_dual_scan).
+                    _finish_dual_scan(args, raw, width, out, write_ir=True,
+                                      frame=frame, slide=True)
+                elif dual:
+                    raw, width, _meta = scanner.scan(
+                        frame=frame, ir=True, dpi=args.dpi,
+                        overscan_mm=getattr(args, "overscan", None))
+                    cov = _finish_dual_scan(args, raw, width, out, write_ir=args.ir,
+                                            frame=frame, film110_state=film110_state)
+                else:
+                    raw, width = scanner.scan(
+                        frame=frame, overscan_mm=getattr(args, "overscan", None))
+                    cov = _finish_plain_scan(args, raw, width, out, frame=frame,
+                                             film110_state=film110_state)
+                del raw
+                if cov is not None and not cov.verified:
+                    incomplete.append(frame)
+                _write_diag_sidecar(args, scanner, out, frame, coverage=cov)
+            except BaseException as exc:
+                # Evidence only: nothing is sent to the scanner here, and
+                # the exception goes on to _run_writing_session unchanged.
+                _report_frame_failure(args, scanner, out, frame, frames,
+                                      finished, exc)
+                raise
+            finished.append(frame)
         if args.eject:
             _report_eject(scanner.eject())
         if incomplete:
@@ -4499,13 +4551,28 @@ def _install_resilient_console() -> None:
         sys.stderr = _ResilientStream(sys.stderr)
 
 
+LOG_DATEFMT = "%H:%M:%S"
+_LOG_FORMAT = "%(levelname)s %(name)s: %(message)s"
+
+
+def _log_format(env) -> str:
+    """The log line format. OF135I_LOG_TIME=1 puts the wall clock
+    (HH:MM:SS.mmm) in front of every line, so a kept log shows when the
+    scanner went quiet; unset, the format is unchanged (programs that
+    read the log keep working)."""
+    if str(env.get("OF135I_LOG_TIME", "")).strip() == "1":
+        return "%(asctime)s.%(msecs)03d " + _LOG_FORMAT
+    return _LOG_FORMAT
+
+
 def main(argv: list[str] | None = None) -> int:
     _install_resilient_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(name)s: %(message)s",
+        format=_log_format(os.environ),
+        datefmt=LOG_DATEFMT,
     )
     return args.func(args)
 

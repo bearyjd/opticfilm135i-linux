@@ -1239,6 +1239,11 @@ class Scanner:
         dev = self.io.dev
         collected: list[bytes] = []
         cur: bytearray | None = None
+        # Where this op stream is, for a failure report (progress()).
+        # Bookkeeping only: nothing here reaches the wire.
+        prog = self._progress = {"op_index": 0, "ops_total": len(ops),
+                                 "bulk_in_reads": 0, "bulk_in_bytes": 0,
+                                 "t0": time.monotonic()}
 
         def flush() -> None:
             nonlocal cur
@@ -1250,6 +1255,7 @@ class Scanner:
                 cur = None
 
         for idx, op in enumerate(ops):
+            prog["op_index"] = idx
             if op.dt > _PACE_THRESHOLD:
                 time.sleep(min(op.dt, _PACE_CAP))
 
@@ -1331,6 +1337,8 @@ class Scanner:
                         raise
                     cap.note_read(self.session.phase, op.length, len(data),
                                   _t0, time.monotonic(), None)
+                prog["bulk_in_reads"] += 1
+                prog["bulk_in_bytes"] += len(data)
                 if self._cal_integrity_telemetry:
                     self._cal_note_bulk()
                 if (cur is not None and len(data) != op.length
@@ -1946,6 +1954,19 @@ class Scanner:
             f"disable it with `--cal-wait-scanstop off`. "
             f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
             session=self.session.snapshot()) from cause
+
+    def progress(self) -> dict | None:
+        """How far the op stream that ran last had got: phase, op index of
+        ops total, completed bulk-IN reads and bytes, seconds since it
+        began. For failure reports; None before any op stream ran."""
+        prog = getattr(self, "_progress", None)
+        if prog is None:
+            return None
+        return {"phase": self.session.phase,
+                "op_index": prog["op_index"], "ops_total": prog["ops_total"],
+                "bulk_in_reads": prog["bulk_in_reads"],
+                "bulk_in_bytes": prog["bulk_in_bytes"],
+                "seconds": round(time.monotonic() - prog["t0"], 3)}
 
     def _run_phase(self, phase: Phase, strict_polls: frozenset[int] = frozenset(),
                    strict_mask: int = LOAD_STATUS_MASK, poll_timeout_scale: float = 1.0,
