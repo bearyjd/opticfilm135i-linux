@@ -1239,6 +1239,11 @@ class Scanner:
         dev = self.io.dev
         collected: list[bytes] = []
         cur: bytearray | None = None
+        # Where this op stream is, for a failure report (progress()).
+        # Bookkeeping only: nothing here reaches the wire.
+        prog = self._progress = {"op_index": 0, "ops_total": len(ops),
+                                 "bulk_in_reads": 0, "bulk_in_bytes": 0,
+                                 "t0": time.monotonic()}
 
         def flush() -> None:
             nonlocal cur
@@ -1250,6 +1255,7 @@ class Scanner:
                 cur = None
 
         for idx, op in enumerate(ops):
+            prog["op_index"] = idx
             if op.dt > _PACE_THRESHOLD:
                 time.sleep(min(op.dt, _PACE_CAP))
 
@@ -1331,6 +1337,8 @@ class Scanner:
                         raise
                     cap.note_read(self.session.phase, op.length, len(data),
                                   _t0, time.monotonic(), None)
+                prog["bulk_in_reads"] += 1
+                prog["bulk_in_bytes"] += len(data)
                 if self._cal_integrity_telemetry:
                     self._cal_note_bulk()
                 if (cur is not None and len(data) != op.length
@@ -1947,6 +1955,19 @@ class Scanner:
             f"{safety.NO_RECOVERY_ATTEMPTED} {safety.POWER_CYCLE_INSTRUCTION}",
             session=self.session.snapshot()) from cause
 
+    def progress(self) -> dict | None:
+        """How far the op stream that ran last had got: phase, op index of
+        ops total, completed bulk-IN reads and bytes, seconds since it
+        began. For failure reports; None before any op stream ran."""
+        prog = getattr(self, "_progress", None)
+        if prog is None:
+            return None
+        return {"phase": self.session.phase,
+                "op_index": prog["op_index"], "ops_total": prog["ops_total"],
+                "bulk_in_reads": prog["bulk_in_reads"],
+                "bulk_in_bytes": prog["bulk_in_bytes"],
+                "seconds": round(time.monotonic() - prog["t0"], 3)}
+
     def _run_phase(self, phase: Phase, strict_polls: frozenset[int] = frozenset(),
                    strict_mask: int = LOAD_STATUS_MASK, poll_timeout_scale: float = 1.0,
                    *, chunk_sink: Callable[[bytes], None] | None = None,
@@ -2224,6 +2245,10 @@ class Scanner:
         # argument is a plain error and not a hardware-session failure.
         t = _tables_for(dpi, ir)
         with self._operation("initialize", cold_ok=True):
+            # Count this preparation's poll timeouts from zero: scan()
+            # reports them as pre_scan_poll_timeouts. Bookkeeping only.
+            self._diag_poll_timeouts = 0
+            self._diag_poll_timeout_details = []
             if not prep:
                 from . import tables_load
                 if self.session.state is SessionState.COLD:
@@ -3685,19 +3710,17 @@ class Scanner:
             white_dips_diag=white_dips_diag,
             white_blocked_diag=white_blocked_diag)
 
-    def _scan_plain(self, frame: int,
-                    overscan_mm: float = holder.OVERSCAN_MM) -> tuple[bytes, int]:
-        # No homing move here. The vendor flow has none (protocol-notes.md
-        # pass 14): positioning below is an absolute mode-0x18 feed that
-        # works from wherever the previous frame left the carriage. The
-        # home() call that used to sit here executed mode 0x30 -- the
-        # scan pass -- with the previous frame's line count still in
-        # regs 0x25-0x27, i.e. a full-length engine run before the
-        # calibration reads (frame 2+ of a batch calibrated dark,
-        # 2026-09-01).
-
-        # ---- per-scan diagnostics: reset recording state (see diag.py) --
+    def _diag_reset(self) -> None:
+        """Start a scan's per-frame recording from zero (see diag.py).
+        Polls that timed out while this frame was prepared (initialize)
+        are kept for the sidecar before the scan's own count starts.
+        Bookkeeping only: nothing is sent to the scanner."""
         self._diag_phase_seconds = {}
+        # Polls that timed out while this frame was prepared (initialize):
+        # kept for the sidecar before the scan's own count starts.
+        self._diag_pre_scan_poll_timeouts = self._diag_poll_timeouts
+        self._diag_pre_scan_poll_timeout_details = list(
+            self._diag_poll_timeout_details)
         self._diag_poll_timeouts = 0
         self._diag_cr_mismatches = 0
         self._cal_acquisitions = []
@@ -3711,6 +3734,20 @@ class Scanner:
         self._diag_poll_settle_max_s = 0.0
         self._diag_warmup = None
         self._diag_park_waits = None
+
+    def _scan_plain(self, frame: int,
+                    overscan_mm: float = holder.OVERSCAN_MM) -> tuple[bytes, int]:
+        # No homing move here. The vendor flow has none (protocol-notes.md
+        # pass 14): positioning below is an absolute mode-0x18 feed that
+        # works from wherever the previous frame left the carriage. The
+        # home() call that used to sit here executed mode 0x30 -- the
+        # scan pass -- with the previous frame's line count still in
+        # regs 0x25-0x27, i.e. a full-length engine run before the
+        # calibration reads (frame 2+ of a batch calibrated dark,
+        # 2026-09-01).
+
+        # ---- per-scan diagnostics: reset recording state (see diag.py) --
+        self._diag_reset()
         started_utc = datetime.now(timezone.utc).isoformat()
         t_start = time.monotonic()
 
@@ -3831,6 +3868,9 @@ class Scanner:
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
+            "pre_scan_poll_timeouts": self._diag_pre_scan_poll_timeouts,
+            "pre_scan_poll_timeout_details": list(
+                self._diag_pre_scan_poll_timeout_details),
             "cr_mismatches": self._diag_cr_mismatches,
             "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
@@ -4027,20 +4067,7 @@ class Scanner:
         self._cal_cache = None
 
         # ---- per-scan diagnostics: reset recording state (see diag.py) --
-        self._diag_phase_seconds = {}
-        self._diag_poll_timeouts = 0
-        self._diag_cr_mismatches = 0
-        self._cal_acquisitions = []
-        self._cal_bufempty_waits = []
-        self._diag_cr_mismatch_details = []
-        self._cal_scanstop_waits = []
-        self._scanstop_go_phase = None
-        self._scanstop_armed = None
-        self._diag_poll_timeout_details = []
-        self._diag_poll_settle = []
-        self._diag_poll_settle_max_s = 0.0
-        self._diag_warmup = None
-        self._diag_park_waits = None
+        self._diag_reset()
         started_utc = datetime.now(timezone.utc).isoformat()
         t_start = time.monotonic()
 
@@ -4208,6 +4235,9 @@ class Scanner:
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
+            "pre_scan_poll_timeouts": self._diag_pre_scan_poll_timeouts,
+            "pre_scan_poll_timeout_details": list(
+                self._diag_pre_scan_poll_timeout_details),
             "cr_mismatches": self._diag_cr_mismatches,
             "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
@@ -4336,20 +4366,7 @@ class Scanner:
         holder.plain_sweep_geometry's anchoring gate).
         """
         W = tables.IMAGE_WIDTH
-        self._diag_phase_seconds = {}
-        self._diag_poll_timeouts = 0
-        self._diag_cr_mismatches = 0
-        self._cal_acquisitions = []
-        self._cal_bufempty_waits = []
-        self._diag_cr_mismatch_details = []
-        self._cal_scanstop_waits = []
-        self._scanstop_go_phase = None
-        self._scanstop_armed = None
-        self._diag_poll_timeout_details = []
-        self._diag_poll_settle = []
-        self._diag_poll_settle_max_s = 0.0
-        self._diag_warmup = None
-        self._diag_park_waits = None
+        self._diag_reset()
         started_utc = datetime.now(timezone.utc).isoformat()
         t_start = time.monotonic()
 
@@ -4457,6 +4474,9 @@ class Scanner:
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
+            "pre_scan_poll_timeouts": self._diag_pre_scan_poll_timeouts,
+            "pre_scan_poll_timeout_details": list(
+                self._diag_pre_scan_poll_timeout_details),
             "cr_mismatches": self._diag_cr_mismatches,
             "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
@@ -4482,20 +4502,7 @@ class Scanner:
         dpi = t.DPI
         self._cal_cache = None      # dual never caches (see _scan_dual)
 
-        self._diag_phase_seconds = {}
-        self._diag_poll_timeouts = 0
-        self._diag_cr_mismatches = 0
-        self._cal_acquisitions = []
-        self._cal_bufempty_waits = []
-        self._diag_cr_mismatch_details = []
-        self._cal_scanstop_waits = []
-        self._scanstop_go_phase = None
-        self._scanstop_armed = None
-        self._diag_poll_timeout_details = []
-        self._diag_poll_settle = []
-        self._diag_poll_settle_max_s = 0.0
-        self._diag_warmup = None
-        self._diag_park_waits = None
+        self._diag_reset()
         started_utc = datetime.now(timezone.utc).isoformat()
         t_start = time.monotonic()
 
@@ -4624,6 +4631,9 @@ class Scanner:
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
+            "pre_scan_poll_timeouts": self._diag_pre_scan_poll_timeouts,
+            "pre_scan_poll_timeout_details": list(
+                self._diag_pre_scan_poll_timeout_details),
             "cr_mismatches": self._diag_cr_mismatches,
             "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),

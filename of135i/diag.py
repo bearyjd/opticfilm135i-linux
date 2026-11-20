@@ -24,6 +24,7 @@ observed reading.
 
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import logging
@@ -34,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import usb.core
 import usb.util
 
 from . import safety, tables, tables_ir
@@ -377,6 +379,85 @@ def sidecar_path(out: str) -> str:
     """Per-scan diagnostics sidecar path for an output image path:
     foo.tiff -> foo.diag.json, dir/x.pnm -> dir/x.diag.json."""
     return str(Path(out).with_suffix(".diag.json"))
+
+
+def failure_path(out: str) -> str:
+    """Failure record path for an output image path: foo.tiff ->
+    foo.fail.json (where foo.diag.json would have been written had the
+    frame finished)."""
+    return str(Path(out).with_suffix(".fail.json"))
+
+
+# errno -> (kind, what it means for the operator). Descriptive only: the
+# driver's reaction to every one of them is the same (stop, send nothing).
+_USB_ERROR_KINDS = {
+    errno.ENODEV: (
+        "device_gone",
+        "the scanner dropped off the USB bus (power, cable, hub, "
+        "or the device reset itself)"),
+    errno.ETIMEDOUT: (
+        "timeout",
+        "the scanner stayed on the bus but did not answer in time "
+        "(a stall: it stopped producing data or did not finish a move)"),
+    errno.EPIPE: (
+        "pipe", "the scanner refused the transfer (endpoint stalled)"),
+    errno.EIO: (
+        "io_error",
+        "the USB transfer failed on the wire (cable, hub or host "
+        "controller error; often followed by the device leaving the bus)"),
+}
+
+# How far down an exception's __cause__/__context__ chain to look for a
+# wrapped USB error.
+_CHAIN_DEPTH = 8
+
+
+def _find_usb_error(exc: BaseException) -> usb.core.USBError | None:
+    """`exc` itself if it is a USB error, else the first one found walking
+    __cause__ then __context__ (bounded depth, each exception seen once)."""
+    seen: set[int] = set()
+    pending: list[tuple[BaseException, int]] = [(exc, 0)]
+    while pending:
+        cur, depth = pending.pop(0)
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, usb.core.USBError):
+            return cur
+        if depth < _CHAIN_DEPTH:
+            for nxt in (cur.__cause__, cur.__context__):
+                if nxt is not None:
+                    pending.append((nxt, depth + 1))
+    return None
+
+
+def classify_usb_error(exc: BaseException) -> dict | None:
+    """Name a pyusb error for a failure report: ``{"kind", "errno",
+    "meaning"}``, or None when neither `exc` nor anything it wraps (its
+    __cause__/__context__) is a USB error. Tells a device that left the
+    bus (ENODEV) from one that stopped answering (ETIMEDOUT)."""
+    usb_exc = _find_usb_error(exc)
+    if usb_exc is None:
+        return None
+    code = getattr(usb_exc, "errno", None)
+    kind, meaning = _USB_ERROR_KINDS.get(
+        code, ("usb_error", "an unclassified USB error"))
+    if code is None and isinstance(usb_exc, usb.core.USBTimeoutError):
+        kind, meaning = _USB_ERROR_KINDS[errno.ETIMEDOUT]
+    return {"kind": kind, "errno": code, "meaning": meaning}
+
+
+def remove_stale_failure(out: str) -> None:
+    """Delete `out`'s .fail.json left by an earlier failed run, now that
+    this run's frame finished. A record that is already gone is fine;
+    any other error is logged (the stale file stays, say so)."""
+    path = failure_path(out)
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        log.warning("could not remove the stale failure record %s: %s", path, e)
 
 
 def cal_data_path(out: str) -> str:
