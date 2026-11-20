@@ -2245,6 +2245,10 @@ class Scanner:
         # argument is a plain error and not a hardware-session failure.
         t = _tables_for(dpi, ir)
         with self._operation("initialize", cold_ok=True):
+            # Count this preparation's poll timeouts from zero: scan()
+            # reports them as pre_scan_poll_timeouts. Bookkeeping only.
+            self._diag_poll_timeouts = 0
+            self._diag_poll_timeout_details = []
             if not prep:
                 from . import tables_load
                 if self.session.state is SessionState.COLD:
@@ -3719,6 +3723,11 @@ class Scanner:
 
         # ---- per-scan diagnostics: reset recording state (see diag.py) --
         self._diag_phase_seconds = {}
+        # Polls that timed out while this frame was prepared (initialize):
+        # kept for the sidecar before the scan's own count starts.
+        self._diag_pre_scan_poll_timeouts = self._diag_poll_timeouts
+        self._diag_pre_scan_poll_timeout_details = list(
+            self._diag_poll_timeout_details)
         self._diag_poll_timeouts = 0
         self._diag_cr_mismatches = 0
         self._cal_acquisitions = []
@@ -3852,6 +3861,9 @@ class Scanner:
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
+            "pre_scan_poll_timeouts": self._diag_pre_scan_poll_timeouts,
+            "pre_scan_poll_timeout_details": list(
+                self._diag_pre_scan_poll_timeout_details),
             "cr_mismatches": self._diag_cr_mismatches,
             "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
@@ -4049,6 +4061,11 @@ class Scanner:
 
         # ---- per-scan diagnostics: reset recording state (see diag.py) --
         self._diag_phase_seconds = {}
+        # Polls that timed out while this frame was prepared (initialize):
+        # kept for the sidecar before the scan's own count starts.
+        self._diag_pre_scan_poll_timeouts = self._diag_poll_timeouts
+        self._diag_pre_scan_poll_timeout_details = list(
+            self._diag_poll_timeout_details)
         self._diag_poll_timeouts = 0
         self._diag_cr_mismatches = 0
         self._cal_acquisitions = []
@@ -4229,6 +4246,9 @@ class Scanner:
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
+            "pre_scan_poll_timeouts": self._diag_pre_scan_poll_timeouts,
+            "pre_scan_poll_timeout_details": list(
+                self._diag_pre_scan_poll_timeout_details),
             "cr_mismatches": self._diag_cr_mismatches,
             "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
@@ -4358,6 +4378,11 @@ class Scanner:
         """
         W = tables.IMAGE_WIDTH
         self._diag_phase_seconds = {}
+        # Polls that timed out while this frame was prepared (initialize):
+        # kept for the sidecar before the scan's own count starts.
+        self._diag_pre_scan_poll_timeouts = self._diag_poll_timeouts
+        self._diag_pre_scan_poll_timeout_details = list(
+            self._diag_poll_timeout_details)
         self._diag_poll_timeouts = 0
         self._diag_cr_mismatches = 0
         self._cal_acquisitions = []
@@ -4478,6 +4503,9 @@ class Scanner:
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
+            "pre_scan_poll_timeouts": self._diag_pre_scan_poll_timeouts,
+            "pre_scan_poll_timeout_details": list(
+                self._diag_pre_scan_poll_timeout_details),
             "cr_mismatches": self._diag_cr_mismatches,
             "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
@@ -4504,6 +4532,11 @@ class Scanner:
         self._cal_cache = None      # dual never caches (see _scan_dual)
 
         self._diag_phase_seconds = {}
+        # Polls that timed out while this frame was prepared (initialize):
+        # kept for the sidecar before the scan's own count starts.
+        self._diag_pre_scan_poll_timeouts = self._diag_poll_timeouts
+        self._diag_pre_scan_poll_timeout_details = list(
+            self._diag_poll_timeout_details)
         self._diag_poll_timeouts = 0
         self._diag_cr_mismatches = 0
         self._cal_acquisitions = []
@@ -4645,6 +4678,9 @@ class Scanner:
             "phase_seconds": dict(self._diag_phase_seconds),
             "total_seconds": time.monotonic() - t_start,
             "poll_timeouts": self._diag_poll_timeouts,
+            "pre_scan_poll_timeouts": self._diag_pre_scan_poll_timeouts,
+            "pre_scan_poll_timeout_details": list(
+                self._diag_pre_scan_poll_timeout_details),
             "cr_mismatches": self._diag_cr_mismatches,
             "cr_mismatch_details": list(self._diag_cr_mismatch_details),
             "poll_timeout_details": list(self._diag_poll_timeout_details),
