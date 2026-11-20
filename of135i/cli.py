@@ -710,8 +710,14 @@ def _cmd_scan(args: argparse.Namespace) -> int:
             except BaseException as exc:
                 # Evidence only: nothing is sent to the scanner here, and
                 # the exception goes on to _run_writing_session unchanged.
-                _report_frame_failure(args, scanner, out, frame, frames,
-                                      finished, exc)
+                # Gathering the evidence must never replace the failure.
+                try:
+                    _report_frame_failure(args, scanner, out, frame, frames,
+                                          finished, exc)
+                except Exception as report_error:
+                    print(f"warning: could not describe the failure of frame "
+                          f"{frame}: {type(report_error).__name__}: {report_error}",
+                          file=sys.stderr)
                 raise
             finished.append(frame)
         if args.eject:

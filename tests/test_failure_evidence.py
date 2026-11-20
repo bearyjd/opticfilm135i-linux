@@ -138,6 +138,24 @@ def test_a_record_that_cannot_be_written_does_not_hide_the_failure():
         assert "could not write" in se
 
 
+def test_a_scanner_that_cannot_report_progress_still_fails_with_the_real_error():
+    """Evidence gathering must never replace the failure (a test double, or a
+    driver state the report did not foresee)."""
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "x.tiff")
+
+        def broken(self):
+            raise AttributeError("no progress here")
+
+        from of135i.device import Scanner
+        with patched(Scanner, "progress", broken):
+            code, so, se, scanner, fake = _run(
+                ["scan", "--frame", "1", "-o", out, *BASE], 1, _gone)
+        assert code == 1 and "USBError" in se and "No such device" in se, se
+        assert "could not describe the failure of frame 1" in se
+        _assert_power_cycle_message(se)
+
+
 def test_progress_counts_the_image_reads_before_the_failure():
     with tempfile.TemporaryDirectory() as td:
         out = str(Path(td) / "x.tiff")
@@ -170,7 +188,10 @@ def test_log_format_has_a_clock_only_when_asked():
 
 
 if __name__ == "__main__":
+    ran = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn()
             print(f"{name} OK")
+            ran += 1
+    print(f"{ran} tests passed")
