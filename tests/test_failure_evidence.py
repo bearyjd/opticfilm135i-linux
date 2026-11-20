@@ -195,3 +195,95 @@ if __name__ == "__main__":
             print(f"{name} OK")
             ran += 1
     print(f"{ran} tests passed")
+
+
+def _succeed(argv):
+    """Run the CLI over a fake that never faults (image finishing stubbed)."""
+    fake = FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers())
+    with cli_over(fake), patched(cli, "_finish_plain_scan", lambda *a, **k: None):
+        return _cli(argv)
+
+
+def test_a_later_good_run_removes_the_old_failure_record():
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "x.tiff")
+        argv = ["scan", "--frame", "1", "-o", out, *BASE]
+        code, so, se, scanner, fake = _run(argv, 1, _gone)
+        assert code == 1 and Path(diag.failure_path(out)).exists()
+        code, so, se = _succeed(argv)
+        assert code == 0, (code, se)
+        assert Path(diag.sidecar_path(out)).exists()
+        assert not Path(diag.failure_path(out)).exists()
+
+
+def test_a_failure_record_that_cannot_be_removed_is_logged_not_hidden(caplog):
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "x.tiff")
+        argv = ["scan", "--frame", "1", "-o", out, *BASE]
+        _run(argv, 1, _gone)
+        real_unlink = Path.unlink
+
+        def refuse(self, *a, **k):
+            if self.name.endswith(".fail.json"):
+                raise PermissionError("read-only")
+            return real_unlink(self, *a, **k)
+
+        with patched(Path, "unlink", refuse), caplog.at_level(logging.WARNING, "of135i"):
+            code, so, se = _succeed(argv)
+        assert code == 0, (code, se)
+        assert "fail.json" in caplog.text and "read-only" in caplog.text
+
+
+class _Chain:
+    @staticmethod
+    def wrap(inner: BaseException) -> Exception:
+        try:
+            try:
+                raise inner
+            except BaseException as e:
+                raise RuntimeError("calibration failed") from e
+        except RuntimeError as outer:
+            return outer
+
+
+def test_wrapped_usb_errors_are_classified_by_their_cause():
+    gone = diag.classify_usb_error(_Chain.wrap(_gone()))
+    assert gone["kind"] == "device_gone" and gone["errno"] == 19
+    stall = diag.classify_usb_error(_Chain.wrap(_usb_timeout()))
+    assert stall["kind"] == "timeout" and stall["errno"] == 110
+
+
+def test_wrapped_usb_error_found_through_context_too():
+    try:
+        try:
+            raise _gone()
+        except usb.core.USBError:
+            raise ValueError("while handling")  # noqa: B904 -- implicit __context__ is the point
+    except ValueError as e:
+        assert diag.classify_usb_error(e)["kind"] == "device_gone"
+
+
+def test_the_exception_itself_wins_over_its_cause():
+    try:
+        try:
+            raise _gone()
+        except usb.core.USBError as e:
+            raise _usb_timeout() from e
+    except usb.core.USBError as top:
+        assert diag.classify_usb_error(top)["kind"] == "timeout"
+
+
+def test_a_cyclic_cause_chain_terminates():
+    a, b = RuntimeError("a"), RuntimeError("b")
+    a.__cause__, b.__cause__ = b, a
+    assert diag.classify_usb_error(a) is None
+
+
+def test_a_chain_without_usb_errors_is_not_usb():
+    assert diag.classify_usb_error(_Chain.wrap(ValueError("plain"))) is None
+
+
+def test_usb_kinds_are_keyed_by_errno_constants():
+    import errno
+    assert set(diag._USB_ERROR_KINDS) == {
+        errno.ENODEV, errno.ETIMEDOUT, errno.EPIPE, errno.EIO}

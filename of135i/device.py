@@ -3710,18 +3710,11 @@ class Scanner:
             white_dips_diag=white_dips_diag,
             white_blocked_diag=white_blocked_diag)
 
-    def _scan_plain(self, frame: int,
-                    overscan_mm: float = holder.OVERSCAN_MM) -> tuple[bytes, int]:
-        # No homing move here. The vendor flow has none (protocol-notes.md
-        # pass 14): positioning below is an absolute mode-0x18 feed that
-        # works from wherever the previous frame left the carriage. The
-        # home() call that used to sit here executed mode 0x30 -- the
-        # scan pass -- with the previous frame's line count still in
-        # regs 0x25-0x27, i.e. a full-length engine run before the
-        # calibration reads (frame 2+ of a batch calibrated dark,
-        # 2026-09-01).
-
-        # ---- per-scan diagnostics: reset recording state (see diag.py) --
+    def _diag_reset(self) -> None:
+        """Start a scan's per-frame recording from zero (see diag.py).
+        Polls that timed out while this frame was prepared (initialize)
+        are kept for the sidecar before the scan's own count starts.
+        Bookkeeping only: nothing is sent to the scanner."""
         self._diag_phase_seconds = {}
         # Polls that timed out while this frame was prepared (initialize):
         # kept for the sidecar before the scan's own count starts.
@@ -3741,6 +3734,20 @@ class Scanner:
         self._diag_poll_settle_max_s = 0.0
         self._diag_warmup = None
         self._diag_park_waits = None
+
+    def _scan_plain(self, frame: int,
+                    overscan_mm: float = holder.OVERSCAN_MM) -> tuple[bytes, int]:
+        # No homing move here. The vendor flow has none (protocol-notes.md
+        # pass 14): positioning below is an absolute mode-0x18 feed that
+        # works from wherever the previous frame left the carriage. The
+        # home() call that used to sit here executed mode 0x30 -- the
+        # scan pass -- with the previous frame's line count still in
+        # regs 0x25-0x27, i.e. a full-length engine run before the
+        # calibration reads (frame 2+ of a batch calibrated dark,
+        # 2026-09-01).
+
+        # ---- per-scan diagnostics: reset recording state (see diag.py) --
+        self._diag_reset()
         started_utc = datetime.now(timezone.utc).isoformat()
         t_start = time.monotonic()
 
@@ -4060,25 +4067,7 @@ class Scanner:
         self._cal_cache = None
 
         # ---- per-scan diagnostics: reset recording state (see diag.py) --
-        self._diag_phase_seconds = {}
-        # Polls that timed out while this frame was prepared (initialize):
-        # kept for the sidecar before the scan's own count starts.
-        self._diag_pre_scan_poll_timeouts = self._diag_poll_timeouts
-        self._diag_pre_scan_poll_timeout_details = list(
-            self._diag_poll_timeout_details)
-        self._diag_poll_timeouts = 0
-        self._diag_cr_mismatches = 0
-        self._cal_acquisitions = []
-        self._cal_bufempty_waits = []
-        self._diag_cr_mismatch_details = []
-        self._cal_scanstop_waits = []
-        self._scanstop_go_phase = None
-        self._scanstop_armed = None
-        self._diag_poll_timeout_details = []
-        self._diag_poll_settle = []
-        self._diag_poll_settle_max_s = 0.0
-        self._diag_warmup = None
-        self._diag_park_waits = None
+        self._diag_reset()
         started_utc = datetime.now(timezone.utc).isoformat()
         t_start = time.monotonic()
 
@@ -4377,25 +4366,7 @@ class Scanner:
         holder.plain_sweep_geometry's anchoring gate).
         """
         W = tables.IMAGE_WIDTH
-        self._diag_phase_seconds = {}
-        # Polls that timed out while this frame was prepared (initialize):
-        # kept for the sidecar before the scan's own count starts.
-        self._diag_pre_scan_poll_timeouts = self._diag_poll_timeouts
-        self._diag_pre_scan_poll_timeout_details = list(
-            self._diag_poll_timeout_details)
-        self._diag_poll_timeouts = 0
-        self._diag_cr_mismatches = 0
-        self._cal_acquisitions = []
-        self._cal_bufempty_waits = []
-        self._diag_cr_mismatch_details = []
-        self._cal_scanstop_waits = []
-        self._scanstop_go_phase = None
-        self._scanstop_armed = None
-        self._diag_poll_timeout_details = []
-        self._diag_poll_settle = []
-        self._diag_poll_settle_max_s = 0.0
-        self._diag_warmup = None
-        self._diag_park_waits = None
+        self._diag_reset()
         started_utc = datetime.now(timezone.utc).isoformat()
         t_start = time.monotonic()
 
@@ -4531,25 +4502,7 @@ class Scanner:
         dpi = t.DPI
         self._cal_cache = None      # dual never caches (see _scan_dual)
 
-        self._diag_phase_seconds = {}
-        # Polls that timed out while this frame was prepared (initialize):
-        # kept for the sidecar before the scan's own count starts.
-        self._diag_pre_scan_poll_timeouts = self._diag_poll_timeouts
-        self._diag_pre_scan_poll_timeout_details = list(
-            self._diag_poll_timeout_details)
-        self._diag_poll_timeouts = 0
-        self._diag_cr_mismatches = 0
-        self._cal_acquisitions = []
-        self._cal_bufempty_waits = []
-        self._diag_cr_mismatch_details = []
-        self._cal_scanstop_waits = []
-        self._scanstop_go_phase = None
-        self._scanstop_armed = None
-        self._diag_poll_timeout_details = []
-        self._diag_poll_settle = []
-        self._diag_poll_settle_max_s = 0.0
-        self._diag_warmup = None
-        self._diag_park_waits = None
+        self._diag_reset()
         started_utc = datetime.now(timezone.utc).isoformat()
         t_start = time.monotonic()
 

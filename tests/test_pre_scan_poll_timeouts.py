@@ -73,3 +73,42 @@ if __name__ == "__main__":
             print(f"{name} OK")
             ran += 1
     print(f"{ran} tests passed")
+
+
+def test_diag_reset_moves_the_count_aside_and_clears_the_rest():
+    scanner = make_scanner(FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers()))
+    scanner._diag_poll_timeouts = 4
+    scanner._diag_poll_timeout_details = [dict(DETAIL)]
+    scanner._diag_cr_mismatches = 2
+    scanner._diag_phase_seconds = {"park": 1.0}
+    scanner._diag_warmup = {"attempts": 1}
+    scanner._diag_reset()
+    assert scanner._diag_pre_scan_poll_timeouts == 4
+    assert scanner._diag_pre_scan_poll_timeout_details == [DETAIL]
+    assert scanner._diag_poll_timeouts == 0 and scanner._diag_poll_timeout_details == []
+    assert scanner._diag_cr_mismatches == 0 and scanner._diag_phase_seconds == {}
+    assert scanner._diag_warmup is None and scanner._diag_park_waits is None
+
+
+def test_whole_strip_sweep_reports_them_too():
+    with fast_time():
+        scanner = make_scanner(FakeUsbDevice(reg01=0x22, cal_buffers=_cal_buffers()))
+        scanner.initialize(ir=True)
+        own = scanner._diag_poll_timeouts
+        scanner._diag_poll_timeouts += 2
+        scanner._diag_poll_timeout_details.extend([dict(DETAIL), dict(DETAIL)])
+        scanner.sweep(1, 2, dpi=600, sink=lambda _chunk: None)
+    assert scanner.last_diag["pre_scan_poll_timeouts"] == own + 2
+    assert scanner.last_diag["pre_scan_poll_timeout_details"][-2:] == [DETAIL, DETAIL]
+
+
+def test_plain_sweep_reports_them_too():
+    # sweep(ir=False) is withdrawn (Test 112), so drive _sweep_plain directly
+    # over the fake bus, as _scan_plain's own test does through scan().
+    with fast_time():
+        scanner = _prepared(0)
+        own = scanner._diag_poll_timeouts
+        scanner._diag_poll_timeouts += 1
+        with scanner._operation("sweep"):
+            scanner._sweep_plain(1, 2, overscan_mm=0.0, sink=lambda _chunk: None)
+    assert scanner.last_diag["pre_scan_poll_timeouts"] == own + 1

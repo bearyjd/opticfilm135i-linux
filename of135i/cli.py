@@ -1832,6 +1832,7 @@ def _write_diag_sidecar(args: argparse.Namespace, scanner: Scanner, out: str,
     path = diag.sidecar_path(out)
     diag.write_sidecar(path, sidecar)
     print(f"wrote {path}")
+    diag.remove_stale_failure(out)
     gain_r, gain_g, gain_b = d.get("gain_codes", [0, 0, 0])
     off_r, off_g, off_b = d.get("offset_codes", [0, 0, 0])
     log.info(
